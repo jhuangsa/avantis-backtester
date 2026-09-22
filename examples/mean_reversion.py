@@ -4,13 +4,18 @@ The close crosses below a 4-bar average, so the next bar is bought.
 The close crosses back above that average, so the next bar is sold.
 A target and a stop sit 8 percent off the entry. On this series neither is hit.
 
-Run from the repository root, after `python3 -m pip install -e .`:
+From the repository root:
 
     python3 examples/mean_reversion.py
 """
 
 import math
 import sys
+from pathlib import Path
+
+# The package lives at the repository root. Running this file does not require
+# an editable install, and it works from any working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backtest import Bar, Cross, Hypothesis, Indicator, Price, backtest, grid
 

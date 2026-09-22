@@ -26,11 +26,13 @@ A test builds a small series and a hypothesis, then checks the trades: entry bar
 
 ## Quick start
 
-Buy when the close crosses below a 4-bar average, and sell when it crosses back above. The target and the stop are 8 percent of the entry. The series is ten made-up hourly bars: four quiet bars at 100, a dip to 96, then a climb back through the average.
+No install is required for this program. From the repository root:
 
 ```bash
 python3 examples/mean_reversion.py
 ```
+
+It buys when the close crosses below a 4-bar average, and sells when the close crosses back above. The target and the stop are 8 percent of the entry. The series is ten made-up hourly bars: four quiet bars at 100, a dip to 96, then a climb back through the average.
 
 You should see one trade. The dip crosses below the average on bar 4, so the fill is bar 5's open, 97. The close crosses back above the average on bar 6, so the exit is bar 7's open, 98. The cause is a rule exit. The ending stake is 98/97.
 
