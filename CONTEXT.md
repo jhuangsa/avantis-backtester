@@ -1,14 +1,18 @@
 # Hypothesis backtests
 
-A colleague's hypothesized rules are scored as tradable rules on one bar series. The result is a price return. It does not say whether the account took those trades.
+A hypothesis is scored as trades on one bar series. The result is a price return. It does not say whether the account took those trades.
 
 ## Language
 
 ### The hypothesis
 
 **Hypothesis**:
-A named tradable rule with a side, the conditions for getting in, and the ways of getting out. It is scored by the price return of its trades.
+A named position scored by the price return of its trades. It names a side, the conditions for getting in, a take profit, and a stop loss, or it names long, short, or flat from bars that have already closed.
 _Avoid_: strategy, day trade, setup
+
+**Action**:
+The position a hypothesis names at one bar from bars that have already closed: long, short, or flat. Flat is no position.
+_Avoid_: buy, sell, hold
 
 **Side**:
 The direction of the trade: long, short, or both. It belongs to the hypothesis and applies to whatever lines that hypothesis uses. It is fixed for the grid. The cross that enters or exits may point either way. A long or a short hypothesis names that side's entry only. A both hypothesis names the long entry and the short entry, and each of those sides may name its own rule exit.
@@ -67,7 +71,7 @@ A trade's rule exit and the other side's entry both true at the same close, with
 The last close, used as the exit price of a trade still open after the last bar's levels have been tested. It is in the compounded return. It is not a fill and pays no fee. The cause is still open.
 
 **Cause**:
-Why a trade ended: take profit, stop loss, rule exit, time exit, or still open.
+Why a trade ended: take profit, stop loss, rule exit, time exit, action, or still open. An action means the hypothesis named a different position.
 
 ### Comparisons
 

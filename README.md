@@ -2,6 +2,8 @@
 
 Score one hypothesis on a bar series you pass in. The result is the price change of each trade, compounded, with a cause on every trade. The engine does not read the account's fill files and does not resample.
 
+A hypothesis names entries, a target, and a stop, or it names long, short, or flat from bars that have already closed.
+
 The language is in [CONTEXT.md](CONTEXT.md). Decisions that are easy to undo by accident are in [docs/adr](docs/adr). Indicator formulas are in [docs/research/indicators.md](docs/research/indicators.md).
 
 Requires Python 3.13.

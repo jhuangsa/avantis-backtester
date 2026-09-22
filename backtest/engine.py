@@ -44,8 +44,16 @@ _VARY_KEYS = frozenset(
 _PRICE_FIELDS = frozenset({"open", "high", "low", "close"})
 _SIDES = frozenset({"long", "short", "both"})
 _CAUSES = frozenset(
-    {"take profit", "stop loss", "rule exit", "time exit", "still open"}
+    {
+        "take profit",
+        "stop loss",
+        "rule exit",
+        "time exit",
+        "action",
+        "still open",
+    }
 )
+_ACTIONS = frozenset({"long", "short", "flat"})
 
 
 @dataclass(frozen=True)
@@ -128,19 +136,23 @@ class Any:
 @dataclass(frozen=True)
 class Hypothesis:
     name: str
-    side: str
-    distance_kind: str = field(kw_only=True)
-    take_profit_size: float = field(kw_only=True)
-    stop_loss_size: float = field(kw_only=True)
+    side: str | None = None
+    distance_kind: str | None = field(default=None, kw_only=True)
+    take_profit_size: float | None = field(default=None, kw_only=True)
+    stop_loss_size: float | None = field(default=None, kw_only=True)
     long_entry: object | None = field(default=None, kw_only=True)
     short_entry: object | None = field(default=None, kw_only=True)
     long_rule_exit: object | None = field(default=None, kw_only=True)
     short_rule_exit: object | None = field(default=None, kw_only=True)
     time_exit: int | None = field(default=None, kw_only=True)
     atr_window: int | None = field(default=None, kw_only=True)
+    action: object | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
-        _validate_hypothesis(self)
+        if self.action is not None:
+            _validate_action(self)
+        else:
+            _validate_hypothesis(self)
 
 
 @dataclass(frozen=True)
@@ -174,6 +186,8 @@ def backtest(hypothesis, bars, *, fee=0.0, bar_size):
     _check_bar_size(bar_size)
     if not isinstance(hypothesis, Hypothesis):
         raise ValueError("hypothesis")
+    if hypothesis.action is not None:
+        return _backtest_action(hypothesis, bars, fee=fee, bar_size=bar_size)
     bars = tuple(bars)
     series = _compile(hypothesis, bars)
     atr_line = None
@@ -270,10 +284,58 @@ def backtest(hypothesis, bars, *, fee=0.0, bar_size):
     )
 
 
+class _Held(NamedTuple):
+    entry_bar: int
+    side: str
+    entry_price: float
+
+
+def _backtest_action(hypothesis, bars, *, fee, bar_size):
+    """The action at each bar sees only earlier bars, and fills at this open."""
+    bars = tuple(bars)
+    trades = []
+    stake = 1.0
+    held = None
+    last = len(bars) - 1
+    for i, bar in enumerate(bars):
+        if i == 0:
+            continue
+        # A non-finite fill, or a non-finite bar just closed, blocks the action.
+        if _finite_bar(bar) is None or _finite_bar(bars[i - 1]) is None:
+            continue
+        decision = hypothesis.action(bars[:i])
+        if decision not in _ACTIONS:
+            raise ValueError("action")
+        open_price = float(bar.open)
+        if held is not None and decision != held.side:
+            stake = _close(trades, stake, held, i, open_price, "action", fee, True)
+            held = None
+        if held is None and decision in ("long", "short"):
+            stake *= 1 - fee
+            held = _Held(i, decision, open_price)
+    if held is not None:
+        stake = _close(
+            trades,
+            stake,
+            held,
+            last,
+            float(bars[last].close),
+            "still open",
+            fee,
+            False,
+        )
+    return Result(
+        trades=tuple(trades),
+        ending_stake=stake,
+        parameters={"fee": float(fee)},
+        bar_size=bar_size,
+    )
+
+
 def grid(hypothesis, bars, *, fee=0.0, bar_size, vary=None):
     _check_fee(fee)
     _check_bar_size(bar_size)
-    if not isinstance(hypothesis, Hypothesis):
+    if not isinstance(hypothesis, Hypothesis) or hypothesis.action is not None:
         raise ValueError("hypothesis")
     if vary is None:
         vary = {}
@@ -686,6 +748,29 @@ def _distance_atr_window(hypothesis):
     if any(window != found[0] for window in found):
         raise ValueError("atr window")
     return found[0]
+
+
+def _validate_action(hypothesis):
+    if not callable(hypothesis.action):
+        raise ValueError("action")
+    if hypothesis.side is not None:
+        raise ValueError("side")
+    if hypothesis.distance_kind is not None:
+        raise ValueError("distance kind")
+    if hypothesis.take_profit_size is not None or hypothesis.stop_loss_size is not None:
+        raise ValueError("size")
+    if hypothesis.time_exit is not None or hypothesis.atr_window is not None:
+        raise ValueError("action")
+    if any(
+        rule is not None
+        for rule in (
+            hypothesis.long_entry,
+            hypothesis.short_entry,
+            hypothesis.long_rule_exit,
+            hypothesis.short_rule_exit,
+        )
+    ):
+        raise ValueError("action")
 
 
 def _validate_hypothesis(hypothesis):

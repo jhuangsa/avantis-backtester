@@ -458,7 +458,7 @@ def test_two_fee_cells_are_both_returned_and_neither_is_a_winner():
 
 def test_rejected_missing_stop_is_not_a_hypothesis():
     """Rejected 1. Both distances are required, so a missing stop is not a hypothesis."""
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="size"):
         Hypothesis(
             name="missing stop",
             side="long",
