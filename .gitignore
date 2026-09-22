@@ -1,6 +1,7 @@
 .DS_Store
 .venv/
 __pycache__/
+*.egg-info/
 
 # Trade exports are too large for git. Keep them in data/ locally.
 data/*.csv
