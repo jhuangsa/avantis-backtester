@@ -177,7 +177,7 @@ class _Position(NamedTuple):
     entry_bar: int
     side: str
     entry_price: float
-    target: float
+    target: float | None
     stop: float
 
 
@@ -487,16 +487,26 @@ def _try_open(hypothesis, stake, fee, bar_index, side, price, atr_line):
     return stake * (1 - fee), _Position(bar_index, side, price, target, stop)
 
 
-def _levels(side, entry, kind, take_profit, stop_loss, atr):
+def _target(side, entry, kind, take_profit, atr):
+    if take_profit is None:
+        return None
     if kind == "percent":
         if side == "long":
-            return entry * (1 + take_profit), entry * (1 - stop_loss)
-        return entry * (1 - take_profit), entry * (1 + stop_loss)
-    if atr is None:
+            return entry * (1 + take_profit)
+        return entry * (1 - take_profit)
+    return entry + take_profit * atr if side == "long" else entry - take_profit * atr
+
+
+def _levels(side, entry, kind, take_profit, stop_loss, atr):
+    if kind == "average true range" and atr is None:
         return None
+    if kind == "percent":
+        if side == "long":
+            return _target(side, entry, kind, take_profit, atr), entry * (1 - stop_loss)
+        return _target(side, entry, kind, take_profit, atr), entry * (1 + stop_loss)
     if side == "long":
-        return entry + take_profit * atr, entry - stop_loss * atr
-    return entry - take_profit * atr, entry + stop_loss * atr
+        return _target(side, entry, kind, take_profit, atr), entry - stop_loss * atr
+    return _target(side, entry, kind, take_profit, atr), entry + stop_loss * atr
 
 
 def _finite_bar(bar):
@@ -538,8 +548,14 @@ def _range_through(position, high, low):
 def _beyond(position, high_or_open, low_or_open):
     """Return stop-touched, target-touched. For an open, pass it as both prices."""
     if position.side == "long":
-        return low_or_open <= position.stop, high_or_open >= position.target
-    return high_or_open >= position.stop, low_or_open <= position.target
+        stop_hit = low_or_open <= position.stop
+        target_hit = (
+            position.target is not None and high_or_open >= position.target
+        )
+        return stop_hit, target_hit
+    stop_hit = high_or_open >= position.stop
+    target_hit = position.target is not None and low_or_open <= position.target
+    return stop_hit, target_hit
 
 
 def _close(trades, stake, position, exit_bar, exit_price, cause, fee, charge_fee):
@@ -722,7 +738,8 @@ def _parameters(hypothesis, fee):
         parameters["threshold"] = {
             name: thresholds[name] for name in sorted(thresholds)
         }
-    parameters["take_profit_size"] = float(hypothesis.take_profit_size)
+    if hypothesis.take_profit_size is not None:
+        parameters["take_profit_size"] = float(hypothesis.take_profit_size)
     parameters["stop_loss_size"] = float(hypothesis.stop_loss_size)
     if hypothesis.time_exit is not None:
         parameters["time_exit"] = hypothesis.time_exit
@@ -778,9 +795,11 @@ def _validate_hypothesis(hypothesis):
         raise ValueError("side")
     if hypothesis.distance_kind not in ("percent", "average true range"):
         raise ValueError("distance kind")
-    if not _positive(hypothesis.take_profit_size) or not _positive(
-        hypothesis.stop_loss_size
+    if hypothesis.take_profit_size is not None and not _positive(
+        hypothesis.take_profit_size
     ):
+        raise ValueError("size")
+    if not _positive(hypothesis.stop_loss_size):
         raise ValueError("size")
     if hypothesis.time_exit is not None and not _whole(hypothesis.time_exit):
         raise ValueError("time exit")
@@ -821,7 +840,8 @@ def _validate_entry(node):
         _check_comparison(node)
         return
     if isinstance(node, (Above, Below)):
-        raise ValueError("entry needs a cross")
+        _check_comparison(node)
+        return
     if isinstance(node, Any):
         if not node.parts:
             raise ValueError("entry needs a cross")

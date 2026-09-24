@@ -7,7 +7,7 @@ A hypothesis is scored as trades on one bar series. The result is a price return
 ### The hypothesis
 
 **Hypothesis**:
-A named position scored by the price return of its trades. It names a side, the conditions for getting in, a take profit, and a stop loss, or it names long, short, or flat from bars that have already closed.
+A named position scored by the price return of its trades. It names a side, the conditions for getting in, and a stop loss. It may name a take profit. Or it names long, short, or flat from bars that have already closed.
 _Avoid_: strategy, day trade, setup
 
 **Action**:
@@ -36,7 +36,7 @@ _Avoid_: a maker and taker schedule, funding
 ### Getting in and out
 
 **Entry**:
-A cross on a bar where every gate on that rule is also true. A gate is an above or a below. An above or a below by itself is not an entry. A both hypothesis has one entry for the long and one entry for the short.
+A cross, an above, or a below. On a cross, every gate on that rule must also be true. A gate is an above or a below. An above or a below by itself is an entry. A both hypothesis has one entry for the long and one entry for the short.
 
 **Tie**:
 A close, while the hypothesis is flat, on which the long entry and the short entry are both true. No trade opens. The crosses on that bar are not kept.
@@ -48,14 +48,14 @@ An optional way out caused by a cross, an above, or a below, evaluated only whil
 An optional way out a fixed number of bars after entry. The count is a positive whole number. The bar of the fill is bar 1. For a cross on bar t and a count of N, it is known at the close of bar t+N, and the price is the open of the following bar. If that same close is also a rule exit, the cause is the rule exit. A level fill on that bar has already closed the trade. A time exit does not open the other side.
 
 **Distance**:
-How a take profit and a stop loss sit away from the entry price. The kind is a percent of that price, or a multiple of the average true range of the last closed bar before the fill. A hypothesis uses one kind for both sides. The kind is fixed for the grid. The two sizes are positive parameters. The average-true-range window is 14 unless the hypothesis names another, and that window is a parameter. The same two sizes apply to a long and to a short.
+How a take profit and a stop loss sit away from the entry price. The kind is a percent of that price, or a multiple of the average true range of the last closed bar before the fill. A hypothesis uses one kind for both sides. The kind is fixed for the grid. The stop size is a positive parameter. The take-profit size, when the hypothesis names one, is a positive parameter. The average-true-range window is 14 unless the hypothesis names another, and that window is a parameter. The same sizes apply to a long and to a short.
 
 **Take profit**:
-The gain-side distance from the entry price. On a short it sits below the entry.
+The gain-side distance from the entry price. On a short it sits below the entry. A hypothesis may omit it, and then that level is not placed.
 _Avoid_: trailing stop, a fixed price chosen before the entry
 
 **Stop loss**:
-The loss-side distance from the entry price, using the same kind of distance as the take profit. On a short it sits above the entry. When a bar's high and low contain both this level and the take profit, the stop loss is the way out.
+The loss-side distance from the entry price, using the same kind of distance as the take profit. On a short it sits above the entry. When a bar's high and low contain both this level and the take profit, the stop loss is the way out. When the take profit is omitted, the stop is the only level.
 _Avoid_: trailing stop, a fixed price chosen before the entry
 
 **Open fill**:

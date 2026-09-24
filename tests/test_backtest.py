@@ -468,10 +468,44 @@ def test_rejected_missing_stop_is_not_a_hypothesis():
         )
 
 
-def test_rejected_above_only_entry():
-    """Rejected 2. An above by itself is not an entry."""
-    with pytest.raises(ValueError):
-        long_cross(entry=Above(Price(), Threshold(10, "level")))
+def test_above_entry_fills_next_open_and_the_stop_without_a_target():
+    """An above is an entry. With no take profit, the stop is the only level."""
+    bars = series(
+        (10, 10, 10, 10),
+        (10, 11, 10, 11),
+        (10, 10, 10, 10),
+        (10, 10, 7, 9),
+    )
+    result = run(
+        long_cross(entry=Above(Price(), Threshold(10, "level")), tp=None), bars
+    )
+    assert "take_profit_size" not in result.parameters
+    near(result.parameters["stop_loss_size"], 1 / 5)
+    assert len(result.trades) == 1
+    assert_trade(result.trades[0], 2, 3, "long", 10, 8, "stop loss")
+    near(result.ending_stake, 8 / 10)
+
+
+def test_staying_above_reenters_only_after_the_trade_is_flat():
+    """A state that stays true does not add a second trade. It can enter again once flat."""
+    bars = series(
+        (10, 10, 10, 10),
+        (10, 11, 10, 11),
+        (12, 12, 12, 12),
+        (13, 13, 13, 13),
+        (14, 14, 14, 14),
+        (14, 14, 14, 14),
+    )
+    result = run(
+        long_cross(
+            entry=Above(Price(), Threshold(10, "level")), tp=None, time_exit=1
+        ),
+        bars,
+    )
+    assert len(result.trades) == 2
+    assert_trade(result.trades[0], 2, 3, "long", 12, 13, "time exit")
+    assert_trade(result.trades[1], 4, 5, "long", 14, 14, "time exit")
+    near(result.ending_stake, 13 / 12)
 
 
 def test_rejected_long_that_also_carries_a_short_entry():
@@ -526,16 +560,10 @@ def test_rejected_time_exit_of_zero():
         long_cross(time_exit=0)
 
 
-def test_rejected_any_branch_without_a_cross():
-    """Rejected 7. A branch that can open a trade must contain a cross."""
-    entry = Any(
-        parts=(
-            Cross(Price(), Threshold(10, "level"), "above"),
-            Above(Price(), Threshold(12, "gate")),
-        )
-    )
+def test_rejected_any_branch_without_a_comparison():
+    """Rejected 7. An empty branch cannot open a trade."""
     with pytest.raises(ValueError):
-        long_cross(entry=entry)
+        long_cross(entry=Any(parts=()))
 
 
 def test_sma_cross_waits_until_both_bars_are_defined():
