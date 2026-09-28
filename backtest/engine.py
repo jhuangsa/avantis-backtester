@@ -81,6 +81,21 @@ class Threshold:
 
 
 @dataclass(frozen=True)
+class Line:
+    """A caller-built series, one value per bar. None is undefined."""
+
+    name: str
+    values: tuple
+
+    def __post_init__(self):
+        if not isinstance(self.name, str) or self.name == "":
+            raise ValueError("line")
+        if isinstance(self.values, (str, bytes)) or not isinstance(self.values, Sequence):
+            raise ValueError("line")
+        object.__setattr__(self, "values", tuple(self.values))
+
+
+@dataclass(frozen=True)
 class Indicator:
     kind: str
     name: str
@@ -459,7 +474,7 @@ def _map_operand(operand, windows, thresholds):
         return replace(operand, value=thresholds[operand.name])
     if isinstance(operand, Indicator) and operand.name in windows:
         return replace(operand, window=windows[operand.name])
-    if isinstance(operand, (Price, Threshold, Indicator)):
+    if isinstance(operand, (Price, Threshold, Indicator, Line)):
         return operand
     raise ValueError("operand")
 
@@ -690,6 +705,9 @@ def _compile(hypothesis, bars):
                 count,
             )
             return
+        if isinstance(operand, Line):
+            series[id(operand)] = _as_line(operand.values, count)
+            return
         raise ValueError("operand")
 
     for rule in _rules(hypothesis):
@@ -909,6 +927,8 @@ def _check_operand(operand):
         return
     if isinstance(operand, Indicator):
         _validate_indicator(operand)
+        return
+    if isinstance(operand, Line):
         return
     raise ValueError("operand")
 
