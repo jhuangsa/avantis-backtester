@@ -24,14 +24,17 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 
 **C++** (`cpp/`, built with `cpp/CMakeLists.txt`):
 - `include/avbt/indicators.hpp`, `src/indicators.cpp`: the `Bars` struct and the indicators.
-- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, liquidation, hard stop); ADR 0008.
+- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, fees, liquidation, hard stop); ADR 0008.
+- `include/avbt/backtest.hpp`: `Order`, `Trade`, the `Strategy` concept, and the `backtest` template loop; ADR 0009.
+- `include/avbt/strategies.hpp`: the five Veranta strategies.
+- `python/avbt_py.cpp`: the pybind11 module `avbt_cpp`.
 - `tests/test_*.cpp`: plain test programs; exit code 0 is a pass.
 - Build from `cpp/`: `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build --output-on-failure`. `build/` is generated.
 
-**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`). The `.html` files are their outputs.
+**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`), its rules scored in Python (`veranta_rules.py`) and in C++ against Python (`veranta_rules_cpp.py`). The `.html` files are their outputs.
 
 **Trader history analysis**: `analysis/make_charts.py` reads `data/` and writes `docs/figures/`. Results are in `docs/findings.md`.
 
-**Data**: `data/*.csv` and `Wonyotti Trading History/` are local-only fill exports, ignored by git. Private database notes are in `docs/database.md`, ignored by git; never commit or push it.
+**Data**: `data/*.csv` and `Wonyotti Trading History/` are local-only fill exports, ignored by git. `data/candles/` holds downloaded market candles that the examples reuse; it is ignored by git and never committed. Private database notes are in `docs/database.md`, ignored by git; never commit or push it.
 
 **Setup**: `README.md` (Python 3.13, `pip install -e '.[test]'`).

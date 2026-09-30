@@ -3,6 +3,7 @@
 // or std::vector once; outputs are moved into a numpy array without a copy.
 
 #include "avbt/indicators.hpp"
+#include "avbt/strategies.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -70,6 +71,42 @@ avbt::Side side_named(const std::string& name) {
     throw std::invalid_argument("side must be long or short, got " + name);
 }
 
+const char* cause_name(avbt::Cause c) {
+    switch (c) {
+        case avbt::Cause::Stop: return "stop";
+        case avbt::Cause::TakeProfit: return "take_profit";
+        case avbt::Cause::Liquidation: return "liquidation";
+        case avbt::Cause::HardStop: return "hard_stop";
+        case avbt::Cause::Order: return "order";
+    }
+    return "order";
+}
+
+// Runs one strategy with its default params and returns the result as a dict.
+template <class S>
+py::dict run(const avbt::Bars& bars, const avbt::PortfolioSettings& settings) {
+    S strategy;
+    avbt::Result r = avbt::backtest(strategy, bars, settings);
+    py::list trades;
+    for (const avbt::Trade& t : r.trades) {
+        py::dict d;
+        d["entry_bar"] = t.entry_bar;
+        d["exit_bar"] = t.exit_bar;
+        d["side"] = t.side == avbt::Side::Long ? "long" : "short";
+        d["entry_price"] = t.entry_price;
+        d["exit_price"] = t.exit_price;
+        d["result"] = t.result;
+        d["cause"] = cause_name(t.cause);
+        trades.append(d);
+    }
+    py::dict out;
+    out["trades"] = trades;
+    out["equity"] = to_numpy(std::move(r.equity));
+    out["ending_balance"] = r.ending_balance;
+    out["bar_size_seconds"] = r.bar_size_seconds;
+    return out;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(avbt_cpp, m) {
@@ -80,6 +117,22 @@ PYBIND11_MODULE(avbt_cpp, m) {
              py::arg("high"), py::arg("low"), py::arg("close"), py::arg("minutes_with_data"))
         .def_readonly("bar_size_seconds", &avbt::Bars::bar_size_seconds)
         .def("__len__", [](const avbt::Bars& b) { return b.ts.size(); });
+
+    py::class_<avbt::PortfolioSettings>(m, "PortfolioSettings")
+        .def(py::init([](double starting_balance, double risk_per_trade, double hard_stop) {
+                 return avbt::PortfolioSettings{starting_balance, risk_per_trade, hard_stop};
+             }),
+             py::arg("starting_balance") = 10000.0, py::arg("risk_per_trade") = 0.01,
+             py::arg("hard_stop") = 0.30)
+        .def_readwrite("starting_balance", &avbt::PortfolioSettings::starting_balance)
+        .def_readwrite("risk_per_trade", &avbt::PortfolioSettings::risk_per_trade)
+        .def_readwrite("hard_stop", &avbt::PortfolioSettings::hard_stop);
+
+    m.def("late_day_short", &run<avbt::LateDayShort>, py::arg("bars"), py::arg("settings"));
+    m.def("rally_short", &run<avbt::RallyShort>, py::arg("bars"), py::arg("settings"));
+    m.def("campaign_short", &run<avbt::CampaignShort>, py::arg("bars"), py::arg("settings"));
+    m.def("spike_short", &run<avbt::SpikeShort>, py::arg("bars"), py::arg("settings"));
+    m.def("gold_trend_long", &run<avbt::GoldTrendLong>, py::arg("bars"), py::arg("settings"));
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));
