@@ -50,6 +50,11 @@ def summary(title, frames, r):
     trades = r["trades"]
     equity = pd.Series(r["equity"])
     drawdown = (equity / equity.cummax() - 1).min()
+    # Mean over standard deviation of the bar-to-bar equity returns, times
+    # the square root of the bars in a year. Risk-free rate 0.
+    returns = equity.pct_change().dropna()
+    per_year = 365 * 24 * 3600 / r["bar_size_seconds"]
+    sharpe = returns.mean() / returns.std() * per_year ** 0.5 if returns.std() > 0 else float("nan")
     causes = pd.Series([t["cause"] for t in trades]).value_counts().to_dict()
     wins = sum(t["result"] > 0 for t in trades)
     df = next(iter(frames.values()))
@@ -64,6 +69,7 @@ def summary(title, frames, r):
         "ending balance": f"{r['ending_balance']:,.2f}",
         "return": f"{r['ending_balance'] / 10000 - 1:+.2%}",
         "max drawdown": f"{drawdown:.2%}",
+        "sharpe": f"{sharpe:.2f}",
         "exits": ", ".join(f"{k} {v}" for k, v in sorted(causes.items())),
     }
 
@@ -109,6 +115,9 @@ table{{border-collapse:collapse;font-size:13px}}td,th{{padding:4px 10px;text-ali
 <h1>Veranta strategies in C++</h1>
 <p>Starting balance 10,000; 1% of the balance risked per trade at its stop; fee 1 basis point of
 notional at every fill; leverage 1. Equity is the balance plus open positions valued at each bar's close.
+Sharpe is the mean of the hourly equity returns divided by their standard deviation,
+times the square root of 8,760 (the hours in a year; these markets trade every hour), with a
+risk-free rate of 0.
 The last chart copies strategies 1 and 2 into one strategy on one ZORA account: the strategy that
 opens the position owns it, and the other's entries wait until it closes.</p>
 {table}
