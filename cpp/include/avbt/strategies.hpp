@@ -1,0 +1,150 @@
+#pragma once
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include "avbt/backtest.hpp"
+#include "avbt/indicators.hpp"
+
+namespace avbt {
+
+// The five ideas in examples/veranta_rules.py. Each entry is known at bar
+// t's close and fills at the next open. Stops and take profits are levels
+// the portfolio fills; strategies only return entries, time exits, and rule
+// exits. Defaults are the figures in veranta_rules.py.
+
+// Shared decide: while a position is open, return a close order for a time
+// exit or a rule exit; otherwise open when the entry holds. A time exit of N
+// closes at the open after bar signal + N, the bar of the fill being bar 1.
+// signal_bar is read only while a position is open and is overwritten by
+// every new entry, so a trade closed by a level leaves no stale memory.
+template <class S>
+std::vector<Order> decide_entry_and_exits(S& s, int t, const std::vector<Position>& positions) {
+    const auto& p = s.params;
+    if (!positions.empty()) {
+        bool timed = p.time_exit > 0 && t - s.signal_bar >= p.time_exit;
+        bool ruled = false;
+        if constexpr (requires { s.rule_exit(t); }) ruled = s.rule_exit(t);
+        if (timed || ruled) return {Order{.kind = Order::Kind::Close, .instrument = p.instrument}};
+        return {};
+    }
+    if (!s.entry(t)) return {};
+    s.signal_bar = t;
+    return {Order{.kind = Order::Kind::Open, .instrument = p.instrument, .side = p.side,
+                  .stop_distance = p.stop, .take_profit_distance = p.take_profit,
+                  .leverage = p.leverage, .fee_rate = p.fee_rate}};
+}
+
+// 1. Short ZORA at a 16:00 UTC bar after a 72-bar rise of at least 10%.
+struct LateDayShort {
+    struct Params {
+        std::string instrument = "ZORA";
+        Side side = Side::Short;
+        int hour = 16, lag = 72;
+        double rise = 0.10, take_profit = 0.02, stop = 0.05;
+        int time_exit = 3;
+        double leverage = 1.0, fee_rate = 0.0001;
+    } params;
+    std::vector<double> hour, rise;
+    int signal_bar = -1;
+
+    void prepare(const Bars& b) { hour = hour_of_day(b); rise = pct_change(b.close, params.lag); }
+    bool entry(int t) const { return hour[t] == params.hour && rise[t] >= params.rise; }
+    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, t, positions);
+    }
+};
+
+// 2. Short ZORA after a 24-bar rise of at least 10% with the close above its 21-bar average.
+struct RallyShort {
+    struct Params {
+        std::string instrument = "ZORA";
+        Side side = Side::Short;
+        int lag = 24, window = 21;
+        double rise = 0.10, take_profit = 0.02, stop = 0.05;
+        int time_exit = 4;
+        double leverage = 1.0, fee_rate = 0.0001;
+    } params;
+    std::vector<double> close, rise, average;
+    int signal_bar = -1;
+
+    void prepare(const Bars& b) {
+        close = b.close;
+        rise = pct_change(b.close, params.lag);
+        average = sma(b.close, params.window);
+    }
+    bool entry(int t) const { return rise[t] >= params.rise && close[t] > average[t]; }
+    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, t, positions);
+    }
+};
+
+// 3. Short AVNT after a 24-bar rise of at least 9%, held up to 120 bars.
+struct CampaignShort {
+    struct Params {
+        std::string instrument = "AVNT";
+        Side side = Side::Short;
+        int lag = 24;
+        double rise = 0.09, take_profit = 0.20, stop = 0.30;
+        int time_exit = 120;
+        double leverage = 1.0, fee_rate = 0.0001;
+    } params;
+    std::vector<double> rise;
+    int signal_bar = -1;
+
+    void prepare(const Bars& b) { rise = pct_change(b.close, params.lag); }
+    bool entry(int t) const { return rise[t] >= params.rise; }
+    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, t, positions);
+    }
+};
+
+// 4. Short DYM in a bar whose high is more than 5% over the previous close.
+struct SpikeShort {
+    struct Params {
+        std::string instrument = "DYM";
+        Side side = Side::Short;
+        double spike = 0.05, take_profit = 0.06, stop = 0.08;
+        int time_exit = 16;
+        double leverage = 1.0, fee_rate = 0.0001;
+    } params;
+    std::vector<double> spike;
+    int signal_bar = -1;
+
+    void prepare(const Bars& b) { spike = bar_change(b, Field::High, Field::Close, 1); }
+    bool entry(int t) const { return spike[t] > params.spike; }
+    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, t, positions);
+    }
+};
+
+// 5. Long gold above its 55-bar average after a positive 72-bar drift; out
+// when the close falls below the average. No take profit, no time exit.
+struct GoldTrendLong {
+    struct Params {
+        std::string instrument = "GOLD";
+        Side side = Side::Long;
+        int window = 55, lag = 72;
+        double take_profit = std::nan(""), stop = 0.015;
+        int time_exit = 0;
+        double leverage = 1.0, fee_rate = 0.0001;
+    } params;
+    std::vector<double> close, average, drift;
+    int signal_bar = -1;
+
+    void prepare(const Bars& b) {
+        close = b.close;
+        average = sma(b.close, params.window);
+        drift = pct_change(b.close, params.lag);
+    }
+    bool entry(int t) const { return close[t] > average[t] && drift[t] > 0.0; }
+    bool rule_exit(int t) const { return close[t] < average[t]; }
+    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, t, positions);
+    }
+};
+
+static_assert(Strategy<LateDayShort> && Strategy<RallyShort> && Strategy<CampaignShort> &&
+              Strategy<SpikeShort> && Strategy<GoldTrendLong>);
+
+}
