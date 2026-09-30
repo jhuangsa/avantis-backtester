@@ -1,14 +1,37 @@
 # avantis-backtester
 
-The glossary is CONTEXT.md. The decisions are docs/adr/. The formulas are docs/research/indicators.md.
+Scores one hypothesis on one caller-supplied bar series. Python engine, with a C++ indicator library in progress.
 
-Line: an operand that is a series — an indicator output, a price, or a level.
-Operand: one side of a comparison.
-Rule: a cross, an above, a below, or an all or any of those.
-Hypothesis: a named side, its entries, a stop loss, and any take profit, rule exit, or time exit. Or long, short, or flat, named from bars that have already closed, with no target and no stop.
-Backtest: one hypothesis scored on one caller-supplied series, yielding trades, causes, ending stake, parameters, and bar size.
-Grid: that backtest repeated over the listed numeric parameters; every cell is returned and none is a winner.
+## Guards
 
-Guards: next-open fill; no trade on an undefined operand; a cross is two bars; a swing publishes at confirmation; every result names the bar size; the caller chooses the slice; the score is price percent.
+Every change keeps these true: next-open fill; no trade on an undefined operand; a cross is two bars; a swing publishes at confirmation; every result names the bar size; the caller chooses the slice; the score is price percent. The engine does not read the fill files.
 
-The engine does not read the fill files.
+## Where to look
+
+**Terms** (hypothesis, rule, line, operand, backtest, grid): `CONTEXT.md`. Use its words and its _Avoid_ lists.
+
+**Decisions** that are easy to undo by accident: `docs/adr/`, one file per decision, numbered. Read the matching ADR before changing entries, stops, targets, or fills.
+
+**Indicator formulas and defaults**: `docs/research/indicators.md`. Lookahead and other ways a backtest lies: `docs/research/backtest-pitfalls.md`. API naming research: `docs/research/backtest-apis.md`.
+
+**Python engine** (`backtest/`):
+- `engine.py`: hypotheses, rules, the backtest, and the grid.
+- `lines.py`: SMA and average true range.
+- `catalog.py`: every other indicator kind, aligned to the caller's bars.
+- `__init__.py`: the public names.
+
+**Python tests**: `tests/`, run with `python3 -m pytest` from the root. Tests build their own series and never read `data/`.
+
+**C++ indicators** (`cpp/`, built with `cpp/CMakeLists.txt`):
+- `include/avbt/indicators.hpp`: the `Bars` struct and indicator declarations.
+- `src/indicators.cpp`: the indicator bodies.
+- `tests/test_indicators.cpp`: a plain test program; exit code 0 is a pass.
+- Build from `cpp/`: `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build --output-on-failure`. `build/` is generated.
+
+**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`). The `.html` files are their outputs.
+
+**Trader history analysis**: `analysis/make_charts.py` reads `data/` and writes `docs/figures/`. Results are in `docs/findings.md`.
+
+**Data**: `data/*.csv` and `Wonyotti Trading History/` are local-only fill exports, ignored by git. Private database notes are in `docs/database.md`, ignored by git; never commit or push it.
+
+**Setup**: `README.md` (Python 3.13, `pip install -e '.[test]'`).
