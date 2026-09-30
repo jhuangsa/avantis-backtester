@@ -126,6 +126,75 @@ void test_prior_max_rejects_bad_n(int n) {
     }
 }
 
+// ---- prior_min ----
+
+void test_prior_min_basic() {
+    check_series("prior_min basic", avbt::prior_min({3, 1, 4, 1, 5, 9, 2}, 3),
+                 {NaN, NaN, NaN, 1, 1, 1, 1});
+}
+
+// The old minimum (1 at index 0) reaches the top after it has left the window.
+void test_prior_min_old_min_leaves() {
+    check_series("prior_min old min leaves", avbt::prior_min({1, 9, 9, 9}, 2),
+                 {NaN, NaN, 1, 9});
+}
+
+// Bar t is excluded: a new low at t does not show until t + 1.
+void test_prior_min_excludes_current_bar() {
+    check_series("prior_min excludes bar t", avbt::prior_min({5, 4, 0, 6}, 2),
+                 {NaN, NaN, 4, 0});
+}
+
+void test_prior_min_window_one() {
+    check_series("prior_min n 1", avbt::prior_min({5, 3, 8}, 1),
+                 {NaN, 5, 3});
+}
+
+void test_prior_min_empty() {
+    check_series("prior_min empty", avbt::prior_min({}, 3), {});
+}
+
+void test_prior_min_rejects_bad_n(int n) {
+    const std::string label = "prior_min n " + std::to_string(n);
+    try {
+        avbt::prior_min({1, 2, 3}, n);
+        fail(label, "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
+// ---- pct_change ----
+
+void test_pct_change_lag_one() {
+    check_series("pct_change lag 1", avbt::pct_change({100, 110, 99}, 1),
+                 {NaN, 0.1, -0.1});
+}
+
+void test_pct_change_lag_two() {
+    check_series("pct_change lag 2", avbt::pct_change({100, 50, 150, 25}, 2),
+                 {NaN, NaN, 0.5, -0.5});
+}
+
+void test_pct_change_lag_longer_than_series() {
+    check_series("pct_change lag > size", avbt::pct_change({1, 2}, 24),
+                 {NaN, NaN});
+}
+
+void test_pct_change_empty() {
+    check_series("pct_change empty", avbt::pct_change({}, 1), {});
+}
+
+void test_pct_change_rejects_bad_lag(int lag) {
+    const std::string label = "pct_change lag " + std::to_string(lag);
+    try {
+        avbt::pct_change({1, 2, 3}, lag);
+        fail(label, "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -144,6 +213,21 @@ int main() {
     test_prior_max_empty();
     test_prior_max_rejects_bad_n(0);
     test_prior_max_rejects_bad_n(-1);
+
+    test_prior_min_basic();
+    test_prior_min_old_min_leaves();
+    test_prior_min_excludes_current_bar();
+    test_prior_min_window_one();
+    test_prior_min_empty();
+    test_prior_min_rejects_bad_n(0);
+    test_prior_min_rejects_bad_n(-1);
+
+    test_pct_change_lag_one();
+    test_pct_change_lag_two();
+    test_pct_change_lag_longer_than_series();
+    test_pct_change_empty();
+    test_pct_change_rejects_bad_lag(0);
+    test_pct_change_rejects_bad_lag(-1);
 
     if (failures == 0) {
         std::printf("All checks passed.\n");

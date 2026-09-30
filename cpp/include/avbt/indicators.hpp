@@ -15,6 +15,10 @@ std::vector<double> sma(const std::vector<double>& series, int period);
 
 std::vector<double> prior_max(const std::vector<double>& series, int period);
 
+std::vector<double> prior_min(const std::vector<double>& series, int period);
+
+std::vector<double> pct_change(const std::vector<double>& series, int lag);
+
 
 }
 
