@@ -35,6 +35,8 @@ import vector_indicators as vec  # noqa: E402
 OUT = ROOT / "examples" / "cpp_indicators_btc.html"
 RULES = {"1m": "1min", "1h": "1h", "1d": "1D"}
 REPEATS = 7
+# The C++ timeframe of each pandas rule above.
+TIMEFRAME = {"1min": avbt_cpp.Timeframe.Min1, "1h": avbt_cpp.Timeframe.Hour1, "1D": avbt_cpp.Timeframe.Day1}
 
 
 def cpp_suite(bars, df):
@@ -73,9 +75,9 @@ def vec_suite(df):
     }
 
 
-def make_bars(df, bar_size_seconds):
+def make_bars(df, timeframe):
     return avbt_cpp.Bars(
-        bar_size_seconds,
+        timeframe,
         df["ts"].to_numpy(np.int64),
         df["open"].to_numpy(),
         df["high"].to_numpy(),
@@ -102,8 +104,8 @@ def compare(cpp, vect):
 
 
 def run(label, rule):
-    df, bar_size_seconds = btc_bars.load_bars(rule)
-    bars = make_bars(df, bar_size_seconds)
+    df, _ = btc_bars.load_bars(rule)
+    bars = make_bars(df, TIMEFRAME[rule])
     cpp = cpp_suite(bars, df)
     vect = vec_suite(df)
     parity = compare(cpp, vect)
@@ -134,9 +136,9 @@ def run(label, rule):
         ),
     }
     timings = {name: (best_seconds(c), best_seconds(v)) for name, (c, v) in calls.items()}
-    bars_seconds = best_seconds(lambda: make_bars(df, bar_size_seconds))
+    bars_seconds = best_seconds(lambda: make_bars(df, TIMEFRAME[rule]))
 
-    print(f"\n{label}: {len(df):,} bars, {int((df['minutes'] == 0).sum()):,} filled forward")
+    print(f"\n{label}: {len(df):,} bars, {int((df['minutes_with_data'] == 0).sum()):,} filled forward")
     for name, same_nan, diff in parity:
         flag = "ok" if same_nan and diff < 1e-6 else "MISMATCH"
         print(f"  {name:<14} NaN pattern {'same' if same_nan else 'DIFFERENT'}  max |diff| {diff:.3g}  {flag}")

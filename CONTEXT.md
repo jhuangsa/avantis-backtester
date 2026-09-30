@@ -149,7 +149,14 @@ _Avoid_: a book of several instruments, ticks
 The single market a series covers.
 
 **Bar size**:
-The spacing of the series a backtest is scored on. It is part of the result.
+The spacing of the series a backtest is scored on. It is part of the result. In the C++ engine it is a timeframe.
+
+**Timeframe**:
+The length of one bar, one of twelve fixed values from 1 minute to 1 month (`Timeframe`). A C++ market can carry several. See ADR 0011.
+_Avoid_: interval, resolution
+
+**Base**:
+The finest timeframe of a market, the first in its list. Orders fill at its opens, and stops and take profits are checked on its highs and lows. Every market in one run has the same base.
 
 ### The portfolio
 
@@ -175,15 +182,15 @@ What a strategy returns at the close of a bar: open or close, the instrument, th
 _Avoid_: signal, a fill
 
 **Market**:
-In the C++ engine, one instrument's name and its bars.
+In the C++ engine, one instrument's name and its bars on one or more timeframes, finest first.
 _Avoid_: asset, symbol, feed
 
 **Markets**:
-The markets one C++ backtest runs on, all on one clock. A strategy sees every market and reads the ones it needs. See ADR 0010.
+The markets one C++ backtest runs on, all on one clock. A strategy sees every market and reads the ones it needs. See ADR 0010, 0011.
 _Avoid_: universe, basket
 
 **Clock**:
-The one list of bar timestamps that every market in a backtest shares, so bar t is the same moment in each. The caller aligns the markets; the C++ engine refuses markets that differ in bar size, length, or any timestamp.
+The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. The C++ engine refuses markets with different base timeframes.
 _Avoid_: calendar, index
 
 **Hard stop**:

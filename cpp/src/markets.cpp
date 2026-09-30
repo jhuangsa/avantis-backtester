@@ -1,40 +1,80 @@
 #include "avbt/markets.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace avbt {
 
+namespace {
+
+// Throws when the bars are empty, their columns differ in length, or their timestamps do not rise.
+void check_bars(const std::string& instrument, const Bars& b) {
+    std::string where = instrument + ", " + name(b.timeframe) + ": ";
+    std::size_t n = b.ts.size();
+    if (n == 0) throw std::invalid_argument(where + "no bars");
+    if (b.open.size() != n || b.high.size() != n || b.low.size() != n ||
+        b.close.size() != n || b.minutes_with_data.size() != n) {
+        throw std::invalid_argument(where + "every Bars column must be the same size");
+    }
+    for (std::size_t i = 1; i < n; ++i) {
+        if (b.ts[i] <= b.ts[i - 1]) throw std::invalid_argument(where + "timestamps must rise");
+    }
+}
+
+}
+
 Markets Markets::make(std::vector<Market> markets) {
     if (markets.empty()) throw std::invalid_argument("Markets needs at least one market");
-    const Bars& first = markets.front().bars;
+    std::vector<int64_t> clock;
     for (std::size_t i = 0; i < markets.size(); ++i) {
         const Market& m = markets[i];
-        const Bars& b = m.bars;
-        std::size_t n = b.ts.size();
-        if (b.open.size() != n || b.high.size() != n || b.low.size() != n ||
-            b.close.size() != n || b.minutes_with_data.size() != n) {
-            throw std::invalid_argument(m.instrument + ": every Bars column must be the same size");
-        }
+        if (m.timeframes.empty()) throw std::invalid_argument(m.instrument + ": no timeframes");
         for (std::size_t j = 0; j < i; ++j) {
             if (markets[j].instrument == m.instrument) {
                 throw std::invalid_argument(m.instrument + ": two markets have this name");
             }
         }
-        if (b.bar_size_seconds != first.bar_size_seconds) {
-            throw std::invalid_argument(m.instrument + ": bar size differs from the first market");
+        for (std::size_t k = 0; k < m.timeframes.size(); ++k) {
+            check_bars(m.instrument, m.timeframes[k]);
+            // Strictly finer to coarser, which also rules out a timeframe twice.
+            if (k > 0 && m.timeframes[k].timeframe <= m.timeframes[k - 1].timeframe) {
+                throw std::invalid_argument(m.instrument + ": timeframes must go finest first, each once");
+            }
         }
-        if (b.ts != first.ts) {
-            throw std::invalid_argument(m.instrument + ": timestamps differ from the first market");
+        const Bars& base = m.timeframes.front();
+        if (base.timeframe != markets.front().timeframes.front().timeframe) {
+            throw std::invalid_argument(m.instrument + ": base timeframe differs from the first market");
         }
+        clock.insert(clock.end(), base.ts.begin(), base.ts.end());
     }
-    return Markets(std::move(markets));
+    std::sort(clock.begin(), clock.end());
+    clock.erase(std::unique(clock.begin(), clock.end()), clock.end());
+    return Markets(std::move(markets), std::move(clock));
 }
 
-const Bars& Markets::at(const std::string& instrument) const {
+const Market& Markets::find(const std::string& instrument) const {
     for (const Market& m : markets_) {
-        if (m.instrument == instrument) return m.bars;
+        if (m.instrument == instrument) return m;
     }
     throw std::invalid_argument("no market named " + instrument);
+}
+
+const Bars& Markets::at(const std::string& instrument, Timeframe tf) const {
+    for (const Bars& b : find(instrument).timeframes) {
+        if (b.timeframe == tf) return b;
+    }
+    throw std::invalid_argument(instrument + ": no bars on " + name(tf));
+}
+
+const Bars& Markets::base(const std::string& instrument) const {
+    return find(instrument).timeframes.front();
+}
+
+int Markets::bar_at(const std::string& instrument, int t) const {
+    const std::vector<int64_t>& ts = base(instrument).ts;
+    auto it = std::lower_bound(ts.begin(), ts.end(), clock_[t]);
+    if (it == ts.end() || *it != clock_[t]) return -1;
+    return static_cast<int>(it - ts.begin());
 }
 
 }

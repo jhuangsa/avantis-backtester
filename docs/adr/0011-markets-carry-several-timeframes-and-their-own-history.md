@@ -1,0 +1,17 @@
+# Markets carry several timeframes and their own history
+
+This replaces the clock rules of [ADR 0010](0010-a-cpp-backtest-runs-on-markets-on-one-clock.md). The rest of ADR 0010 stands: orders fill at the next open of their own instrument, closes fill before opens, and `Combined` runs several strategies in one account.
+
+A timeframe is the length of one bar. `Timeframe` is an enum of twelve values: 1, 3, 5, 15, and 30 minutes; 1, 4, 8, and 12 hours; 1 day; 1 week; 1 month. No other length is allowed, so a bar size cannot be a typo. `Bars` holds one instrument on one timeframe and names it in `Bars::timeframe`. Every result names its base timeframe.
+
+A `Market` is an instrument and a list of `Bars`, finest first. The first is the base. Fills happen at the base opens, and stops and take profits are checked on the base highs and lows. The coarser timeframes are for the strategy to read. Daytraders decide on several timeframes at once, such as a 4-hour trend and a 15-minute entry, so a strategy needs them side by side.
+
+One base keeps fills and levels simple: a position is checked on one series, whatever timeframes the strategy reads. The base is the finest timeframe loaded, usually 1 minute. A fine base also makes exits exact. A 1-minute bar rarely holds both a stop and a take profit, so the rule in ADR 0003 seldom applies, and nothing has to drill down from a coarse bar to find which level came first. The caller can still load 1 hour as the base and accept the wider bars.
+
+Python builds every timeframe of a market from the same 1-minute candles. Empty bars are filled flat, so a series has no gaps: bar i ends when bar i+1 opens. Bars start on UTC boundaries, weeks start on Monday, and months are calendar months.
+
+Markets have different histories, so they no longer share one length. The clock is every base bar open of every market, sorted, with no repeats. A market joins at its first bar. An order for a market with no bar at that step is dropped. When a market's data ends before the run does, its position closes at its last close with the cause `EndOfData`. The caller still chooses the slice, and nothing is padded, so no undefined price enters a line. `Markets::make` still refuses markets that cannot run: every market must have the same base timeframe, and each timeframe list must be finest first with no repeats.
+
+A coarse bar is a lookahead risk. The 4-hour bar that opens at 08:00 has no close until 12:00, yet a list of 4-hour bars holds it at 09:00. `last_closed(bars, now)` returns the index of the last bar fully closed at a UTC second, or -1. `decide` receives `now`, the close of the step, and a strategy reads every bar through `last_closed`. A strategy on a coarse timeframe acts once per new bar on that timeframe. `last_closed` uses the next bar's open as the close of a bar. For a series' last bar there is no next bar, so it adds `seconds(timeframe)`. `Month1` counts as 31 days, the longest month, so the last bar can close late in the test but never early.
+
+Two other designs were rejected. A vector of timeframes inside `Bars` would make one object hold several series, and every indicator would need to say which it reads. One `Bars` per timeframe keeps each indicator a function of one series. A shared clock on the coarsest timeframe would fill and check stops at coarse bars, which is what a fine base avoids.

@@ -31,7 +31,7 @@ using namespace avbt;
 // Flat hourly bars at each close; bar 0 opens at first_hour:00 UTC.
 Bars flat_bars(const std::vector<double>& closes, int first_hour = 0) {
     Bars b;
-    b.bar_size_seconds = 3600;
+    b.timeframe = Timeframe::Hour1;
     for (std::size_t i = 0; i < closes.size(); ++i) {
         b.ts.push_back((first_hour + static_cast<int64_t>(i)) * 3600);
         for (auto* v : {&b.open, &b.high, &b.low, &b.close}) v->push_back(closes[i]);
@@ -43,7 +43,7 @@ Bars flat_bars(const std::vector<double>& closes, int first_hour = 0) {
 // Runs a strategy on one market named after its instrument.
 template <class S>
 Result run(S& s, const Bars& b) {
-    return backtest(s, Markets::make({{s.params.instrument, b}}), PortfolioSettings{});
+    return backtest(s, Markets::make({{s.params.instrument, {b}}}), PortfolioSettings{});
 }
 
 void check_trade(const std::string& name, const Result& r, std::size_t i, int entry, int exit,
@@ -148,7 +148,7 @@ void test_combined_matches_each_alone() {
     both.a.params.lag = 1;
     both.a.params.time_exit = 10;
     both.b.params.time_exit = 2;
-    Result r = backtest(both, Markets::make({{"AVNT", avnt}, {"DYM", dym}}), PortfolioSettings{});
+    Result r = backtest(both, Markets::make({{"AVNT", {avnt}}, {"DYM", {dym}}}), PortfolioSettings{});
     check_value("combined two trades", r.trades.size(), 2);
     check_trade("combined campaign", r, 0, 2, 3, 143, Cause::Stop);
     check_trade("combined spike", r, 1, 2, 4, 100, Cause::Order);
@@ -169,7 +169,7 @@ void test_combined_one_instrument_takes_turns() {
     both.b.params.lag = 1;
     both.b.params.window = 2;
     Bars zora = flat_bars({100, 110, 110, 110, 110, 110, 110, 110}, 15);
-    Result r = backtest(both, Markets::make({{"ZORA", zora}}), PortfolioSettings{});
+    Result r = backtest(both, Markets::make({{"ZORA", {zora}}}), PortfolioSettings{});
     check_value("turns one trade", r.trades.size(), 1);
     check_trade("turns", r, 0, 2, 5, 110, Cause::Order);
 }

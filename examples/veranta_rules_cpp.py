@@ -103,9 +103,10 @@ def load(wallet, market, source, symbol):
 
 
 def cpp_bars(df):
-    return avbt_cpp.Bars(HOUR, df.ts.to_numpy("int64"), df.open.to_numpy(float), df.high.to_numpy(float),
+    """One market for C++: a list holding just the hourly bars, so the base is Hour1."""
+    return [avbt_cpp.Bars(avbt_cpp.Timeframe.Hour1, df.ts.to_numpy("int64"), df.open.to_numpy(float), df.high.to_numpy(float),
                          df.low.to_numpy(float), df.close.to_numpy(float),
-                         df.minutes_with_data.to_numpy("int32"))
+                         df.minutes_with_data.to_numpy("int32"))]
 
 
 def compare(wallet, market, source, symbol, make):

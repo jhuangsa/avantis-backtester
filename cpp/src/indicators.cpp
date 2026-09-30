@@ -8,6 +8,55 @@
 
 namespace avbt {
 
+int64_t seconds(Timeframe tf) {
+    constexpr int64_t minute = 60, hour = 3600, day = 86400;
+    switch (tf) {
+        case Timeframe::Min1: return minute;
+        case Timeframe::Min3: return 3 * minute;
+        case Timeframe::Min5: return 5 * minute;
+        case Timeframe::Min15: return 15 * minute;
+        case Timeframe::Min30: return 30 * minute;
+        case Timeframe::Hour1: return hour;
+        case Timeframe::Hour4: return 4 * hour;
+        case Timeframe::Hour8: return 8 * hour;
+        case Timeframe::Hour12: return 12 * hour;
+        case Timeframe::Day1: return day;
+        case Timeframe::Week1: return 7 * day;
+        case Timeframe::Month1: return 31 * day;
+    }
+    throw std::invalid_argument("unknown timeframe");
+}
+
+const char* name(Timeframe tf) {
+    switch (tf) {
+        case Timeframe::Min1: return "1 minute";
+        case Timeframe::Min3: return "3 minutes";
+        case Timeframe::Min5: return "5 minutes";
+        case Timeframe::Min15: return "15 minutes";
+        case Timeframe::Min30: return "30 minutes";
+        case Timeframe::Hour1: return "1 hour";
+        case Timeframe::Hour4: return "4 hours";
+        case Timeframe::Hour8: return "8 hours";
+        case Timeframe::Hour12: return "12 hours";
+        case Timeframe::Day1: return "1 day";
+        case Timeframe::Week1: return "1 week";
+        case Timeframe::Month1: return "1 month";
+    }
+    throw std::invalid_argument("unknown timeframe");
+}
+
+int last_closed(const Bars& bars, int64_t now) {
+    // k is the last bar that has opened by now. Every bar before it has
+    // closed, because the bar after it has opened.
+    auto after = std::upper_bound(bars.ts.begin(), bars.ts.end(), now);
+    int k = static_cast<int>(after - bars.ts.begin()) - 1;
+    if (k < 0) return -1;
+    // Bar k itself has closed only if it is the last bar and its length has passed.
+    bool last = k + 1 == static_cast<int>(bars.ts.size());
+    if (last && bars.ts[k] + seconds(bars.timeframe) <= now) return k;
+    return k - 1;
+}
+
 std::vector<double> sma(const std::vector<double>& series, int period) {
 
     if (period < 1) {
@@ -197,8 +246,8 @@ std::vector<double> atr(const Bars& bars, int n) {
 std::vector<double> hour_of_day(const Bars& bars) {
 
     // on bars coarser than an hour, the opening hour means nothing
-    if (bars.bar_size_seconds > 3600) {
-        throw std::invalid_argument("hour_of_day needs bar_size_seconds <= 3600");
+    if (bars.timeframe > Timeframe::Hour1) {
+        throw std::invalid_argument("hour_of_day needs bars of an hour or less");
     }
 
     std::vector<double> hour_of_day(bars.ts.size());

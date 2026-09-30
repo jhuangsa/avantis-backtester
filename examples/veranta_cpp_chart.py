@@ -53,7 +53,9 @@ def summary(title, frames, r):
     # Mean over standard deviation of the bar-to-bar equity returns, times
     # the square root of the bars in a year. Risk-free rate 0.
     returns = equity.pct_change().dropna()
-    per_year = 365 * 24 * 3600 / r["bar_size_seconds"]
+    base = next(t for t in avbt_cpp.Timeframe.__members__.values()
+                if avbt_cpp.timeframe_name(t) == r["timeframe"])
+    per_year = 365 * 24 * 3600 / avbt_cpp.timeframe_seconds(base)
     sharpe = returns.mean() / returns.std() * per_year ** 0.5 if returns.std() > 0 else float("nan")
     causes = pd.Series([t["cause"] for t in trades]).value_counts().to_dict()
     wins = sum(t["result"] > 0 for t in trades)

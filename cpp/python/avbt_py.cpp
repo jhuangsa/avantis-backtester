@@ -30,21 +30,22 @@ std::vector<T> to_vector(const py::array_t<T, py::array::c_style | py::array::fo
 }
 
 // Hands the vector's buffer to numpy. A capsule owns it and frees it with the array.
-py::array_t<double> to_numpy(std::vector<double>&& v) {
-    auto* owned = new std::vector<double>(std::move(v));
+template <typename T>
+py::array_t<T> to_numpy(std::vector<T>&& v) {
+    auto* owned = new std::vector<T>(std::move(v));
     py::capsule free_when_done(owned, [](void* p) {
-        delete static_cast<std::vector<double>*>(p);
+        delete static_cast<std::vector<T>*>(p);
     });
-    return py::array_t<double>(owned->size(), owned->data(), free_when_done);
+    return py::array_t<T>(owned->size(), owned->data(), free_when_done);
 }
 
-avbt::Bars make_bars(int bar_size_seconds,
+avbt::Bars make_bars(avbt::Timeframe timeframe,
                      const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& ts,
                      const InArray& open, const InArray& high, const InArray& low,
                      const InArray& close,
                      const py::array_t<int, py::array::c_style | py::array::forcecast>& minutes_with_data) {
     avbt::Bars bars;
-    bars.bar_size_seconds = bar_size_seconds;
+    bars.timeframe = timeframe;
     bars.ts = to_vector(ts);
     bars.open = to_vector(open);
     bars.high = to_vector(high);
@@ -80,6 +81,7 @@ const char* cause_name(avbt::Cause c) {
         case avbt::Cause::Liquidation: return "liquidation";
         case avbt::Cause::HardStop: return "hard_stop";
         case avbt::Cause::Order: return "order";
+        case avbt::Cause::EndOfData: return "end_of_data";
     }
     return "order";
 }
@@ -106,24 +108,32 @@ py::dict run_markets(S& strategy, const avbt::Markets& markets,
     out["trades"] = trades;
     out["equity"] = to_numpy(std::move(r.equity));
     out["ending_balance"] = r.ending_balance;
-    out["bar_size_seconds"] = r.bar_size_seconds;
+    out["timeframe"] = avbt::name(r.timeframe);
+    // The UTC second at which each step opens; entry_bar and exit_bar index it.
+    out["clock"] = to_numpy(std::move(r.clock));
     return out;
 }
 
-// A strategy with its default params on one market, named after its instrument.
+// A strategy with its default params on one market, named after its
+// instrument. `bars` holds the market's timeframes, finest first.
 template <class S>
-py::dict run(const avbt::Bars& bars, const avbt::PortfolioSettings& settings) {
+py::dict run(const std::vector<avbt::Bars>& bars, const avbt::PortfolioSettings& settings) {
     S strategy;
     return run_markets(strategy, avbt::Markets::make({{strategy.params.instrument, bars}}), settings);
 }
 
-// Several markets, given as {instrument: Bars}, all on one clock.
+// Several markets, given as {instrument: [Bars, ...]}, timeframes finest
+// first, run by a Combined strategy. a_timeframe and b_timeframe are the
+// timeframes its two strategies read.
 template <class S>
-py::dict run_many(const std::map<std::string, avbt::Bars>& bars,
-                  const avbt::PortfolioSettings& settings) {
+py::dict run_many(const std::map<std::string, std::vector<avbt::Bars>>& bars,
+                  const avbt::PortfolioSettings& settings,
+                  avbt::Timeframe a_timeframe, avbt::Timeframe b_timeframe) {
     std::vector<avbt::Market> markets;
     for (const auto& [name, b] : bars) markets.push_back({name, b});
     S strategy;
+    strategy.a.params.timeframe = a_timeframe;
+    strategy.b.params.timeframe = b_timeframe;
     return run_markets(strategy, avbt::Markets::make(std::move(markets)), settings);
 }
 
@@ -132,10 +142,32 @@ py::dict run_many(const std::map<std::string, avbt::Bars>& bars,
 PYBIND11_MODULE(avbt_cpp, m) {
     m.doc() = "avbt C++ indicators";
 
+    py::enum_<avbt::Timeframe>(m, "Timeframe")
+        .value("Min1", avbt::Timeframe::Min1)
+        .value("Min3", avbt::Timeframe::Min3)
+        .value("Min5", avbt::Timeframe::Min5)
+        .value("Min15", avbt::Timeframe::Min15)
+        .value("Min30", avbt::Timeframe::Min30)
+        .value("Hour1", avbt::Timeframe::Hour1)
+        .value("Hour4", avbt::Timeframe::Hour4)
+        .value("Hour8", avbt::Timeframe::Hour8)
+        .value("Hour12", avbt::Timeframe::Hour12)
+        .value("Day1", avbt::Timeframe::Day1)
+        .value("Week1", avbt::Timeframe::Week1)
+        .value("Month1", avbt::Timeframe::Month1);
+    m.def("timeframe_name", &avbt::name, py::arg("timeframe"));
+    m.def("timeframe_seconds", &avbt::seconds, py::arg("timeframe"));
+
     py::class_<avbt::Bars>(m, "Bars")
-        .def(py::init(&make_bars), py::arg("bar_size_seconds"), py::arg("ts"), py::arg("open"),
+        .def(py::init(&make_bars), py::arg("timeframe"), py::arg("ts"), py::arg("open"),
              py::arg("high"), py::arg("low"), py::arg("close"), py::arg("minutes_with_data"))
-        .def_readonly("bar_size_seconds", &avbt::Bars::bar_size_seconds)
+        .def_readonly("timeframe", &avbt::Bars::timeframe)
+        // Copies of the columns, for charts and checks.
+        .def_property_readonly("ts", [](const avbt::Bars& b) { return to_numpy(std::vector(b.ts)); })
+        .def_property_readonly("open", [](const avbt::Bars& b) { return to_numpy(std::vector(b.open)); })
+        .def_property_readonly("high", [](const avbt::Bars& b) { return to_numpy(std::vector(b.high)); })
+        .def_property_readonly("low", [](const avbt::Bars& b) { return to_numpy(std::vector(b.low)); })
+        .def_property_readonly("close", [](const avbt::Bars& b) { return to_numpy(std::vector(b.close)); })
         .def("__len__", [](const avbt::Bars& b) { return b.ts.size(); });
 
     py::class_<avbt::PortfolioSettings>(m, "PortfolioSettings")
@@ -154,9 +186,13 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.def("spike_short", &run<avbt::SpikeShort>, py::arg("bars"), py::arg("settings"));
     m.def("gold_trend_long", &run<avbt::GoldTrendLong>, py::arg("bars"), py::arg("settings"));
     m.def("campaign_and_spike", &run_many<avbt::Combined<avbt::CampaignShort, avbt::SpikeShort>>,
-          py::arg("markets"), py::arg("settings"));
+          py::arg("markets"), py::arg("settings"),
+          py::arg("a_timeframe") = avbt::Timeframe::Hour1,
+          py::arg("b_timeframe") = avbt::Timeframe::Hour1);
     m.def("late_day_and_rally", &run_many<avbt::Combined<avbt::LateDayShort, avbt::RallyShort>>,
-          py::arg("markets"), py::arg("settings"));
+          py::arg("markets"), py::arg("settings"),
+          py::arg("a_timeframe") = avbt::Timeframe::Hour1,
+          py::arg("b_timeframe") = avbt::Timeframe::Hour1);
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));

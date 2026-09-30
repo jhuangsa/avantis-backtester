@@ -12,18 +12,25 @@
 
 namespace avbt {
 
-// The five ideas in examples/veranta_rules.py. Each entry is known at bar
-// t's close and fills at the next open. Stops and take profits are levels
-// the portfolio fills; strategies only return entries, time exits, and rule
-// exits. Defaults are the figures in veranta_rules.py.
+// The five ideas in examples/veranta_rules.py. Each reads one timeframe of
+// its instrument, params.timeframe, hourly by default. An entry is known at
+// the close of bar t on that timeframe and fills at the next base open.
+// Stops and take profits are levels the portfolio fills; strategies only
+// return entries, time exits, and rule exits. Defaults are the figures in
+// veranta_rules.py.
 
-// Shared decide: while a position is open, return a close order for a time
-// exit or a rule exit; otherwise open when the entry holds. A time exit of N
-// closes at the open after bar signal + N, the bar of the fill being bar 1.
-// signal_bar is read only while a position is open and is overwritten by
-// every new entry, so a trade closed by a level leaves no stale memory.
+// Shared decide. t is the strategy's last closed bar, and it acts once per
+// bar: on the clock steps between two hourly closes, t does not change and
+// it returns nothing. While a position is open, return a close order for a
+// time exit or a rule exit; otherwise open when the entry holds. A time exit
+// of N closes at the open after bar signal + N, the bar of the fill being
+// bar 1. signal_bar is read only while a position is open and is overwritten
+// by every new entry, so a trade closed by a level leaves no stale memory.
 template <class S>
-std::vector<Order> decide_entry_and_exits(S& s, int t, const std::vector<Position>& positions) {
+std::vector<Order> decide_entry_and_exits(S& s, int64_t now, const std::vector<Position>& positions) {
+    int t = last_closed(*s.bars, now);
+    if (t < 0 || t == s.seen_bar) return {};
+    s.seen_bar = t;
     const auto& p = s.params;
     if (!positions.empty()) {
         bool timed = p.time_exit > 0 && t - s.signal_bar >= p.time_exit;
@@ -48,18 +55,22 @@ struct LateDayShort {
         double rise = 0.10, take_profit = 0.02, stop = 0.05;
         int time_exit = 3;
         double leverage = 1.0, fee_rate = 0.0001;
+        Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> hour, rise;
-    int signal_bar = -1;
+    const Bars* bars = nullptr;
+    // The last bar decide acted on, and the bar of the last entry.
+    int seen_bar = -1, signal_bar = -1;
 
     void prepare(const Markets& m) {
-        const Bars& b = m.at(params.instrument);
+        bars = &m.at(params.instrument, params.timeframe);
+        const Bars& b = *bars;
         hour = hour_of_day(b);
         rise = pct_change(b.close, params.lag);
     }
     bool entry(int t) const { return hour[t] == params.hour && rise[t] >= params.rise; }
-    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
-        return decide_entry_and_exits(*this, t, positions);
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, now, positions);
     }
 };
 
@@ -72,19 +83,23 @@ struct RallyShort {
         double rise = 0.10, take_profit = 0.02, stop = 0.05;
         int time_exit = 4;
         double leverage = 1.0, fee_rate = 0.0001;
+        Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> close, rise, average;
-    int signal_bar = -1;
+    const Bars* bars = nullptr;
+    // The last bar decide acted on, and the bar of the last entry.
+    int seen_bar = -1, signal_bar = -1;
 
     void prepare(const Markets& m) {
-        const Bars& b = m.at(params.instrument);
+        bars = &m.at(params.instrument, params.timeframe);
+        const Bars& b = *bars;
         close = b.close;
         rise = pct_change(b.close, params.lag);
         average = sma(b.close, params.window);
     }
     bool entry(int t) const { return rise[t] >= params.rise && close[t] > average[t]; }
-    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
-        return decide_entry_and_exits(*this, t, positions);
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, now, positions);
     }
 };
 
@@ -97,17 +112,21 @@ struct CampaignShort {
         double rise = 0.09, take_profit = 0.20, stop = 0.30;
         int time_exit = 120;
         double leverage = 1.0, fee_rate = 0.0001;
+        Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> rise;
-    int signal_bar = -1;
+    const Bars* bars = nullptr;
+    // The last bar decide acted on, and the bar of the last entry.
+    int seen_bar = -1, signal_bar = -1;
 
     void prepare(const Markets& m) {
-        const Bars& b = m.at(params.instrument);
+        bars = &m.at(params.instrument, params.timeframe);
+        const Bars& b = *bars;
         rise = pct_change(b.close, params.lag);
     }
     bool entry(int t) const { return rise[t] >= params.rise; }
-    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
-        return decide_entry_and_exits(*this, t, positions);
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, now, positions);
     }
 };
 
@@ -119,17 +138,21 @@ struct SpikeShort {
         double spike = 0.05, take_profit = 0.06, stop = 0.08;
         int time_exit = 16;
         double leverage = 1.0, fee_rate = 0.0001;
+        Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> spike;
-    int signal_bar = -1;
+    const Bars* bars = nullptr;
+    // The last bar decide acted on, and the bar of the last entry.
+    int seen_bar = -1, signal_bar = -1;
 
     void prepare(const Markets& m) {
-        const Bars& b = m.at(params.instrument);
+        bars = &m.at(params.instrument, params.timeframe);
+        const Bars& b = *bars;
         spike = bar_change(b, Field::High, Field::Close, 1);
     }
     bool entry(int t) const { return spike[t] > params.spike; }
-    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
-        return decide_entry_and_exits(*this, t, positions);
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, now, positions);
     }
 };
 
@@ -143,20 +166,24 @@ struct GoldTrendLong {
         double take_profit = std::nan(""), stop = 0.015;
         int time_exit = 0;
         double leverage = 1.0, fee_rate = 0.0001;
+        Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> close, average, drift;
-    int signal_bar = -1;
+    const Bars* bars = nullptr;
+    // The last bar decide acted on, and the bar of the last entry.
+    int seen_bar = -1, signal_bar = -1;
 
     void prepare(const Markets& m) {
-        const Bars& b = m.at(params.instrument);
+        bars = &m.at(params.instrument, params.timeframe);
+        const Bars& b = *bars;
         close = b.close;
         average = sma(b.close, params.window);
         drift = pct_change(b.close, params.lag);
     }
     bool entry(int t) const { return close[t] > average[t] && drift[t] > 0.0; }
     bool rule_exit(int t) const { return close[t] < average[t]; }
-    std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
-        return decide_entry_and_exits(*this, t, positions);
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
+        return decide_entry_and_exits(*this, now, positions);
     }
 };
 
@@ -173,15 +200,15 @@ struct Combined {
     std::map<std::string, int> owner;
 
     void prepare(const Markets& m) { a.prepare(m); b.prepare(m); }
-    std::vector<Order> decide(int t, const Report& report, const std::vector<Position>& positions) {
+    std::vector<Order> decide(int64_t now, const Report& report, const std::vector<Position>& positions) {
         // A position gone (a level closed it, or the open was refused) frees its instrument.
         std::erase_if(owner, [&](const auto& o) {
             return std::none_of(positions.begin(), positions.end(),
                                 [&](const Position& p) { return p.instrument == o.first; });
         });
         std::vector<Order> orders;
-        take(orders, a.decide(t, report, owned(positions, 0)), 0);
-        take(orders, b.decide(t, report, owned(positions, 1)), 1);
+        take(orders, a.decide(now, report, owned(positions, 0)), 0);
+        take(orders, b.decide(now, report, owned(positions, 1)), 1);
         return orders;
     }
 

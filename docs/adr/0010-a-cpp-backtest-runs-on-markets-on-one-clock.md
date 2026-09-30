@@ -1,3 +1,5 @@
+_Superseded in part by [ADR 0011](0011-markets-carry-several-timeframes-and-their-own-history.md): markets may have several timeframes and their own history. The clock rules below no longer hold._
+
 # A C++ backtest runs one strategy on several markets on one clock
 
 The C++ backtest takes `Markets`: several markets, each an instrument name and its bars. The strategy's `prepare` receives all of them, so one strategy can trade several instruments or read one market to trade another. A strategy that trades one market looks it up by name.

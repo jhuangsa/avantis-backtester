@@ -7,32 +7,50 @@
 
 namespace avbt {
 
-// One instrument's name and its bars.
+// One instrument's name and its bars on one or more timeframes, finest
+// first. timeframes[0] is the base: orders fill at its opens, and stops and
+// take profits are checked on its highs and lows. The coarser timeframes are
+// for strategies to read.
 struct Market {
     std::string instrument;
-    Bars bars;
+    std::vector<Bars> timeframes;
 };
 
-// Several markets on one clock: the same bar size, the same number of bars,
-// and the same timestamps, so bar t is the same moment in every market. The
-// caller aligns them; only make() builds a Markets, and it checks. See ADR 0010.
+// Several markets on one clock. Each market starts and ends with its own
+// data. The clock is every base bar open of every market, sorted, with no
+// repeats, so a market joins the run at its first bar. Every market has the
+// same base timeframe, so one clock step is one base bar everywhere. Only
+// make() builds a Markets, and it checks. See ADR 0011.
 class Markets {
 public:
     // Throws std::invalid_argument when the list is empty, two markets share
-    // a name, a market's columns differ in length, or a market is not on the
-    // first market's clock. The message names the market.
+    // a name, or a market has no timeframes, has a timeframe twice or out of
+    // order, has a base timeframe that differs from the first market's, or
+    // has a Bars that is empty, has columns of different lengths, or has
+    // timestamps that do not rise. The message names the market.
     static Markets make(std::vector<Market> markets);
 
-    // Throws std::invalid_argument when no market has this name.
-    const Bars& at(const std::string& instrument) const;
+    // Throws std::invalid_argument when no market has this name, or the
+    // market has no bars on this timeframe.
+    const Bars& at(const std::string& instrument, Timeframe tf) const;
+    // The market's base bars, timeframes[0].
+    const Bars& base(const std::string& instrument) const;
     const std::vector<Market>& all() const { return markets_; }
-    // Bars per market.
-    int size() const { return static_cast<int>(markets_.front().bars.ts.size()); }
-    int bar_size_seconds() const { return markets_.front().bars.bar_size_seconds; }
+
+    // The clock: one entry per step, the UTC second at which the step's base bars open.
+    const std::vector<int64_t>& clock() const { return clock_; }
+    // The base timeframe, shared by every market.
+    Timeframe timeframe() const { return markets_.front().timeframes.front().timeframe; }
+    // The index of the market's base bar that opens at step t, or -1 when
+    // the market has no bar then: its data has not started, or has ended.
+    int bar_at(const std::string& instrument, int t) const;
 
 private:
-    explicit Markets(std::vector<Market> markets) : markets_(std::move(markets)) {}
+    Markets(std::vector<Market> markets, std::vector<int64_t> clock)
+        : markets_(std::move(markets)), clock_(std::move(clock)) {}
+    const Market& find(const std::string& instrument) const;
     std::vector<Market> markets_;
+    std::vector<int64_t> clock_;
 };
 
 }

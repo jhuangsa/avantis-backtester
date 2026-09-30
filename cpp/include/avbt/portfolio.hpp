@@ -46,8 +46,9 @@ struct Position {
     double mark_price = 0.0;
 };
 
-// What closed a position. Order is a strategy's close order.
-enum class Cause { Stop, TakeProfit, Liquidation, HardStop, Order };
+// What closed a position. Order is a strategy's close order; EndOfData is
+// the backtest closing it because its market's data ended.
+enum class Cause { Stop, TakeProfit, Liquidation, HardStop, Order, EndOfData };
 
 // A position, or part of one, that has closed.
 struct Closed {

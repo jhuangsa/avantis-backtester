@@ -315,9 +315,9 @@ void test_atr_rejects_bad_n(int n) {
 
 // ---- hour_of_day ----
 
-avbt::Bars make_ts_bars(const std::vector<int64_t>& ts, int bar_size_seconds) {
+avbt::Bars make_ts_bars(const std::vector<int64_t>& ts, avbt::Timeframe tf) {
     avbt::Bars bars;
-    bars.bar_size_seconds = bar_size_seconds;
+    bars.timeframe = tf;
     bars.ts = ts;
     return bars;
 }
@@ -325,40 +325,40 @@ avbt::Bars make_ts_bars(const std::vector<int64_t>& ts, int bar_size_seconds) {
 // 0 is 00:00, 3600 is 01:00, 16 * 3600 + 59 is 16:00:59, 86400 + 5 * 3600 is day 2 05:00.
 void test_hour_of_day_basic() {
     check_series("hour_of_day basic",
-                 avbt::hour_of_day(make_ts_bars({0, 3600, 16 * 3600 + 59, 86400 + 5 * 3600}, 3600)),
+                 avbt::hour_of_day(make_ts_bars({0, 3600, 16 * 3600 + 59, 86400 + 5 * 3600}, avbt::Timeframe::Hour1)),
                  {0, 1, 16, 5});
 }
 
 // Exactly midnight is hour 0; 23:59:59 is still hour 23.
 void test_hour_of_day_day_edges() {
     check_series("hour_of_day day edges",
-                 avbt::hour_of_day(make_ts_bars({86400, 86400 - 1, 1699920000}, 60)),
+                 avbt::hour_of_day(make_ts_bars({86400, 86400 - 1, 1699920000}, avbt::Timeframe::Min1)),
                  {0, 23, 0});
 }
 
 // Before 1970: -1 is 23:59:59, -3600 is 23:00, -3601 is 22:59:59.
 void test_hour_of_day_before_1970() {
     check_series("hour_of_day before 1970",
-                 avbt::hour_of_day(make_ts_bars({-1, -3600, -3601, -86400}, 3600)),
+                 avbt::hour_of_day(make_ts_bars({-1, -3600, -3601, -86400}, avbt::Timeframe::Hour1)),
                  {23, 23, 22, 0});
 }
 
 void test_hour_of_day_hourly_bars_ok() {
-    check_series("hour_of_day bar_size_seconds 3600",
-                 avbt::hour_of_day(make_ts_bars({7200}, 3600)), {2});
+    check_series("hour_of_day hourly bars",
+                 avbt::hour_of_day(make_ts_bars({7200}, avbt::Timeframe::Hour1)), {2});
 }
 
 void test_hour_of_day_rejects_coarse_bars() {
     try {
-        avbt::hour_of_day(make_ts_bars({0}, 3601));
-        fail("hour_of_day bar_size_seconds 3601", "expected std::invalid_argument, nothing was thrown");
+        avbt::hour_of_day(make_ts_bars({0}, avbt::Timeframe::Hour4));
+        fail("hour_of_day 4-hour bars", "expected std::invalid_argument, nothing was thrown");
     } catch (const std::invalid_argument&) {
         // Expected.
     }
 }
 
 void test_hour_of_day_empty() {
-    check_series("hour_of_day empty", avbt::hour_of_day(make_ts_bars({}, 3600)), {});
+    check_series("hour_of_day empty", avbt::hour_of_day(make_ts_bars({}, avbt::Timeframe::Hour1)), {});
 }
 
 // ---- bar_change ----
