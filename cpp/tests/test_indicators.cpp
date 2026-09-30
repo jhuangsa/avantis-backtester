@@ -126,6 +126,18 @@ void test_prior_max_rejects_bad_n(int n) {
     }
 }
 
+// Falling series: the max is always the oldest bar, so the front expires every bar.
+void test_prior_max_falling() {
+    check_series("prior_max falling", avbt::prior_max({5, 4, 3, 2, 1}, 2),
+                 {NaN, NaN, 5, 4, 3});
+}
+
+// Equal values: popping the older equal value must not lose the max.
+void test_prior_max_ties() {
+    check_series("prior_max ties", avbt::prior_max({5, 5, 1, 1, 1}, 2),
+                 {NaN, NaN, 5, 5, 1});
+}
+
 // ---- prior_min ----
 
 void test_prior_min_basic() {
@@ -162,6 +174,17 @@ void test_prior_min_rejects_bad_n(int n) {
     } catch (const std::invalid_argument&) {
         // Expected.
     }
+}
+
+// Rising series: the min is always the oldest bar, so the front expires every bar.
+void test_prior_min_rising() {
+    check_series("prior_min rising", avbt::prior_min({1, 2, 3, 4, 5}, 2),
+                 {NaN, NaN, 1, 2, 3});
+}
+
+void test_prior_min_ties() {
+    check_series("prior_min ties", avbt::prior_min({1, 1, 5, 5, 5}, 2),
+                 {NaN, NaN, 1, 1, 5});
 }
 
 // ---- pct_change ----
@@ -306,6 +329,8 @@ int main() {
     test_prior_max_window_one();
     test_prior_max_window_equals_size();
     test_prior_max_empty();
+    test_prior_max_falling();
+    test_prior_max_ties();
     test_prior_max_rejects_bad_n(0);
     test_prior_max_rejects_bad_n(-1);
 
@@ -314,6 +339,8 @@ int main() {
     test_prior_min_excludes_current_bar();
     test_prior_min_window_one();
     test_prior_min_empty();
+    test_prior_min_rising();
+    test_prior_min_ties();
     test_prior_min_rejects_bad_n(0);
     test_prior_min_rejects_bad_n(-1);
 

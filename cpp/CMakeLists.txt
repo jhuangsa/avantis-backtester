@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Optimize unless the caller asks for another build type.
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 add_library(avbt src/indicators.cpp)
 target_include_directories(avbt PUBLIC include)
 target_compile_options(avbt PRIVATE -Wall -Wextra)
@@ -14,6 +19,15 @@ add_executable(test_indicators tests/test_indicators.cpp)
 target_link_libraries(test_indicators PRIVATE avbt)
 target_compile_options(test_indicators PRIVATE -Wall -Wextra)
 target_compile_definitions(test_indicators PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
+
+# Python module avbt_cpp, built only when pybind11 is found.
+# Point CMake at it with -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir).
+find_package(pybind11 CONFIG QUIET)
+if(pybind11_FOUND)
+    set_target_properties(avbt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    pybind11_add_module(avbt_cpp python/avbt_py.cpp)
+    target_link_libraries(avbt_cpp PRIVATE avbt)
+endif()
 
 enable_testing()
 add_test(NAME test_indicators COMMAND test_indicators)

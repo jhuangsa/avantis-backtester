@@ -3,8 +3,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <utility>
-#include <queue>
-#include <functional>
+#include <deque>
 #include <algorithm>
 
 namespace avbt {
@@ -40,21 +39,27 @@ std::vector<double> prior_max(const std::vector<double>& series, int n) {
     }
 
     std::vector<double> prior_max(series.size());
-    std::priority_queue<std::pair<double, int>> max_queue;
+    // indices whose values decrease from front to back; the front is the max
+    std::deque<int> window;
 
     for (int i = 0; i < series.size(); i++) {
 
+        // drop the front once it is outside the window [i - n, i - 1]
+        while (!window.empty() && window.front() < i - n) {
+            window.pop_front();
+        }
+
         if (i >= n) {
-            // remove elements that are outside the current window
-            while (max_queue.top().second < i - n) {
-                max_queue.pop(); 
-            }
-            prior_max[i] = max_queue.top().first;
+            prior_max[i] = series[window.front()];
         } else {
             prior_max[i] = std::nan("");
         }
 
-        max_queue.push(std::pair<double, int>(series[i], i));
+        // an older value that is no bigger than series[i] can never be the max again
+        while (!window.empty() && series[window.back()] <= series[i]) {
+            window.pop_back();
+        }
+        window.push_back(i);
     }
 
     return prior_max;
@@ -68,24 +73,27 @@ std::vector<double> prior_min(const std::vector<double>& series, int n) {
     }
 
     std::vector<double> prior_min(series.size());
-    // std::greater turns the priority queue into a min-heap
-    std::priority_queue<std::pair<double, int>,
-                        std::vector<std::pair<double, int>>,
-                        std::greater<std::pair<double, int>>> min_queue;
+    // indices whose values increase from front to back; the front is the min
+    std::deque<int> window;
 
     for (int i = 0; i < series.size(); i++) {
 
+        // drop the front once it is outside the window [i - n, i - 1]
+        while (!window.empty() && window.front() < i - n) {
+            window.pop_front();
+        }
+
         if (i >= n) {
-            // remove elements that are outside the current window
-            while (min_queue.top().second < i - n) {
-                min_queue.pop();
-            }
-            prior_min[i] = min_queue.top().first;
+            prior_min[i] = series[window.front()];
         } else {
             prior_min[i] = std::nan("");
         }
 
-        min_queue.push(std::pair<double, int>(series[i], i));
+        // an older value that is no smaller than series[i] can never be the min again
+        while (!window.empty() && series[window.back()] >= series[i]) {
+            window.pop_back();
+        }
+        window.push_back(i);
     }
 
     return prior_min;
