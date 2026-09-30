@@ -30,6 +30,7 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 - `include/avbt/strategies.hpp`: the five Veranta strategies, and `Combined`, which runs two as one.
 - `python/avbt_py.cpp`: the pybind11 module `avbt_cpp`.
 - `tests/test_*.cpp`: plain test programs; exit code 0 is a pass.
+- `README.md`: the guide to every C++ file, type, function, and test.
 - Build from `cpp/`: `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build --output-on-failure`. `build/` is generated.
 
 **Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`), its rules scored in Python (`veranta_rules.py`) and in C++ against Python, plus strategies 3 and 4 combined in one account (`veranta_rules_cpp.py`), and the C++ results charted with strategies 1 and 2 combined (`veranta_cpp_chart.py`). The `.html` files are their outputs.
