@@ -8,7 +8,7 @@ A hypothesis is scored as trades on one bar series. The result is a price return
 
 **Hypothesis**:
 A named position scored by the price return of its trades. It names a side, the conditions for getting in, and a stop loss. It may name a take profit. Or it names long, short, or flat from bars that have already closed.
-_Avoid_: strategy, day trade, setup
+_Avoid_: strategy (that is the C++ form), day trade, setup
 
 **Action**:
 The position a hypothesis names at one bar from bars that have already closed: long, short, or flat. Flat is no position.
@@ -23,7 +23,7 @@ The scoring of one hypothesis on one series. The series is whatever stretch is s
 _Avoid_: fit, reconstruction, a train period, a test period
 
 **Trade**:
-One entry and the way out that closes it. The first way out closes the whole trade. A hypothesis has at most one trade open. A new cross on the same side, while that trade is open, does not add a second trade.
+One entry and the way out that closes it. The first way out closes the whole trade. A hypothesis has at most one trade open. A new cross on the same side, while that trade is open, does not add a second trade. In the C++ engine a trade also records its entry bar, its exit bar, and its result in account money.
 
 **Return**:
 The price change of a trade as a percent of its entry price, after any fee on its fills. A long is (exit − entry) / entry. A short is the mirror. Each trade uses the entire stake, trades compound, and time with no open trade earns nothing.
@@ -165,6 +165,14 @@ The balance a position locks: its notional over its leverage. A trade whose coll
 
 **Liquidation**:
 The forced close once a position's loss reaches 85% of its collateral, the Veranta rule.
+
+**Strategy**:
+The C++ form of a trading idea: a struct that computes its lines once and, at the close of each bar, returns orders. It never opens or closes a position itself. See ADR 0009.
+_Avoid_: hypothesis (that is the Python form), a rule tree
+
+**Order**:
+What a strategy returns at the close of a bar: open or close, the instrument, the side, the stop and take-profit distances, the leverage, and the fee rate. It fills at the next open. Distances are fractions of the fill price, because the strategy does not know that price yet.
+_Avoid_: signal, a fill
 
 **Hard stop**:
 The fall below the starting balance, counting unrealized results, at which every position closes and the portfolio stops trading for good. 30% by default.
