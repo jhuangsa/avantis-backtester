@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_library(avbt src/indicators.cpp src/portfolio.cpp)
+add_library(avbt src/indicators.cpp src/portfolio.cpp src/markets.cpp)
 target_include_directories(avbt PUBLIC include)
 target_compile_options(avbt PRIVATE -Wall -Wextra)
 target_compile_definitions(avbt PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)

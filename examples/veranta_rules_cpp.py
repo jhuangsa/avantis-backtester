@@ -17,6 +17,10 @@ bar as "still open"; the C++ loop leaves it open and records no trade. The C++
 portfolio can also refuse an entry (no free cash) or stop everything at its
 hard stop; the Python engine has neither.
 
+Last, it runs strategies 3 (AVNT) and 4 (DYM) as one combined strategy in
+one account, on the hours both markets share, and compares its trades with
+each strategy run alone on the same hours.
+
 Build the module first, then run from the repository root:
 
     cmake -S cpp -B cpp/build -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir)
@@ -98,11 +102,15 @@ def load(wallet, market, source, symbol):
     return resample(minutes.drop_duplicates("ts").sort_values("ts"), "1h")
 
 
-def compare(wallet, market, source, symbol, make):
-    df = load(wallet, market, source, symbol)
-    bars = avbt_cpp.Bars(HOUR, df.ts.to_numpy("int64"), df.open.to_numpy(float), df.high.to_numpy(float),
+def cpp_bars(df):
+    return avbt_cpp.Bars(HOUR, df.ts.to_numpy("int64"), df.open.to_numpy(float), df.high.to_numpy(float),
                          df.low.to_numpy(float), df.close.to_numpy(float),
                          df.minutes_with_data.to_numpy("int32"))
+
+
+def compare(wallet, market, source, symbol, make):
+    df = load(wallet, market, source, symbol)
+    bars = cpp_bars(df)
     cpp = CPP[make](bars, avbt_cpp.PortfolioSettings())
     py_bars = [Bar(open=o, high=h, low=l, close=c, volume=0.0)
                for o, h, l, c in zip(df.open, df.high, df.low, df.close)]
@@ -120,9 +128,35 @@ def compare(wallet, market, source, symbol, make):
     print()
 
 
+def combined():
+    """Strategies 3 and 4 as one, on the hours AVNT and DYM both have."""
+    rules = {rule[1]: rule for rule in vr.RULES}
+    avnt, dym = load(*rules["AVNT/USD"][:4]), load(*rules["DYM/USD"][:4])
+    start, end = max(avnt.ts.min(), dym.ts.min()), min(avnt.ts.max(), dym.ts.max())
+    avnt = avnt[avnt.ts.between(start, end)].reset_index(drop=True)
+    dym = dym[dym.ts.between(start, end)].reset_index(drop=True)
+    settings = avbt_cpp.PortfolioSettings()
+    both = avbt_cpp.campaign_and_spike({"AVNT": cpp_bars(avnt), "DYM": cpp_bars(dym)}, settings)
+    alone = {"AVNT": avbt_cpp.campaign_short(cpp_bars(avnt), settings),
+             "DYM": avbt_cpp.spike_short(cpp_bars(dym), settings)}
+    print(f"Combined: 3-AVNT and 4-DYM in one account  ({len(avnt)} shared bars, "
+          f"{pd.to_datetime(start, unit='s')} to {pd.to_datetime(end, unit='s')})")
+    for name, run in alone.items():
+        c_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in both["trades"]
+                 if t["instrument"] == name}
+        a_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in run["trades"]}
+        print(f"  {name}: combined {len(c_set)} trades, alone {len(a_set)}, same {len(c_set & a_set)}, "
+              f"alone ending balance {run['ending_balance']:.2f}")
+        for label, only in (("combined only", c_set - a_set), ("alone only", a_set - c_set)):
+            for entry, exit_, cause in sorted(only):
+                print(f"    {label}: entry {entry} exit {exit_} {cause}")
+    print(f"  combined ending balance {both['ending_balance']:.2f}")
+
+
 def main():
     for rule in vr.RULES:
         compare(*rule)
+    combined()
 
 
 if __name__ == "__main__":

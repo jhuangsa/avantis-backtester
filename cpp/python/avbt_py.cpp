@@ -7,7 +7,9 @@
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -82,14 +84,15 @@ const char* cause_name(avbt::Cause c) {
     return "order";
 }
 
-// Runs one strategy with its default params and returns the result as a dict.
+// Runs a strategy on the markets and returns the result as a dict.
 template <class S>
-py::dict run(const avbt::Bars& bars, const avbt::PortfolioSettings& settings) {
-    S strategy;
-    avbt::Result r = avbt::backtest(strategy, bars, settings);
+py::dict run_markets(S& strategy, const avbt::Markets& markets,
+                     const avbt::PortfolioSettings& settings) {
+    avbt::Result r = avbt::backtest(strategy, markets, settings);
     py::list trades;
     for (const avbt::Trade& t : r.trades) {
         py::dict d;
+        d["instrument"] = t.instrument;
         d["entry_bar"] = t.entry_bar;
         d["exit_bar"] = t.exit_bar;
         d["side"] = t.side == avbt::Side::Long ? "long" : "short";
@@ -105,6 +108,23 @@ py::dict run(const avbt::Bars& bars, const avbt::PortfolioSettings& settings) {
     out["ending_balance"] = r.ending_balance;
     out["bar_size_seconds"] = r.bar_size_seconds;
     return out;
+}
+
+// A strategy with its default params on one market, named after its instrument.
+template <class S>
+py::dict run(const avbt::Bars& bars, const avbt::PortfolioSettings& settings) {
+    S strategy;
+    return run_markets(strategy, avbt::Markets::make({{strategy.params.instrument, bars}}), settings);
+}
+
+// Several markets, given as {instrument: Bars}, all on one clock.
+template <class S>
+py::dict run_many(const std::map<std::string, avbt::Bars>& bars,
+                  const avbt::PortfolioSettings& settings) {
+    std::vector<avbt::Market> markets;
+    for (const auto& [name, b] : bars) markets.push_back({name, b});
+    S strategy;
+    return run_markets(strategy, avbt::Markets::make(std::move(markets)), settings);
 }
 
 }  // namespace
@@ -133,6 +153,10 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.def("campaign_short", &run<avbt::CampaignShort>, py::arg("bars"), py::arg("settings"));
     m.def("spike_short", &run<avbt::SpikeShort>, py::arg("bars"), py::arg("settings"));
     m.def("gold_trend_long", &run<avbt::GoldTrendLong>, py::arg("bars"), py::arg("settings"));
+    m.def("campaign_and_spike", &run_many<avbt::Combined<avbt::CampaignShort, avbt::SpikeShort>>,
+          py::arg("markets"), py::arg("settings"));
+    m.def("late_day_and_rally", &run_many<avbt::Combined<avbt::LateDayShort, avbt::RallyShort>>,
+          py::arg("markets"), py::arg("settings"));
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));

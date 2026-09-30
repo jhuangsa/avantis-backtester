@@ -1,10 +1,14 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "avbt/backtest.hpp"
 #include "avbt/indicators.hpp"
+#include "avbt/markets.hpp"
 
 namespace avbt {
 
@@ -48,7 +52,11 @@ struct LateDayShort {
     std::vector<double> hour, rise;
     int signal_bar = -1;
 
-    void prepare(const Bars& b) { hour = hour_of_day(b); rise = pct_change(b.close, params.lag); }
+    void prepare(const Markets& m) {
+        const Bars& b = m.at(params.instrument);
+        hour = hour_of_day(b);
+        rise = pct_change(b.close, params.lag);
+    }
     bool entry(int t) const { return hour[t] == params.hour && rise[t] >= params.rise; }
     std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
         return decide_entry_and_exits(*this, t, positions);
@@ -68,7 +76,8 @@ struct RallyShort {
     std::vector<double> close, rise, average;
     int signal_bar = -1;
 
-    void prepare(const Bars& b) {
+    void prepare(const Markets& m) {
+        const Bars& b = m.at(params.instrument);
         close = b.close;
         rise = pct_change(b.close, params.lag);
         average = sma(b.close, params.window);
@@ -92,7 +101,10 @@ struct CampaignShort {
     std::vector<double> rise;
     int signal_bar = -1;
 
-    void prepare(const Bars& b) { rise = pct_change(b.close, params.lag); }
+    void prepare(const Markets& m) {
+        const Bars& b = m.at(params.instrument);
+        rise = pct_change(b.close, params.lag);
+    }
     bool entry(int t) const { return rise[t] >= params.rise; }
     std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
         return decide_entry_and_exits(*this, t, positions);
@@ -111,7 +123,10 @@ struct SpikeShort {
     std::vector<double> spike;
     int signal_bar = -1;
 
-    void prepare(const Bars& b) { spike = bar_change(b, Field::High, Field::Close, 1); }
+    void prepare(const Markets& m) {
+        const Bars& b = m.at(params.instrument);
+        spike = bar_change(b, Field::High, Field::Close, 1);
+    }
     bool entry(int t) const { return spike[t] > params.spike; }
     std::vector<Order> decide(int t, const Report&, const std::vector<Position>& positions) {
         return decide_entry_and_exits(*this, t, positions);
@@ -132,7 +147,8 @@ struct GoldTrendLong {
     std::vector<double> close, average, drift;
     int signal_bar = -1;
 
-    void prepare(const Bars& b) {
+    void prepare(const Markets& m) {
+        const Bars& b = m.at(params.instrument);
         close = b.close;
         average = sma(b.close, params.window);
         drift = pct_change(b.close, params.lag);
@@ -144,7 +160,55 @@ struct GoldTrendLong {
     }
 };
 
+// Two strategies run as one, in one account. The strategy whose open
+// order starts a position owns it: only the owner sees that position and
+// decides its exits. While one owns an instrument, the other's opens on it
+// are dropped, so two strategies on one instrument take turns. Their orders
+// go out together, A's first, so A wins when both open on the same bar.
+template <Strategy A, Strategy B>
+struct Combined {
+    A a;
+    B b;
+    // Instrument -> 0 for A, 1 for B.
+    std::map<std::string, int> owner;
+
+    void prepare(const Markets& m) { a.prepare(m); b.prepare(m); }
+    std::vector<Order> decide(int t, const Report& report, const std::vector<Position>& positions) {
+        // A position gone (a level closed it, or the open was refused) frees its instrument.
+        std::erase_if(owner, [&](const auto& o) {
+            return std::none_of(positions.begin(), positions.end(),
+                                [&](const Position& p) { return p.instrument == o.first; });
+        });
+        std::vector<Order> orders;
+        take(orders, a.decide(t, report, owned(positions, 0)), 0);
+        take(orders, b.decide(t, report, owned(positions, 1)), 1);
+        return orders;
+    }
+
+private:
+    std::vector<Position> owned(const std::vector<Position>& positions, int who) const {
+        std::vector<Position> out;
+        for (const Position& p : positions) {
+            auto it = owner.find(p.instrument);
+            if (it != owner.end() && it->second == who) out.push_back(p);
+        }
+        return out;
+    }
+
+    void take(std::vector<Order>& orders, std::vector<Order> mine, int who) {
+        for (Order& o : mine) {
+            if (o.kind == Order::Kind::Open) {
+                if (owner.contains(o.instrument)) continue;
+                owner[o.instrument] = who;
+            }
+            orders.push_back(std::move(o));
+        }
+    }
+};
+
 static_assert(Strategy<LateDayShort> && Strategy<RallyShort> && Strategy<CampaignShort> &&
-              Strategy<SpikeShort> && Strategy<GoldTrendLong>);
+              Strategy<SpikeShort> && Strategy<GoldTrendLong> &&
+              Strategy<Combined<CampaignShort, SpikeShort>> &&
+              Strategy<Combined<LateDayShort, RallyShort>>);
 
 }

@@ -174,5 +174,17 @@ _Avoid_: hypothesis (that is the Python form), a rule tree
 What a strategy returns at the close of a bar: open or close, the instrument, the side, the stop and take-profit distances, the leverage, and the fee rate. It fills at the next open. Distances are fractions of the fill price, because the strategy does not know that price yet.
 _Avoid_: signal, a fill
 
+**Market**:
+In the C++ engine, one instrument's name and its bars.
+_Avoid_: asset, symbol, feed
+
+**Markets**:
+The markets one C++ backtest runs on, all on one clock. A strategy sees every market and reads the ones it needs. See ADR 0010.
+_Avoid_: universe, basket
+
+**Clock**:
+The one list of bar timestamps that every market in a backtest shares, so bar t is the same moment in each. The caller aligns the markets; the C++ engine refuses markets that differ in bar size, length, or any timestamp.
+_Avoid_: calendar, index
+
 **Hard stop**:
 The fall below the starting balance, counting unrealized results, at which every position closes and the portfolio stops trading for good. 30% by default.
