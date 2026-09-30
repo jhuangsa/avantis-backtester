@@ -10,3 +10,9 @@ Wonyotti Trading History/*.csv
 
 # Private database notes. Do not commit.
 docs/database.md
+
+# CMake output. Regenerate with cmake -S cpp -B cpp/build.
+cpp/build/
+
+# Downloaded market candles, reused between runs. Local only; never commit.
+data/candles/

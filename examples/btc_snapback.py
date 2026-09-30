@@ -34,7 +34,7 @@ DAY = 24
 CHUNK = timedelta(hours=250)
 HERE = Path(__file__).resolve().parent
 CHART = HERE / "btc_snapback_2022_2023.html"
-CACHE = Path.home() / ".cache" / "avantis-backtester" / "btc-usd-1h-2022-2023.json"
+CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "btc-usd-1h-2022-2023.json"
 SOURCE = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
 
 
@@ -49,7 +49,7 @@ def use_product(name):
     PRODUCT = name
     stem = name.split("-")[0].lower()
     CHART = HERE / f"{stem}_snapback_2022_2023.html"
-    CACHE = Path.home() / ".cache" / "avantis-backtester" / f"{stem}-usd-1h-2022-2023.json"
+    CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / f"{stem}-usd-1h-2022-2023.json"
     SOURCE = f"https://api.exchange.coinbase.com/products/{name}/candles"
 
 

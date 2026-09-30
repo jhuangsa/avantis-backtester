@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-CACHE = Path.home() / ".cache" / "avantis-backtester" / "lighter-ensemble"
+CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "lighter-ensemble"
 URL = os.environ.get("CH_URL", "https://klvu1o0hu6.us-east-1.aws.clickhouse.cloud:8443")
 LIGHTER_START = date(2026, 7, 30)
 ANN_VOL = 0.10

@@ -3,7 +3,7 @@
 The minutes come from ClickHouse, table market_data.avantis_candles_1m, pair 1.
 Two sources overlap. On a shared timestamp pyth_lazer wins over benchmarks.
 Empty buckets are filled with the previous close and minutes_with_data = 0.
-The raw CSV is cached at ~/.cache/avantis-backtester/btc_1m.csv.
+The raw CSV is cached at data/candles/btc_1m.csv.
 
 Run: python3 examples/btc_bars.py
 """
@@ -21,7 +21,7 @@ import pandas as pd
 
 DEFAULT_URL = "https://klvu1o0hu6.us-east-1.aws.clickhouse.cloud:8443"
 ROOT = Path(__file__).resolve().parent.parent
-CACHE = Path.home() / ".cache" / "avantis-backtester" / "btc_1m.csv"
+CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "btc_1m.csv"
 
 SQL = """
 SELECT toUnixTimestamp(timestamp) AS ts, source, open, high, low, close

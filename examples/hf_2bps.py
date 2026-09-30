@@ -5,7 +5,7 @@ From the repository root, with ClickHouse credentials in the environment:
     CH_USER=... CH_PASSWORD=... python3 examples/hf_2bps.py
 
 CH_URL defaults to the untagged market-data host. Candles are cached under
-~/.cache/avantis-backtester/hf_2bps/. Pass --refresh to download again.
+data/candles/hf_2bps/. Pass --refresh to download again.
 
 The series is symbol Crypto.ETH/USD, pair_name ETH_UPSIDE/USD (BTC_UPSIDE/USD
 for the residual). That pair's raw row count, including four identical
@@ -57,7 +57,7 @@ OOS_TS = OOS_START.timestamp()
 SESSION_START = 13 * 60 + 30
 SESSION_END = 20 * 60
 DEFAULT_URL = "https://klvu1o0hu6.us-east-1.aws.clickhouse.cloud:8443"
-CACHE = Path.home() / ".cache" / "avantis-backtester" / "hf_2bps"
+CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "hf_2bps"
 ROOT = Path(__file__).resolve().parents[1]
 
 Row = namedtuple("Row", "net_bps year oos cause")

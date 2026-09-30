@@ -28,7 +28,7 @@ from backtest import Above, Bar, Below, Hypothesis, Indicator, Line, Price, Thre
 
 HERE = Path(__file__).resolve().parent
 TRADES = HERE / "veranta_trades"
-CACHE = Path.home() / ".cache" / "avantis-backtester" / "veranta_rules"
+CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "veranta_rules"
 BINANCE = "https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&startTime={start}&limit=1000"
 GATE = "https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair={symbol}&interval=1h&from={start}&to={end}"
 HOUR = 3600
