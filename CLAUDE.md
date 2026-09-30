@@ -28,7 +28,7 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 - `tests/test_indicators.cpp`: a plain test program; exit code 0 is a pass.
 - Build from `cpp/`: `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build --output-on-failure`. `build/` is generated.
 
-**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`). The `.html` files are their outputs.
+**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`). The `.html` files are their outputs.
 
 **Trader history analysis**: `analysis/make_charts.py` reads `data/` and writes `docs/figures/`. Results are in `docs/findings.md`.
 
