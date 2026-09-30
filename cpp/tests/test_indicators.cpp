@@ -315,9 +315,9 @@ void test_atr_rejects_bad_n(int n) {
 
 // ---- hour_of_day ----
 
-avbt::Bars make_ts_bars(const std::vector<int64_t>& ts, int bar_seconds) {
+avbt::Bars make_ts_bars(const std::vector<int64_t>& ts, int bar_size_seconds) {
     avbt::Bars bars;
-    bars.bar_seconds = bar_seconds;
+    bars.bar_size_seconds = bar_size_seconds;
     bars.ts = ts;
     return bars;
 }
@@ -344,14 +344,14 @@ void test_hour_of_day_before_1970() {
 }
 
 void test_hour_of_day_hourly_bars_ok() {
-    check_series("hour_of_day bar_seconds 3600",
+    check_series("hour_of_day bar_size_seconds 3600",
                  avbt::hour_of_day(make_ts_bars({7200}, 3600)), {2});
 }
 
 void test_hour_of_day_rejects_coarse_bars() {
     try {
         avbt::hour_of_day(make_ts_bars({0}, 3601));
-        fail("hour_of_day bar_seconds 3601", "expected std::invalid_argument, nothing was thrown");
+        fail("hour_of_day bar_size_seconds 3601", "expected std::invalid_argument, nothing was thrown");
     } catch (const std::invalid_argument&) {
         // Expected.
     }

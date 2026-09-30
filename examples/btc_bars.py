@@ -2,7 +2,7 @@
 
 The minutes come from ClickHouse, table market_data.avantis_candles_1m, pair 1.
 Two sources overlap. On a shared timestamp pyth_lazer wins over benchmarks.
-Empty buckets are filled with the previous close and minutes = 0.
+Empty buckets are filled with the previous close and minutes_with_data = 0.
 The raw CSV is cached at ~/.cache/avantis-backtester/btc_1m.csv.
 
 Run: python3 examples/btc_bars.py
@@ -94,27 +94,27 @@ def resample(minutes_df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "high": r["high"].max(),
         "low": r["low"].min(),
         "close": r["close"].last(),
-        "minutes": r["close"].count().astype("int32"),
+        "minutes_with_data": r["close"].count().astype("int32"),
     })
-    real = bars["minutes"] > 0
+    real = bars["minutes_with_data"] > 0
     bars = bars.loc[real.idxmax(): real[::-1].idxmax()]
     close = bars["close"].ffill()
     for col in ("open", "high", "low"):
-        bars[col] = bars[col].where(bars["minutes"] > 0, close)
+        bars[col] = bars[col].where(bars["minutes_with_data"] > 0, close)
     bars["close"] = close
-    bars["minutes"] = bars["minutes"].astype("int32")
+    bars["minutes_with_data"] = bars["minutes_with_data"].astype("int32")
     ts = (bars.index.as_unit("s").asi8 if hasattr(bars.index, "as_unit")
           else bars.index.asi8 // 10**9)
     out = bars.reset_index(drop=True)
     out.insert(0, "ts", np.asarray(ts, dtype="int64"))
-    return out[["ts", "open", "high", "low", "close", "minutes"]]
+    return out[["ts", "open", "high", "low", "close", "minutes_with_data"]]
 
 
 def load_bars(rule: str, refresh: bool = False) -> tuple[pd.DataFrame, int]:
     """Fetch, dedupe, and resample. Returns the bars and the bar size in seconds."""
     bars = resample(dedupe(fetch_minutes(refresh)), rule)
-    bar_seconds = int(pd.Timedelta(pd.tseries.frequencies.to_offset(rule)).total_seconds())
-    return bars, bar_seconds
+    bar_size_seconds = int(pd.Timedelta(pd.tseries.frequencies.to_offset(rule)).total_seconds())
+    return bars, bar_size_seconds
 
 
 if __name__ == "__main__":
@@ -126,5 +126,5 @@ if __name__ == "__main__":
         bars = resample(clean, rule)
         start = pd.to_datetime(bars["ts"].iloc[0], unit="s", utc=True)
         end = pd.to_datetime(bars["ts"].iloc[-1], unit="s", utc=True)
-        filled = int((bars["minutes"] == 0).sum())
+        filled = int((bars["minutes_with_data"] == 0).sum())
         print(f"{rule}: {len(bars)} bars, {filled} filled, {start} to {end}")

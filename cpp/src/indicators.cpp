@@ -197,8 +197,8 @@ std::vector<double> atr(const Bars& bars, int n) {
 std::vector<double> hour_of_day(const Bars& bars) {
 
     // on bars coarser than an hour, the opening hour means nothing
-    if (bars.bar_seconds > 3600) {
-        throw std::invalid_argument("hour_of_day needs bar_seconds <= 3600");
+    if (bars.bar_size_seconds > 3600) {
+        throw std::invalid_argument("hour_of_day needs bar_size_seconds <= 3600");
     }
 
     std::vector<double> hour_of_day(bars.ts.size());

@@ -5,10 +5,15 @@
 namespace avbt {
 
 struct Bars {
-    int bar_seconds = 0;
+    // Length of every bar, in seconds. The same for the whole series:
+    // 3600 for hourly bars, 900 for 15-minute bars.
+    int bar_size_seconds = 0;
     std::vector<int64_t> ts;
     std::vector<double> open, high, low, close;
-    std::vector<int> minutes;
+    // One number per bar: how many 1-minute candles with real prices
+    // went into it, from 0 to bar_size_seconds / 60. Zero means the bar
+    // had no data and was filled flat at the previous close.
+    std::vector<int> minutes_with_data;
 };
 
 std::vector<double> sma(const std::vector<double>& series, int period);

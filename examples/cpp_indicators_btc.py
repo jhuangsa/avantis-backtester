@@ -73,15 +73,15 @@ def vec_suite(df):
     }
 
 
-def make_bars(df, bar_seconds):
+def make_bars(df, bar_size_seconds):
     return avbt_cpp.Bars(
-        bar_seconds,
+        bar_size_seconds,
         df["ts"].to_numpy(np.int64),
         df["open"].to_numpy(),
         df["high"].to_numpy(),
         df["low"].to_numpy(),
         df["close"].to_numpy(),
-        df["minutes"].to_numpy(np.int32),
+        df["minutes_with_data"].to_numpy(np.int32),
     )
 
 
@@ -102,8 +102,8 @@ def compare(cpp, vect):
 
 
 def run(label, rule):
-    df, bar_seconds = btc_bars.load_bars(rule)
-    bars = make_bars(df, bar_seconds)
+    df, bar_size_seconds = btc_bars.load_bars(rule)
+    bars = make_bars(df, bar_size_seconds)
     cpp = cpp_suite(bars, df)
     vect = vec_suite(df)
     parity = compare(cpp, vect)
@@ -134,7 +134,7 @@ def run(label, rule):
         ),
     }
     timings = {name: (best_seconds(c), best_seconds(v)) for name, (c, v) in calls.items()}
-    bars_seconds = best_seconds(lambda: make_bars(df, bar_seconds))
+    bars_seconds = best_seconds(lambda: make_bars(df, bar_size_seconds))
 
     print(f"\n{label}: {len(df):,} bars, {int((df['minutes'] == 0).sum()):,} filled forward")
     for name, same_nan, diff in parity:
@@ -184,7 +184,7 @@ def indicator_figure(result, title):
     fig.add_trace(go.Scatter(x=t, y=cut["true_range"], name="true range", line=dict(width=0.6, color="#bbb")), 2, 1)
     fig.add_trace(go.Scatter(x=t, y=cut["atr 14"], name="ATR 14", line=dict(width=1.4, color="#ff7f0e")), 2, 1)
     fig.add_trace(go.Scatter(x=t, y=cut["pct_change 24"] * 100, name="pct_change 24 (%)", line=dict(width=0.8, color="#9467bd")), 3, 1)
-    fig.add_trace(go.Scatter(x=t, y=d["minutes"], name="minutes", line=dict(width=0.8, color="#8c564b")), 4, 1)
+    fig.add_trace(go.Scatter(x=t, y=d["minutes_with_data"], name="minutes_with_data", line=dict(width=0.8, color="#8c564b")), 4, 1)
     fig.update_layout(title=title, height=900, template="plotly_white", legend=dict(orientation="h", y=1.04))
     return fig
 

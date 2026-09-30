@@ -35,22 +35,22 @@ py::array_t<double> to_numpy(std::vector<double>&& v) {
     return py::array_t<double>(owned->size(), owned->data(), free_when_done);
 }
 
-avbt::Bars make_bars(int bar_seconds,
+avbt::Bars make_bars(int bar_size_seconds,
                      const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& ts,
                      const InArray& open, const InArray& high, const InArray& low,
                      const InArray& close,
-                     const py::array_t<int, py::array::c_style | py::array::forcecast>& minutes) {
+                     const py::array_t<int, py::array::c_style | py::array::forcecast>& minutes_with_data) {
     avbt::Bars bars;
-    bars.bar_seconds = bar_seconds;
+    bars.bar_size_seconds = bar_size_seconds;
     bars.ts = to_vector(ts);
     bars.open = to_vector(open);
     bars.high = to_vector(high);
     bars.low = to_vector(low);
     bars.close = to_vector(close);
-    bars.minutes = to_vector(minutes);
+    bars.minutes_with_data = to_vector(minutes_with_data);
     const std::size_t n = bars.ts.size();
     if (bars.open.size() != n || bars.high.size() != n || bars.low.size() != n ||
-        bars.close.size() != n || bars.minutes.size() != n) {
+        bars.close.size() != n || bars.minutes_with_data.size() != n) {
         throw std::invalid_argument("every Bars column must be the same size");
     }
     return bars;
@@ -76,9 +76,9 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.doc() = "avbt C++ indicators";
 
     py::class_<avbt::Bars>(m, "Bars")
-        .def(py::init(&make_bars), py::arg("bar_seconds"), py::arg("ts"), py::arg("open"),
-             py::arg("high"), py::arg("low"), py::arg("close"), py::arg("minutes"))
-        .def_readonly("bar_seconds", &avbt::Bars::bar_seconds)
+        .def(py::init(&make_bars), py::arg("bar_size_seconds"), py::arg("ts"), py::arg("open"),
+             py::arg("high"), py::arg("low"), py::arg("close"), py::arg("minutes_with_data"))
+        .def_readonly("bar_size_seconds", &avbt::Bars::bar_size_seconds)
         .def("__len__", [](const avbt::Bars& b) { return b.ts.size(); });
 
     m.def("sma", [](const InArray& s, int period) {
