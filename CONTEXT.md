@@ -150,3 +150,21 @@ The single market a series covers.
 
 **Bar size**:
 The spacing of the series a backtest is scored on. It is part of the result.
+
+### The portfolio
+
+**Portfolio**:
+The account the trades are paid from: a balance and the positions it pays for. Its results are in account money, not price percent. It holds at most one position per instrument, in several instruments at once. See ADR 0008.
+_Avoid_: the wallet, a book
+
+**Position**:
+One open trade in a portfolio: its instrument, side, size, collateral, stop, and liquidation price.
+
+**Collateral**:
+The balance a position locks: its notional over its leverage. A trade whose collateral exceeds the free cash is skipped.
+
+**Liquidation**:
+The forced close once a position's loss reaches 85% of its collateral, the Veranta rule.
+
+**Hard stop**:
+The fall below the starting balance, counting unrealized results, at which every position closes and the portfolio stops trading for good. 30% by default.

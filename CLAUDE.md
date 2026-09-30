@@ -22,10 +22,10 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 
 **Python tests**: `tests/`, run with `python3 -m pytest` from the root. Tests build their own series and never read `data/`.
 
-**C++ indicators** (`cpp/`, built with `cpp/CMakeLists.txt`):
-- `include/avbt/indicators.hpp`: the `Bars` struct and indicator declarations.
-- `src/indicators.cpp`: the indicator bodies.
-- `tests/test_indicators.cpp`: a plain test program; exit code 0 is a pass.
+**C++** (`cpp/`, built with `cpp/CMakeLists.txt`):
+- `include/avbt/indicators.hpp`, `src/indicators.cpp`: the `Bars` struct and the indicators.
+- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, liquidation, hard stop); ADR 0008.
+- `tests/test_*.cpp`: plain test programs; exit code 0 is a pass.
 - Build from `cpp/`: `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build --output-on-failure`. `build/` is generated.
 
 **Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`). The `.html` files are their outputs.
