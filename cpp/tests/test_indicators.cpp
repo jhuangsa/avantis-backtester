@@ -313,6 +313,200 @@ void test_atr_rejects_bad_n(int n) {
     }
 }
 
+// ---- hour_of_day ----
+
+avbt::Bars make_ts_bars(const std::vector<int64_t>& ts, int bar_seconds) {
+    avbt::Bars bars;
+    bars.bar_seconds = bar_seconds;
+    bars.ts = ts;
+    return bars;
+}
+
+// 0 is 00:00, 3600 is 01:00, 16 * 3600 + 59 is 16:00:59, 86400 + 5 * 3600 is day 2 05:00.
+void test_hour_of_day_basic() {
+    check_series("hour_of_day basic",
+                 avbt::hour_of_day(make_ts_bars({0, 3600, 16 * 3600 + 59, 86400 + 5 * 3600}, 3600)),
+                 {0, 1, 16, 5});
+}
+
+// Exactly midnight is hour 0; 23:59:59 is still hour 23.
+void test_hour_of_day_day_edges() {
+    check_series("hour_of_day day edges",
+                 avbt::hour_of_day(make_ts_bars({86400, 86400 - 1, 1699920000}, 60)),
+                 {0, 23, 0});
+}
+
+// Before 1970: -1 is 23:59:59, -3600 is 23:00, -3601 is 22:59:59.
+void test_hour_of_day_before_1970() {
+    check_series("hour_of_day before 1970",
+                 avbt::hour_of_day(make_ts_bars({-1, -3600, -3601, -86400}, 3600)),
+                 {23, 23, 22, 0});
+}
+
+void test_hour_of_day_hourly_bars_ok() {
+    check_series("hour_of_day bar_seconds 3600",
+                 avbt::hour_of_day(make_ts_bars({7200}, 3600)), {2});
+}
+
+void test_hour_of_day_rejects_coarse_bars() {
+    try {
+        avbt::hour_of_day(make_ts_bars({0}, 3601));
+        fail("hour_of_day bar_seconds 3601", "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
+void test_hour_of_day_empty() {
+    check_series("hour_of_day empty", avbt::hour_of_day(make_ts_bars({}, 3600)), {});
+}
+
+// ---- bar_change ----
+
+avbt::Bars make_ohlc_bars(const std::vector<double>& open,
+                          const std::vector<double>& high,
+                          const std::vector<double>& low,
+                          const std::vector<double>& close) {
+    avbt::Bars bars = make_bars(high, low, close);
+    bars.open = open;
+    return bars;
+}
+
+// open, high, low, close by bar:
+//   bar 0: 100, 110,  90, 100
+//   bar 1: 105, 120, 100, 110
+//   bar 2:  99, 121,  88,  99
+avbt::Bars change_bars() {
+    return make_ohlc_bars({100, 105, 99}, {110, 120, 121}, {90, 100, 88},
+                          {100, 110, 99});
+}
+
+// 120 / 100 - 1 = 0.2, 121 / 110 - 1 = 0.1.
+void test_bar_change_high_close() {
+    check_series("bar_change high/close",
+                 avbt::bar_change(change_bars(), avbt::Field::High, avbt::Field::Close, 1),
+                 {NaN, 0.2, 0.1});
+}
+
+// The overnight gap: 105 / 100 - 1 = 0.05, 99 / 110 - 1 = -0.1.
+void test_bar_change_open_close_gap() {
+    check_series("bar_change open/close",
+                 avbt::bar_change(change_bars(), avbt::Field::Open, avbt::Field::Close, 1),
+                 {NaN, 0.05, -0.1});
+}
+
+// 100 / 100 - 1 = 0, 88 / 110 - 1 = -0.2.
+void test_bar_change_low_close() {
+    check_series("bar_change low/close",
+                 avbt::bar_change(change_bars(), avbt::Field::Low, avbt::Field::Close, 1),
+                 {NaN, 0, -0.2});
+}
+
+// 99 / 100 - 1 = -0.01.
+void test_bar_change_lag_two() {
+    check_series("bar_change lag 2",
+                 avbt::bar_change(change_bars(), avbt::Field::Close, avbt::Field::Close, 2),
+                 {NaN, NaN, -0.01});
+}
+
+void test_bar_change_lag_longer_than_series() {
+    check_series("bar_change lag > size",
+                 avbt::bar_change(change_bars(), avbt::Field::High, avbt::Field::Close, 5),
+                 {NaN, NaN, NaN});
+}
+
+// A missing value on either side leaves only the bars that read it undefined.
+void test_bar_change_missing_value() {
+    avbt::Bars now_missing = change_bars();
+    now_missing.high[1] = NaN;
+    check_series("bar_change missing now",
+                 avbt::bar_change(now_missing, avbt::Field::High, avbt::Field::Close, 1),
+                 {NaN, NaN, 0.1});
+
+    avbt::Bars then_missing = change_bars();
+    then_missing.close[1] = NaN;
+    check_series("bar_change missing then",
+                 avbt::bar_change(then_missing, avbt::Field::High, avbt::Field::Close, 1),
+                 {NaN, 0.2, NaN});
+}
+
+void test_bar_change_rejects_bad_lag(int lag) {
+    const std::string label = "bar_change lag " + std::to_string(lag);
+    try {
+        avbt::bar_change(change_bars(), avbt::Field::High, avbt::Field::Close, lag);
+        fail(label, "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
+// ---- chandelier ----
+
+// On sample_bars with n = 2: atr is {NaN, NaN, 2, 3.25, 2.625},
+// prior_max(high) is {NaN, NaN, 12, 12, 15}, prior_min(low) is {NaN, NaN, 8, 9, 10}.
+// Long, k = 1: 12 - 2 = 10, 12 - 3.25 = 8.75, 15 - 2.625 = 12.375.
+// The new high of 15 at bar 3 raises the line only at bar 4.
+void test_chandelier_long() {
+    check_series("chandelier long",
+                 avbt::chandelier(sample_bars(), 2, 1, avbt::Side::Long),
+                 {NaN, NaN, 10, 8.75, 12.375});
+}
+
+// Short, k = 2: 8 + 4 = 12, 9 + 6.5 = 15.5, 10 + 5.25 = 15.25.
+void test_chandelier_short() {
+    check_series("chandelier short",
+                 avbt::chandelier(sample_bars(), 2, 2, avbt::Side::Short),
+                 {NaN, NaN, 12, 15.5, 15.25});
+}
+
+// n = 3: atr is {NaN, NaN, NaN, 8.5 / 3, 23 / 9}, prior_max(high) is {.., 12, 15}.
+void test_chandelier_n_three() {
+    check_series("chandelier n 3",
+                 avbt::chandelier(sample_bars(), 3, 1, avbt::Side::Long),
+                 {NaN, NaN, NaN, 12 - 8.5 / 3, 15 - 23.0 / 9});
+}
+
+// A gap in the ATR leaves the line undefined though the extreme is defined.
+void test_chandelier_undefined_atr() {
+    avbt::Bars bars = sample_bars();
+    bars.close[2] = NaN;
+    check_series("chandelier atr gap",
+                 avbt::chandelier(bars, 2, 1, avbt::Side::Long),
+                 {NaN, NaN, 10, NaN, NaN});
+}
+
+// True ranges: 1, max(2, 10, 8) = 10, max(1, 7, 8) = 8, 1, 1.
+// atr n 2: (10 + 8) / 2 = 9, (9 + 1) / 2 = 5, (5 + 1) / 2 = 3.
+// prior_max(high, 2): 20, 20, then 12 once the 20 at bar 1 leaves.
+// Long, k = 1: 11, 15, 9.
+void test_chandelier_old_high_leaves() {
+    avbt::Bars bars = make_bars({10, 20, 12, 12, 12}, {9, 18, 11, 11, 11},
+                                {10, 19, 11.5, 11.5, 11.5});
+    check_series("chandelier old high leaves",
+                 avbt::chandelier(bars, 2, 1, avbt::Side::Long),
+                 {NaN, NaN, 11, 15, 9});
+}
+
+void test_chandelier_rejects_bad_n(int n) {
+    const std::string label = "chandelier n " + std::to_string(n);
+    try {
+        avbt::chandelier(sample_bars(), n, 1, avbt::Side::Long);
+        fail(label, "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
+void test_chandelier_rejects_bad_k(double k) {
+    const std::string label = "chandelier k " + std::to_string(k);
+    try {
+        avbt::chandelier(sample_bars(), 2, k, avbt::Side::Long);
+        fail(label, "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -363,6 +557,32 @@ int main() {
     test_atr_gap_carries_forward();
     test_atr_rejects_bad_n(0);
     test_atr_rejects_bad_n(-1);
+
+    test_hour_of_day_basic();
+    test_hour_of_day_day_edges();
+    test_hour_of_day_before_1970();
+    test_hour_of_day_hourly_bars_ok();
+    test_hour_of_day_rejects_coarse_bars();
+    test_hour_of_day_empty();
+
+    test_bar_change_high_close();
+    test_bar_change_open_close_gap();
+    test_bar_change_low_close();
+    test_bar_change_lag_two();
+    test_bar_change_lag_longer_than_series();
+    test_bar_change_missing_value();
+    test_bar_change_rejects_bad_lag(0);
+    test_bar_change_rejects_bad_lag(-1);
+
+    test_chandelier_long();
+    test_chandelier_short();
+    test_chandelier_n_three();
+    test_chandelier_undefined_atr();
+    test_chandelier_old_high_leaves();
+    test_chandelier_rejects_bad_n(0);
+    test_chandelier_rejects_bad_k(0);
+    test_chandelier_rejects_bad_k(-1);
+    test_chandelier_rejects_bad_k(NaN);
 
     if (failures == 0) {
         std::printf("All checks passed.\n");

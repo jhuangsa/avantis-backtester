@@ -8,6 +8,7 @@
 #include <pybind11/pybind11.h>
 
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -55,6 +56,20 @@ avbt::Bars make_bars(int bar_seconds,
     return bars;
 }
 
+avbt::Field field_named(const std::string& name) {
+    if (name == "open") return avbt::Field::Open;
+    if (name == "high") return avbt::Field::High;
+    if (name == "low") return avbt::Field::Low;
+    if (name == "close") return avbt::Field::Close;
+    throw std::invalid_argument("field must be open, high, low, or close, got " + name);
+}
+
+avbt::Side side_named(const std::string& name) {
+    if (name == "long") return avbt::Side::Long;
+    if (name == "short") return avbt::Side::Short;
+    throw std::invalid_argument("side must be long or short, got " + name);
+}
+
 }  // namespace
 
 PYBIND11_MODULE(avbt_cpp, m) {
@@ -89,4 +104,17 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.def("atr", [](const avbt::Bars& b, int n) {
         return to_numpy(avbt::atr(b, n));
     }, py::arg("bars"), py::arg("n"));
+
+    m.def("hour_of_day", [](const avbt::Bars& b) {
+        return to_numpy(avbt::hour_of_day(b));
+    }, py::arg("bars"));
+
+    m.def("bar_change", [](const avbt::Bars& b, const std::string& now_field,
+                           const std::string& then_field, int lag) {
+        return to_numpy(avbt::bar_change(b, field_named(now_field), field_named(then_field), lag));
+    }, py::arg("bars"), py::arg("now_field"), py::arg("then_field"), py::arg("lag"));
+
+    m.def("chandelier", [](const avbt::Bars& b, int n, double k, const std::string& side) {
+        return to_numpy(avbt::chandelier(b, n, k, side_named(side)));
+    }, py::arg("bars"), py::arg("n"), py::arg("k"), py::arg("side"));
 }

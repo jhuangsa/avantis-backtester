@@ -188,4 +188,106 @@ std::vector<double> atr(const Bars& bars, int n) {
 
     return atr;
 }
+
+
+// The UTC hour at which each bar opens, from ts (UTC seconds at the bar's start).
+// Under next-open fill, a rule on hour_of_day == 16 is decided at the close of
+// the 16:00 bar (17:00) and fills at the open of the 17:00 bar.
+// UTC only: the caller shifts ts for another zone.
+std::vector<double> hour_of_day(const Bars& bars) {
+
+    // on bars coarser than an hour, the opening hour means nothing
+    if (bars.bar_seconds > 3600) {
+        throw std::invalid_argument("hour_of_day needs bar_seconds <= 3600");
+    }
+
+    std::vector<double> hour_of_day(bars.ts.size());
+
+    for (int i = 0; i < bars.ts.size(); i++) {
+
+        // floor division, so a time before 1970 still lands in 0..23
+        int64_t seconds_into_day = bars.ts[i] % 86400;
+        if (seconds_into_day < 0) {
+            seconds_into_day += 86400;
+        }
+        hour_of_day[i] = static_cast<double>(seconds_into_day / 3600);
+    }
+
+    return hour_of_day;
+}
+
+
+static const std::vector<double>& field_of(const Bars& bars, Field field) {
+    switch (field) {
+        case Field::Open: return bars.open;
+        case Field::High: return bars.high;
+        case Field::Low: return bars.low;
+        case Field::Close: return bars.close;
+    }
+    throw std::invalid_argument("unknown field");
+}
+
+
+std::vector<double> bar_change(const Bars& bars, Field now_field, Field then_field, int lag) {
+
+    if (lag < 1) {
+        throw std::invalid_argument("lag must be greater than 0");
+    }
+
+    const std::vector<double>& now = field_of(bars, now_field);
+    const std::vector<double>& then = field_of(bars, then_field);
+    if (now.size() != then.size()) {
+        throw std::invalid_argument("fields must be the same size");
+    }
+
+    std::vector<double> bar_change(now.size());
+
+    for (int i = 0; i < now.size(); i++) {
+
+        // bar i - lag does not exist yet, or a value is missing
+        if (i < lag || !std::isfinite(now[i]) || !std::isfinite(then[i - lag])) {
+            bar_change[i] = std::nan("");
+            continue;
+        }
+
+        bar_change[i] = now[i] / then[i - lag] - 1;
+    }
+
+    return bar_change;
+}
+
+
+// The fixed-window line only. The extreme covers [i - n, i - 1], so a new high
+// enters the extreme one bar later (its own range still widens that bar's ATR),
+// and an old high leaving the window lowers the line.
+// The ratchet while a trade is open depends on the entry bar; it belongs in the engine.
+std::vector<double> chandelier(const Bars& bars, int n, double k, Side side) {
+
+    if (n < 1) {
+        throw std::invalid_argument("n must be greater than 0");
+    }
+    if (!(k > 0)) {
+        throw std::invalid_argument("k must be greater than 0");
+    }
+
+    std::vector<double> range = atr(bars, n);
+    std::vector<double> extreme = side == Side::Long ? prior_max(bars.high, n)
+                                                     : prior_min(bars.low, n);
+    double sign = side == Side::Long ? -1.0 : 1.0;
+
+    std::vector<double> chandelier(extreme.size());
+
+    for (int i = 0; i < extreme.size(); i++) {
+
+        // undefined until both the extreme and the ATR are
+        if (!std::isfinite(extreme[i]) || !std::isfinite(range[i])) {
+            chandelier[i] = std::nan("");
+            continue;
+        }
+
+        chandelier[i] = extreme[i] + sign * k * range[i];
+    }
+
+    return chandelier;
+}
 } // namespace avbt
