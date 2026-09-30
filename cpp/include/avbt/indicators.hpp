@@ -19,6 +19,10 @@ std::vector<double> prior_min(const std::vector<double>& series, int period);
 
 std::vector<double> pct_change(const std::vector<double>& series, int lag);
 
+std::vector<double> true_range(const Bars& bars);
+
+std::vector<double> atr(const Bars& bars, int n);
+
 
 }
 

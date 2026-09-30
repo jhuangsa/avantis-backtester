@@ -195,6 +195,101 @@ void test_pct_change_rejects_bad_lag(int lag) {
     }
 }
 
+// ---- true_range and atr ----
+
+avbt::Bars make_bars(const std::vector<double>& high,
+                     const std::vector<double>& low,
+                     const std::vector<double>& close) {
+    avbt::Bars bars;
+    bars.high = high;
+    bars.low = low;
+    bars.close = close;
+    return bars;
+}
+
+// True ranges, worked by hand:
+//   bar 0: no previous close        -> 10 - 8             = 2
+//   bar 1: inside range wins (tie)  -> max(3, 3, 0)       = 3
+//   bar 2: inside range wins (tie)  -> max(1, 0.5, 1)     = 1
+//   bar 3: gap up from 10.5         -> max(1, 4.5, 3.5)   = 4.5
+//   bar 4: gap down from 14         -> max(1, 1, 2)       = 2
+avbt::Bars sample_bars() {
+    return make_bars({10, 12, 11, 15, 13},
+                     {8, 9, 10, 14, 12},
+                     {9, 11, 10.5, 14, 12});
+}
+
+void test_true_range_basic() {
+    check_series("true_range basic", avbt::true_range(sample_bars()),
+                 {2, 3, 1, 4.5, 2});
+}
+
+// A missing previous close leaves only that bar undefined.
+void test_true_range_missing_close() {
+    avbt::Bars bars = sample_bars();
+    bars.close[2] = NaN;
+    check_series("true_range missing close", avbt::true_range(bars),
+                 {2, 3, 1, NaN, 2});
+}
+
+void test_true_range_empty() {
+    check_series("true_range empty", avbt::true_range(make_bars({}, {}, {})), {});
+}
+
+void test_true_range_rejects_mismatched_sizes() {
+    try {
+        avbt::true_range(make_bars({1, 2}, {1}, {1, 2}));
+        fail("true_range sizes", "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
+// Seed at index 2 is mean(TR[1], TR[2]) = (3 + 1) / 2 = 2, not (2 + 3) / 2.
+// Then (2 * 1 + 4.5) / 2 = 3.25, then (3.25 * 1 + 2) / 2 = 2.625.
+void test_atr_basic() {
+    check_series("atr n 2", avbt::atr(sample_bars(), 2),
+                 {NaN, NaN, 2, 3.25, 2.625});
+}
+
+// Seed at index 3 is (3 + 1 + 4.5) / 3 = 8.5 / 3.
+// Then (8.5 / 3 * 2 + 2) / 3 = 23 / 9.
+void test_atr_n_three() {
+    check_series("atr n 3", avbt::atr(sample_bars(), 3),
+                 {NaN, NaN, NaN, 8.5 / 3, 23.0 / 9});
+}
+
+// With n = 1 the seed is TR[1] and each later value is just TR[t].
+void test_atr_n_one() {
+    check_series("atr n 1", avbt::atr(sample_bars(), 1),
+                 {NaN, 3, 1, 4.5, 2});
+}
+
+// n = size - 1 is the last n with a value; n = size has none.
+void test_atr_n_near_size() {
+    check_series("atr n 4", avbt::atr(sample_bars(), 4),
+                 {NaN, NaN, NaN, NaN, (3 + 1 + 4.5 + 2) / 4.0});
+    check_series("atr n 5", avbt::atr(sample_bars(), 5),
+                 {NaN, NaN, NaN, NaN, NaN});
+}
+
+// Once a true range is undefined, every later ATR stays undefined.
+void test_atr_gap_carries_forward() {
+    avbt::Bars bars = sample_bars();
+    bars.close[2] = NaN;
+    check_series("atr gap", avbt::atr(bars, 2), {NaN, NaN, 2, NaN, NaN});
+}
+
+void test_atr_rejects_bad_n(int n) {
+    const std::string label = "atr n " + std::to_string(n);
+    try {
+        avbt::atr(sample_bars(), n);
+        fail(label, "expected std::invalid_argument, nothing was thrown");
+    } catch (const std::invalid_argument&) {
+        // Expected.
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -228,6 +323,19 @@ int main() {
     test_pct_change_empty();
     test_pct_change_rejects_bad_lag(0);
     test_pct_change_rejects_bad_lag(-1);
+
+    test_true_range_basic();
+    test_true_range_missing_close();
+    test_true_range_empty();
+    test_true_range_rejects_mismatched_sizes();
+
+    test_atr_basic();
+    test_atr_n_three();
+    test_atr_n_one();
+    test_atr_n_near_size();
+    test_atr_gap_carries_forward();
+    test_atr_rejects_bad_n(0);
+    test_atr_rejects_bad_n(-1);
 
     if (failures == 0) {
         std::printf("All checks passed.\n");
