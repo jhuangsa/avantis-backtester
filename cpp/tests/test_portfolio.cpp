@@ -31,6 +31,7 @@ using avbt::Portfolio;
 using avbt::PortfolioSettings;
 using avbt::Quote;
 using avbt::Side;
+using avbt::Cause;
 
 // 1% of 10,000 is 100 at risk. A stop 5 below 100 gives 20 units, 2,000 of
 // notional, 200 of collateral at 10x, and liquidation 0.85 * 200 / 20 = 8.5 away.
@@ -70,7 +71,7 @@ void test_open_skips() {
 
 void test_partial_close() {
     Portfolio p = btc_long();
-    check_value("half close result", p.close("BTC", 110.0, 0.5), 100.0);
+    check_value("half close result", p.close("BTC", 110.0, 0.5)->result, 100.0);
     check_value("half close balance", p.report().balance, 10100.0);
     check_value("half close size", p.positions().at(0).size, 10.0);
     check_value("half close keeps liquidation", p.positions().at(0).liquidation_price, 91.5);
@@ -80,7 +81,8 @@ void test_partial_close() {
 
 void test_stop_fills_at_stop() {
     Portfolio p = btc_long();
-    p.check({Quote{"BTC", 99.0, 99.0, 94.0, 96.0}});
+    auto closed = p.check({Quote{"BTC", 99.0, 99.0, 94.0, 96.0}});
+    check_true("stop cause", closed.size() == 1 && closed[0].cause == Cause::Stop);
     check_value("stop balance", p.report().balance, 9900.0);
     check_value("stop closes", p.report().open_positions, 0);
 }
@@ -93,7 +95,8 @@ void test_gap_past_stop_fills_at_open() {
 
 void test_gap_past_liquidation() {
     Portfolio p = btc_long();
-    p.check({Quote{"BTC", 90.0, 90.0, 80.0, 85.0}});
+    auto closed = p.check({Quote{"BTC", 90.0, 90.0, 80.0, 85.0}});
+    check_true("liquidation cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     // Loss capped at 0.85 of 200 collateral.
     check_value("liquidation balance", p.report().balance, 9830.0);
 }
@@ -111,7 +114,10 @@ void test_hard_stop_counts_unrealized() {
     Portfolio p(PortfolioSettings{.risk_per_trade = 0.25});
     check_true("hard stop opens BTC", p.open("BTC", Side::Long, 100.0, 50.0, 1.0));
     check_true("hard stop opens GOOGL", p.open("GOOGL", Side::Long, 200.0, 100.0, 1.0));
-    p.check({Quote{"BTC", 60.0, 60.0, 60.0, 60.0}, Quote{"GOOGL", 150.0, 150.0, 150.0, 150.0}});
+    auto closed = p.check({Quote{"BTC", 60.0, 60.0, 60.0, 60.0},
+                           Quote{"GOOGL", 150.0, 150.0, 150.0, 150.0}});
+    check_true("hard stop cause", closed.size() == 2 && closed[0].cause == Cause::HardStop &&
+                                      closed[1].cause == Cause::HardStop);
     avbt::Report r = p.report();
     check_true("hard stop halts", r.halted);
     check_value("hard stop closes all", r.open_positions, 0);
@@ -126,7 +132,55 @@ void test_hard_stop_holds_above_floor() {
     check_true("above floor keeps trading", !p.report().halted);
 }
 
+// 20 units from 100, take profit 110. A bar from 105 up to 112 fills at 110: +200.
+void test_take_profit_fills_at_level() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0);
+    auto closed = p.check({Quote{"BTC", 105.0, 112.0, 104.0, 111.0}});
+    check_true("take profit cause", closed.size() == 1 && closed[0].cause == Cause::TakeProfit);
+    check_value("take profit fill", closed.at(0).exit_price, 110.0);
+    check_value("take profit balance", p.report().balance, 10200.0);
 }
+
+// A bar that opens at 115, past the 110 take profit, fills at 115: 20 * 15 = +300.
+void test_take_profit_gap_fills_at_open() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0);
+    auto closed = p.check({Quote{"BTC", 115.0, 116.0, 114.0, 115.0}});
+    check_value("take profit gap fill", closed.at(0).exit_price, 115.0);
+    check_value("take profit gap balance", p.report().balance, 10300.0);
+}
+
+// A bar from 94 to 112 reaches both the 95 stop and the 110 take profit: stop, -100.
+void test_stop_wins_over_take_profit() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0);
+    auto closed = p.check({Quote{"BTC", 100.0, 112.0, 94.0, 100.0}});
+    check_true("both levels stop cause", closed.size() == 1 && closed[0].cause == Cause::Stop);
+    check_value("both levels balance", p.report().balance, 9900.0);
+}
+
+void test_take_profit_wrong_side() {
+    Portfolio p(PortfolioSettings{});
+    check_true("skip long take profit below entry",
+               !p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 90.0));
+    check_true("skip short take profit above entry",
+               !p.open("BTC", Side::Short, 100.0, 105.0, 10.0, 110.0));
+}
+
+// Fee 0.1%. Open: 0.001 * 20 * 100 = 2, balance 9,998. Close at 110: fee
+// 0.001 * 20 * 110 = 2.2. Result 200 - 2 - 2.2 = 195.8; balance 9,998 + 200 - 2.2.
+void test_fees() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), 0.001);
+    check_value("fee at open", p.report().balance, 9998.0);
+    auto closed = p.close("BTC", 110.0);
+    check_value("fee result", closed->result, 195.8);
+    check_value("fee balance", p.report().balance, 10195.8);
+}
+
+}
+
 
 int main() {
     test_open_sizes_from_risk();
@@ -139,6 +193,11 @@ int main() {
     test_mark_moves_equity();
     test_hard_stop_counts_unrealized();
     test_hard_stop_holds_above_floor();
+    test_take_profit_fills_at_level();
+    test_take_profit_gap_fills_at_open();
+    test_stop_wins_over_take_profit();
+    test_take_profit_wrong_side();
+    test_fees();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

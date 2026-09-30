@@ -1,4 +1,6 @@
 #pragma once
+#include <cmath>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,10 +36,29 @@ struct Position {
     // Balance locked by this trade: notional / leverage.
     double collateral = 0.0;
     double stop_price = 0.0;
+    // NaN when the position has no take profit.
+    double take_profit_price = 0.0;
+    // Fraction of notional charged at every fill, open and close.
+    double fee_rate = 0.0;
     // Where the loss reaches liquidation_loss of the collateral.
     double liquidation_price = 0.0;
     // The last close seen for the instrument; values the unrealized result.
     double mark_price = 0.0;
+};
+
+// What closed a position. Order is a strategy's close order.
+enum class Cause { Stop, TakeProfit, Liquidation, HardStop, Order };
+
+// A position, or part of one, that has closed.
+struct Closed {
+    std::string instrument;
+    Side side = Side::Long;
+    double entry_price = 0.0;
+    double exit_price = 0.0;
+    double size = 0.0;
+    // Price result minus the open and close fees on this size.
+    double result = 0.0;
+    Cause cause = Cause::Order;
 };
 
 // One instrument's bar, handed to Portfolio::check.
@@ -66,24 +87,31 @@ public:
         : settings_(settings), balance_(settings.starting_balance) {}
 
     // Opens a position sized so a fill at the stop loses risk_per_trade of
-    // the balance. Returns false, and opens nothing, when the portfolio has
-    // halted, the instrument already has a position, the stop is on the
-    // wrong side of the entry, leverage is not positive, the stop would lose
-    // more than max_stop_loss of the collateral, or the collateral exceeds
-    // the free cash.
+    // the balance; the fee is not part of the sizing. The open fee comes out
+    // of the balance. A NaN take profit means none: NaN, not std::optional,
+    // because the indicators already use NaN for "no value" and Position
+    // stays a plain struct of doubles. Returns false, and opens nothing,
+    // when the portfolio has halted, the instrument already has a position,
+    // the stop or take profit is on the wrong side of the entry, leverage is
+    // not positive, the stop would lose more than max_stop_loss of the
+    // collateral, or the collateral exceeds the free cash.
     bool open(const std::string& instrument, Side side, double entry_price,
-              double stop_price, double leverage);
+              double stop_price, double leverage,
+              double take_profit_price = std::nan(""), double fee_rate = 0.0);
 
-    // Closes `fraction` (0 to 1] of the instrument's position at `price` and
-    // returns the realized result. Returns 0 when there is no position.
-    double close(const std::string& instrument, double price, double fraction = 1.0);
+    // Closes `fraction` (0 to 1] of the instrument's position at `price`,
+    // charges the close fee, and returns what closed. Returns nothing when
+    // there is no position.
+    std::optional<Closed> close(const std::string& instrument, double price,
+                                double fraction = 1.0, Cause cause = Cause::Order);
 
     // Applies one bar per instrument, in this order: each position's stop
-    // (at the stop, or at the open when the bar gaps past it), then
+    // and take profit (at the level, or at the open when the bar gaps past
+    // it; the stop wins when the bar reaches both, ADR 0003), then
     // liquidation (at the liquidation price, when a gap passes both), then
     // the hard stop on equity at the closes. Instruments without a quote keep
-    // their last mark.
-    void check(const std::vector<Quote>& quotes);
+    // their last mark. Returns every position it closed.
+    std::vector<Closed> check(const std::vector<Quote>& quotes);
 
     Report report() const;
 

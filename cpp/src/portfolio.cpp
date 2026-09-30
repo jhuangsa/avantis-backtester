@@ -13,7 +13,8 @@ double direction(Side side) { return side == Side::Long ? 1.0 : -1.0; }
 }
 
 bool Portfolio::open(const std::string& instrument, Side side, double entry_price,
-                     double stop_price, double leverage) {
+                     double stop_price, double leverage,
+                     double take_profit_price, double fee_rate) {
     if (halted_ || leverage <= 0.0 || entry_price <= 0.0) return false;
     for (const Position& p : positions_) {
         if (p.instrument == instrument) return false;
@@ -21,6 +22,7 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
     // Distance from entry to stop, positive only when the stop is on the losing side.
     double distance = direction(side) * (entry_price - stop_price);
     if (distance <= 0.0) return false;
+    if (direction(side) * (take_profit_price - entry_price) <= 0.0) return false;
 
     double risk = settings_.risk_per_trade * balance_;
     double size = risk / distance;
@@ -37,20 +39,31 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
         .size = size,
         .collateral = collateral,
         .stop_price = stop_price,
+        .take_profit_price = take_profit_price,
+        .fee_rate = fee_rate,
         .liquidation_price = entry_price - direction(side) * liquidation_move,
         .mark_price = entry_price,
     });
+    balance_ -= fee_rate * size * entry_price;
     return true;
 }
 
-double Portfolio::close(const std::string& instrument, double price, double fraction) {
+std::optional<Closed> Portfolio::close(const std::string& instrument, double price,
+                                       double fraction, Cause cause) {
     auto it = std::find_if(positions_.begin(), positions_.end(),
                            [&](const Position& p) { return p.instrument == instrument; });
-    if (it == positions_.end() || fraction <= 0.0) return 0.0;
+    if (it == positions_.end() || fraction <= 0.0) return std::nullopt;
     fraction = std::min(fraction, 1.0);
 
-    double result = direction(it->side) * (price - it->entry_price) * it->size * fraction;
-    balance_ += result;
+    double size = it->size * fraction;
+    double close_fee = it->fee_rate * size * price;
+    double open_fee = it->fee_rate * size * it->entry_price;
+    double gross = direction(it->side) * (price - it->entry_price) * size;
+    // The open fee left the balance at the open; only the close fee leaves now.
+    balance_ += gross - close_fee;
+    Closed closed{.instrument = it->instrument, .side = it->side,
+                  .entry_price = it->entry_price, .exit_price = price, .size = size,
+                  .result = gross - close_fee - open_fee, .cause = cause};
     if (fraction >= 1.0) {
         positions_.erase(it);
     } else {
@@ -58,10 +71,11 @@ double Portfolio::close(const std::string& instrument, double price, double frac
         it->size *= 1.0 - fraction;
         it->collateral *= 1.0 - fraction;
     }
-    return result;
+    return closed;
 }
 
-void Portfolio::check(const std::vector<Quote>& quotes) {
+std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
+    std::vector<Closed> out;
     for (const Quote& q : quotes) {
         auto it = std::find_if(positions_.begin(), positions_.end(),
                                [&](const Position& p) { return p.instrument == q.instrument; });
@@ -72,6 +86,15 @@ void Portfolio::check(const std::vector<Quote>& quotes) {
         // The worst price the bar reached against the position.
         double worst = is_long ? q.low : q.high;
         bool stop_hit = is_long ? worst <= p.stop_price : worst >= p.stop_price;
+        // The best price the bar reached for the position. NaN compares false.
+        double best = is_long ? q.high : q.low;
+        bool take_hit = is_long ? best >= p.take_profit_price : best <= p.take_profit_price;
+        if (!stop_hit && take_hit) {
+            bool past = is_long ? q.open > p.take_profit_price : q.open < p.take_profit_price;
+            out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price,
+                                 1.0, Cause::TakeProfit));
+            continue;
+        }
         if (!stop_hit) {
             p.mark_price = q.close;
             continue;
@@ -81,16 +104,19 @@ void Portfolio::check(const std::vector<Quote>& quotes) {
         bool gapped = is_long ? q.open < p.stop_price : q.open > p.stop_price;
         double fill = gapped ? q.open : p.stop_price;
         bool liquidated = is_long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
-        close(p.instrument, liquidated ? p.liquidation_price : fill);
+        out.push_back(*close(p.instrument, liquidated ? p.liquidation_price : fill, 1.0,
+                             liquidated ? Cause::Liquidation : Cause::Stop));
     }
 
     double floor = settings_.starting_balance * (1.0 - settings_.hard_stop);
     if (!halted_ && report().equity <= floor) {
         while (!positions_.empty()) {
-            close(positions_.front().instrument, positions_.front().mark_price);
+            out.push_back(*close(positions_.front().instrument,
+                                 positions_.front().mark_price, 1.0, Cause::HardStop));
         }
         halted_ = true;
     }
+    return out;
 }
 
 Report Portfolio::report() const {
