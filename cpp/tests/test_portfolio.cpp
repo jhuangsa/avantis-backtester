@@ -223,6 +223,18 @@ void test_open_refuses_bad_trail_or_fraction() {
     check_true("skip fraction above one", !p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0, 0.0, 0.0, 1.5));
 }
 
+// Risk scaled by leverage: 1% * 5 = 5% of 10,000 is 500 at risk, so a stop 5
+// below 100 gives 100 units, 5 times the 20 of an unscaled open, and the stop
+// loses 500. Collateral is 100 * 100 / 5 = 2,000.
+void test_scale_risk_with_leverage() {
+    Portfolio p(PortfolioSettings{.scale_risk_with_leverage = true});
+    p.open("BTC", Side::Long, 100.0, 95.0, 5.0);
+    check_value("scaled size", p.positions().at(0).size, 100.0);
+    check_value("scaled collateral", p.positions().at(0).collateral, 2000.0);
+    p.check({Quote{"BTC", 96.0, 96.0, 94.0, 95.0}});
+    check_value("scaled stop loss", p.report().balance, 9500.0);
+}
+
 }
 
 
@@ -246,6 +258,7 @@ int main() {
     test_trailing_stop_short();
     test_partial_take_profit();
     test_open_refuses_bad_trail_or_fraction();
+    test_scale_risk_with_leverage();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

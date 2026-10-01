@@ -27,6 +27,7 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
     if (direction(side) * (take_profit_price - entry_price) <= 0.0) return false;
 
     double risk = settings_.risk_per_trade * balance_;
+    if (settings_.scale_risk_with_leverage) risk *= leverage;
     double size = risk / distance;
     double collateral = size * entry_price / leverage;
     if (risk > max_stop_loss * collateral) return false;

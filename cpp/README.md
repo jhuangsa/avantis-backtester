@@ -325,6 +325,7 @@ Chosen once, fixed for the run.
 | `starting_balance` | 10000 | Money at the start. |
 | `risk_per_trade` | 0.01 | Fraction of the current balance lost if a trade's stop fills. |
 | `hard_stop` | 0.30 | When equity falls to 70% of the starting balance, everything closes and trading stops for good. |
+| `scale_risk_with_leverage` | false | When true, a trade risks `risk_per_trade × leverage`: at 5x, a stop loses 5% instead of 1%, so returns scale with leverage. |
 
 ### `struct Position`
 
@@ -396,7 +397,7 @@ Its state is private: `settings_`, `balance_`, `positions_`, and `halted_`. Only
 
 Opens a position and returns true, or opens nothing and returns false.
 
-It sizes the position so that a fill at the stop loses `risk_per_trade` of the balance:
+It sizes the position so that a fill at the stop loses `risk_per_trade` of the balance, times `leverage` when `scale_risk_with_leverage` is on:
 
 ```
 risk       = risk_per_trade × balance
@@ -720,6 +721,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_trailing_stop`, `test_trailing_stop_short` | a trailing stop follows the best price, never moves back, and fills at its level |
 | `test_partial_take_profit` | a partial take profit closes its fraction, and the rest has no take profit and stays open |
 | `test_open_refuses_bad_trail_or_fraction` | an open is refused for a negative trail or a fraction outside (0, 1] |
+| `test_scale_risk_with_leverage` | with the setting on, 5x leverage gives 5 times the size and 5 times the loss at the stop |
 
 **`test_backtest.cpp`**, with small test-only strategies (`UpDown`, `Script`, `FollowY`, `HalfAtTarget`):
 

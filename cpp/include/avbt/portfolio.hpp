@@ -24,6 +24,9 @@ struct PortfolioSettings {
     // Fraction below the starting balance, counting unrealized profit and
     // loss, at which every position closes and trading stops for good.
     double hard_stop = 0.30;
+    // When true, a trade risks risk_per_trade * leverage of the balance, so
+    // 5x leverage makes and loses 5 times as much as 1x. ADR 0015.
+    bool scale_risk_with_leverage = false;
 };
 
 // One open trade. A portfolio holds at most one per instrument.
@@ -94,7 +97,7 @@ public:
         : settings_(settings), balance_(settings.starting_balance) {}
 
     // Opens a position sized so a fill at the stop loses risk_per_trade of
-    // the balance; the fee is not part of the sizing. The open fee comes out
+    // the balance (times leverage with scale_risk_with_leverage); the fee is not part of the sizing. The open fee comes out
     // of the balance. A NaN take profit means none: NaN, not std::optional,
     // because the indicators already use NaN for "no value" and Position
     // stays a plain struct of doubles. Returns false, and opens nothing,

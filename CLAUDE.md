@@ -37,6 +37,8 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 
 **Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`), its rules scored in Python (`veranta_rules.py`) and in C++ against Python, plus strategies 3 and 4 combined in one account (`veranta_rules_cpp.py`), and the C++ results charted with strategies 1 and 2 combined (`veranta_cpp_chart.py`). `timeframes.py` builds the 12 C++ timeframes from 1-minute candles; `mixed_timeframes.py` runs strategy 3 on AVNT 4-hour bars and strategy 4 on DYM 15-minute bars in one account. `clickhouse_data.py` loads Avantis minute candles and market states from ClickHouse, cached in `data/candles/`; `state_trend.py` runs `StateTrend` on BTC and ETH, on 1-minute and 1-hour bars; `state_trend_optimize.py` tunes it with `optimize` and checks the winner on a later month. The `.html` files are their outputs.
 
+**Presentation**: `docs/presentation/state_trend_tour.html`, a page for day traders on what the backtester does, with StateTrend on BTC and ETH.
+
 **Trader history analysis**: `analysis/make_charts.py` reads `data/` and writes `docs/figures/`. Results are in `docs/findings.md`.
 
 **Data**: `data/*.csv` and `Wonyotti Trading History/` are local-only fill exports, ignored by git. `data/candles/` holds downloaded market candles that the examples reuse; it is ignored by git and never committed. Private database notes are in `docs/database.md`, ignored by git; never commit or push it.

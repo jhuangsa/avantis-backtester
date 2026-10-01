@@ -252,14 +252,17 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def("__len__", [](const avbt::Bars& b) { return b.ts.size(); });
 
     py::class_<avbt::PortfolioSettings>(m, "PortfolioSettings")
-        .def(py::init([](double starting_balance, double risk_per_trade, double hard_stop) {
-                 return avbt::PortfolioSettings{starting_balance, risk_per_trade, hard_stop};
+        .def(py::init([](double starting_balance, double risk_per_trade, double hard_stop,
+                         bool scale_risk_with_leverage) {
+                 return avbt::PortfolioSettings{starting_balance, risk_per_trade, hard_stop,
+                                                scale_risk_with_leverage};
              }),
              py::arg("starting_balance") = 10000.0, py::arg("risk_per_trade") = 0.01,
-             py::arg("hard_stop") = 0.30)
+             py::arg("hard_stop") = 0.30, py::arg("scale_risk_with_leverage") = false)
         .def_readwrite("starting_balance", &avbt::PortfolioSettings::starting_balance)
         .def_readwrite("risk_per_trade", &avbt::PortfolioSettings::risk_per_trade)
-        .def_readwrite("hard_stop", &avbt::PortfolioSettings::hard_stop);
+        .def_readwrite("hard_stop", &avbt::PortfolioSettings::hard_stop)
+        .def_readwrite("scale_risk_with_leverage", &avbt::PortfolioSettings::scale_risk_with_leverage);
 
     py::class_<avbt::StateTrend::Params>(m, "StateTrendParams")
         .def(py::init<>())
