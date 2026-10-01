@@ -1,19 +1,22 @@
 #pragma once
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "avbt/indicators.hpp"
+#include "avbt/states.hpp"
 
 namespace avbt {
 
 // One instrument's name and its bars on one or more timeframes, finest
 // first. timeframes[0] is the base: orders fill at its opens, and stops and
 // take profits are checked on its highs and lows. The coarser timeframes are
-// for strategies to read.
+// for strategies to read. states is optional: labels for each minute.
 struct Market {
     std::string instrument;
     std::vector<Bars> timeframes;
+    std::optional<States> states = std::nullopt;
 };
 
 // Several markets on one clock. Each market starts and ends with its own
@@ -27,7 +30,8 @@ public:
     // a name, or a market has no timeframes, has a timeframe twice or out of
     // order, has a base timeframe that differs from the first market's, or
     // has a Bars that is empty, has columns of different lengths, or has
-    // timestamps that do not rise. The message names the market.
+    // timestamps that do not rise, or has states whose three columns differ
+    // in length or whose start is not a whole minute. The message names the market.
     static Markets make(std::vector<Market> markets);
 
     // Throws std::invalid_argument when no market has this name, or the
@@ -35,6 +39,8 @@ public:
     const Bars& at(const std::string& instrument, Timeframe tf) const;
     // The market's base bars, timeframes[0].
     const Bars& base(const std::string& instrument) const;
+    // The market's states, or nullptr when it has none.
+    const States* states(const std::string& instrument) const;
     const std::vector<Market>& all() const { return markets_; }
 
     // The clock: one entry per step, the UTC second at which the step's base bars open.

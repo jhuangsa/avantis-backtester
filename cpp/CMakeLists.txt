@@ -35,6 +35,11 @@ target_link_libraries(test_strategies PRIVATE avbt)
 target_compile_options(test_strategies PRIVATE -Wall -Wextra)
 target_compile_definitions(test_strategies PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
 
+add_executable(test_states tests/test_states.cpp)
+target_link_libraries(test_states PRIVATE avbt)
+target_compile_options(test_states PRIVATE -Wall -Wextra)
+target_compile_definitions(test_states PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
+
 # Python module avbt_cpp, built only when pybind11 is found.
 # Point CMake at it with -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir).
 find_package(pybind11 CONFIG QUIET)
@@ -49,3 +54,4 @@ add_test(NAME test_indicators COMMAND test_indicators)
 add_test(NAME test_portfolio COMMAND test_portfolio)
 add_test(NAME test_backtest COMMAND test_backtest)
 add_test(NAME test_strategies COMMAND test_strategies)
+add_test(NAME test_states COMMAND test_states)

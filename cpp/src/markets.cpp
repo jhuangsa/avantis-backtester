@@ -41,6 +41,13 @@ Markets Markets::make(std::vector<Market> markets) {
                 throw std::invalid_argument(m.instrument + ": timeframes must go finest first, each once");
             }
         }
+        if (m.states) {
+            const States& s = *m.states;
+            if (s.trend.size() != s.market.size() || s.volatility.size() != s.market.size()) {
+                throw std::invalid_argument(m.instrument + ": every States column must be the same size");
+            }
+            if (s.start % 60 != 0) throw std::invalid_argument(m.instrument + ": States start must be a whole minute");
+        }
         const Bars& base = m.timeframes.front();
         if (base.timeframe != markets.front().timeframes.front().timeframe) {
             throw std::invalid_argument(m.instrument + ": base timeframe differs from the first market");
@@ -68,6 +75,11 @@ const Bars& Markets::at(const std::string& instrument, Timeframe tf) const {
 
 const Bars& Markets::base(const std::string& instrument) const {
     return find(instrument).timeframes.front();
+}
+
+const States* Markets::states(const std::string& instrument) const {
+    const Market& m = find(instrument);
+    return m.states ? &*m.states : nullptr;
 }
 
 int Markets::bar_at(const std::string& instrument, int t) const {

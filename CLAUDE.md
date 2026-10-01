@@ -27,13 +27,14 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 - `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, fees, liquidation, hard stop); ADR 0008.
 - `include/avbt/markets.hpp`, `src/markets.cpp`: `Market` and `Markets`, several markets, each on several timeframes, on one clock; ADR 0011.
 - `include/avbt/backtest.hpp`: `Order`, `Trade`, the `Strategy` concept, and the `backtest` template loop over `Markets`; ADR 0009, 0010, 0011.
-- `include/avbt/strategies.hpp`: the five Veranta strategies, and `Combined`, which runs two as one.
+- `include/avbt/states.hpp`: the state labels of a market and `state_at`; ADR 0012.
+- `include/avbt/strategies.hpp`: the five Veranta strategies, `StateTrend`, and `Combined`, which runs two as one.
 - `python/avbt_py.cpp`: the pybind11 module `avbt_cpp`.
 - `tests/test_*.cpp`: plain test programs; exit code 0 is a pass.
 - `README.md`: the guide to every C++ file, type, function, and test.
 - Build from `cpp/`: `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build --output-on-failure`. `build/` is generated.
 
-**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`), its rules scored in Python (`veranta_rules.py`) and in C++ against Python, plus strategies 3 and 4 combined in one account (`veranta_rules_cpp.py`), and the C++ results charted with strategies 1 and 2 combined (`veranta_cpp_chart.py`). `timeframes.py` builds the 12 C++ timeframes from 1-minute candles; `mixed_timeframes.py` runs strategy 3 on AVNT 4-hour bars and strategy 4 on DYM 15-minute bars in one account. The `.html` files are their outputs.
+**Examples** (`examples/`): runnable scripts, each with its run command in its docstring. Breakout-30 (`breakout30*.py`), snapback (`btc_snapback.py`), mean reversion (`mean_reversion.py`), the 2 bp Avantis cells (`hf_2bps.py`, `build_hf_folio.py`), Lighter (`lighter_ensemble.py`), the five-wallet page (`veranta_top5.py`, trades in `veranta_trades/`), its rules scored in Python (`veranta_rules.py`) and in C++ against Python, plus strategies 3 and 4 combined in one account (`veranta_rules_cpp.py`), and the C++ results charted with strategies 1 and 2 combined (`veranta_cpp_chart.py`). `timeframes.py` builds the 12 C++ timeframes from 1-minute candles; `mixed_timeframes.py` runs strategy 3 on AVNT 4-hour bars and strategy 4 on DYM 15-minute bars in one account. `clickhouse_data.py` loads Avantis minute candles and market states from ClickHouse, cached in `data/candles/`; `state_trend.py` runs `StateTrend` on BTC and ETH, on 1-minute and 1-hour bars. The `.html` files are their outputs.
 
 **Trader history analysis**: `analysis/make_charts.py` reads `data/` and writes `docs/figures/`. Results are in `docs/findings.md`.
 

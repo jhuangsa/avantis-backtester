@@ -189,6 +189,10 @@ _Avoid_: asset, symbol, feed
 The markets one C++ backtest runs on, all on one clock. A strategy sees every market and reads the ones it needs. See ADR 0010, 0011.
 _Avoid_: universe, basket
 
+**State label**:
+One of three names for a market's condition in one minute: market, trend, or volatility. It is computed outside the engine and stored as a code, where 0 is Unknown. A strategy at `now` sees the label stamped one minute earlier. Unknown never opens a trade. See ADR 0012.
+_Avoid_: regime, signal
+
 **Clock**:
 The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. The C++ engine refuses markets with different base timeframes.
 _Avoid_: calendar, index

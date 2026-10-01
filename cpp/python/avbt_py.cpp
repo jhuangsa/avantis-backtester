@@ -137,6 +137,32 @@ py::dict run_many(const std::map<std::string, std::vector<avbt::Bars>>& bars,
     return run_markets(strategy, avbt::Markets::make(std::move(markets)), settings);
 }
 
+// Copies uint8 codes into an enum column, checking each is at most `last`.
+template <class E>
+std::vector<E> to_codes(const py::array_t<uint8_t, py::array::c_style | py::array::forcecast>& a,
+                        E last, const char* what) {
+    std::vector<E> out;
+    for (uint8_t c : to_vector(a)) {
+        if (c > static_cast<uint8_t>(last)) {
+            throw std::invalid_argument(std::string(what) + " code " + std::to_string(c) +
+                                        " is past the last, " + std::to_string(static_cast<int>(last)));
+        }
+        out.push_back(static_cast<E>(c));
+    }
+    return out;
+}
+
+// StateTrend with the given params on {instrument: ([Bars, ...], States)}.
+py::dict run_state_trend(const std::map<std::string, std::pair<std::vector<avbt::Bars>, avbt::States>>& markets,
+                         const avbt::PortfolioSettings& settings,
+                         const avbt::StateTrend::Params& params) {
+    std::vector<avbt::Market> list;
+    for (const auto& [name, m] : markets) list.push_back({name, m.first, m.second});
+    avbt::StateTrend strategy;
+    strategy.params = params;
+    return run_markets(strategy, avbt::Markets::make(std::move(list)), settings);
+}
+
 }  // namespace
 
 PYBIND11_MODULE(avbt_cpp, m) {
@@ -180,6 +206,30 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readwrite("risk_per_trade", &avbt::PortfolioSettings::risk_per_trade)
         .def_readwrite("hard_stop", &avbt::PortfolioSettings::hard_stop);
 
+    py::class_<avbt::StateTrend::Params>(m, "StateTrendParams")
+        .def(py::init<>())
+        .def_readwrite("average", &avbt::StateTrend::Params::average)
+        .def_readwrite("breakout", &avbt::StateTrend::Params::breakout)
+        .def_readwrite("atr_period", &avbt::StateTrend::Params::atr_period)
+        .def_readwrite("atr_stops", &avbt::StateTrend::Params::atr_stops)
+        .def_readwrite("reward", &avbt::StateTrend::Params::reward)
+        .def_readwrite("leverage", &avbt::StateTrend::Params::leverage)
+        .def_readwrite("fee_rate", &avbt::StateTrend::Params::fee_rate)
+        .def_readwrite("flip", &avbt::StateTrend::Params::flip)
+        .def_readwrite("min_stop", &avbt::StateTrend::Params::min_stop);
+
+    using Codes = py::array_t<uint8_t, py::array::c_style | py::array::forcecast>;
+    py::class_<avbt::States>(m, "States")
+        .def(py::init([](int64_t start, const Codes& market, const Codes& trend, const Codes& volatility) {
+                 return avbt::States{start,
+                                     to_codes(market, avbt::MarketState::Transition, "market"),
+                                     to_codes(trend, avbt::TrendState::MixedConflicted, "trend"),
+                                     to_codes(volatility, avbt::VolatilityState::Shock, "volatility")};
+             }),
+             py::arg("start"), py::arg("market"), py::arg("trend"), py::arg("volatility"))
+        .def_readonly("start", &avbt::States::start)
+        .def("__len__", [](const avbt::States& s) { return s.market.size(); });
+
     m.def("late_day_short", &run<avbt::LateDayShort>, py::arg("bars"), py::arg("settings"));
     m.def("rally_short", &run<avbt::RallyShort>, py::arg("bars"), py::arg("settings"));
     m.def("campaign_short", &run<avbt::CampaignShort>, py::arg("bars"), py::arg("settings"));
@@ -193,6 +243,8 @@ PYBIND11_MODULE(avbt_cpp, m) {
           py::arg("markets"), py::arg("settings"),
           py::arg("a_timeframe") = avbt::Timeframe::Hour1,
           py::arg("b_timeframe") = avbt::Timeframe::Hour1);
+    m.def("run_state_trend", &run_state_trend, py::arg("markets"), py::arg("settings"),
+          py::arg("params") = avbt::StateTrend::Params{});
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));
