@@ -90,4 +90,50 @@ int Markets::bar_at(const std::string& instrument, int t) const {
     return static_cast<int>(it - ts.begin());
 }
 
+Market& Markets::find(const std::string& instrument) {
+    return const_cast<Market&>(static_cast<const Markets&>(*this).find(instrument));
+}
+
+void Markets::append(const std::string& instrument, Timeframe tf, const Bar& bar) {
+    Market& m = find(instrument);
+    Bars* b = nullptr;
+    for (Bars& x : m.timeframes) {
+        if (x.timeframe == tf) b = &x;
+    }
+    if (!b) throw std::invalid_argument(instrument + ": no bars on " + name(tf));
+    std::string where = instrument + ", " + name(tf) + ": ";
+    if (!b->ts.empty() && bar.ts <= b->ts.back()) {
+        throw std::invalid_argument(where + "appended ts must be later than the last bar");
+    }
+    if (bar.volume.has_value() != !b->volume.empty()) {
+        throw std::invalid_argument(where + "volume must be given exactly when the bars have volume");
+    }
+    bool is_base = b == &m.timeframes.front();
+    bool extends = is_base && (clock_.empty() || bar.ts > clock_.back());
+    if (is_base && !extends && !std::binary_search(clock_.begin(), clock_.end(), bar.ts)) {
+        throw std::invalid_argument(where + "base bar ts is before the clock's end and not on the clock");
+    }
+    b->ts.push_back(bar.ts);
+    b->open.push_back(bar.open);
+    b->high.push_back(bar.high);
+    b->low.push_back(bar.low);
+    b->close.push_back(bar.close);
+    b->minutes_with_data.push_back(bar.minutes_with_data);
+    if (bar.volume) b->volume.push_back(*bar.volume);
+    if (extends) clock_.push_back(bar.ts);
+}
+
+void Markets::append_states(const std::string& instrument, int64_t ts, const State& state) {
+    Market& m = find(instrument);
+    if (ts % 60 != 0) throw std::invalid_argument(instrument + ": States ts must be a whole minute");
+    if (!m.states) m.states = States{ts, {}, {}, {}};
+    States& s = *m.states;
+    if (ts != s.start + 60 * static_cast<int64_t>(s.market.size())) {
+        throw std::invalid_argument(instrument + ": States must continue one minute after the last row");
+    }
+    s.market.push_back(state.market);
+    s.trend.push_back(state.trend);
+    s.volatility.push_back(state.volatility);
+}
+
 }

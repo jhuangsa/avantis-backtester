@@ -61,6 +61,9 @@ struct Position {
     // Fraction of the position the take profit closes. A partial take profit
     // fires once: the take profit becomes NaN and the rest runs on its stop.
     double take_profit_fraction = 1.0;
+    // UTC seconds of the entry fill; 0 when unknown. A strategy restarted
+    // live reads it to find the signal bar of a time exit.
+    int64_t entry_time = 0;
 };
 
 // What closed a position. Order is a strategy's close order; EndOfData is
@@ -123,7 +126,8 @@ public:
     bool open(const std::string& instrument, Side side, double entry_price,
               double stop_price, double leverage,
               double take_profit_price = std::nan(""), Fees fees = {},
-              double trail = 0.0, double take_profit_fraction = 1.0);
+              double trail = 0.0, double take_profit_fraction = 1.0,
+              int64_t entry_time = 0);
 
     // Adds rate * size * price to the position's holding costs. NaN adds
     // nothing; no position does nothing.

@@ -73,8 +73,9 @@ struct Result {
     std::string version = avbt::version;
 };
 
-// What every strategy has: prepare computes its lines once from any of the
-// markets; decide is called at the close of every clock step with `now`, the
+// What every strategy has: prepare resets its lines and computes them from
+// the markets; update extends them with only the bars added since the last
+// call, so a live caller can append bars and update; decide is called at the close of every clock step with `now`, the
 // UTC second of that close, and returns orders. A strategy reads its bars
 // through last_closed(bars, now), which never returns a bar still open. No
 // base class, no virtual call.
@@ -82,6 +83,7 @@ template <class S>
 concept Strategy = requires(S s, const Markets& markets, int64_t now, const Report& report,
                             const std::vector<Position>& positions) {
     s.prepare(markets);
+    s.update(markets);
     { s.decide(now, report, positions) } -> std::same_as<std::vector<Order>>;
 };
 
@@ -98,9 +100,13 @@ concept Strategy = requires(S s, const Markets& markets, int64_t now, const Repo
 // 5. Record equity, then ask the strategy.
 // Orders returned on the last step never fill. The caller chooses the bars;
 // nothing is trimmed. Every market needs Costs; check_costs. ADR 0010, 0011, 0016.
-template <Strategy S>
+// on_step, if given, sees every step's positions and the strategy's orders.
+struct NoStep {
+    void operator()(int, const std::vector<Position>&, const std::vector<Order>&) const {}
+};
+template <Strategy S, class OnStep = NoStep>
 Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
-                PortfolioSettings settings) {
+                PortfolioSettings settings, OnStep on_step = {}) {
     check_costs(markets, costs);
     Portfolio portfolio(settings);
     Result result{.timeframe = markets.timeframe(), .clock = markets.clock()};
@@ -140,7 +146,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
             const Costs& cost = costs.at(o.instrument);
             if (portfolio.open(o.instrument, o.side, open, stop, o.leverage, take,
                                Fees{cost.open_fee, cost.close_fee},
-                               o.trail_distance * open, o.take_profit_fraction)) {
+                               o.trail_distance * open, o.take_profit_fraction, clock[t])) {
                 entry_bar[o.instrument] = t;
             }
         }
@@ -178,6 +184,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
         result.equity.push_back(portfolio.report().equity);
         int64_t now = clock[t] + seconds(markets.timeframe());
         waiting = strategy.decide(now, portfolio.report(), portfolio.positions());
+        on_step(t, portfolio.positions(), waiting);
     }
     result.ending_balance = portfolio.report().balance;
     return result;

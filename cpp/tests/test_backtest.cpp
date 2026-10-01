@@ -54,6 +54,7 @@ struct UpDown {
     std::vector<std::pair<int, Order::Kind>> log;
 
     void prepare(const Markets& m) { bars = &m.base("X"); }
+    void update(const Markets&) {}
 
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
         int t = last_closed(*bars, now);
@@ -198,6 +199,7 @@ struct Script {
     const std::vector<int64_t>* clock = nullptr;
     int64_t step = 0;
     void prepare(const Markets& m) { clock = &m.clock(); step = seconds(m.timeframe()); }
+    void update(const Markets&) {}
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>&) {
         // The step that closes at now.
         int t = static_cast<int>(std::find(clock->begin(), clock->end(), now - step) - clock->begin());
@@ -254,6 +256,7 @@ void test_closes_fill_before_opens() {
 struct FollowY {
     const Bars* y = nullptr;
     void prepare(const Markets& m) { y = &m.base("Y"); }
+    void update(const Markets&) {}
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
         int t = last_closed(*y, now);
         if (t < 1) return {};
@@ -337,6 +340,7 @@ struct FourHourUp {
     int seen = -1;
     std::vector<int> acted;
     void prepare(const Markets& m) { four = &m.at("X", Timeframe::Hour4); }
+    void update(const Markets&) {}
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
         int t = last_closed(*four, now);
         if (t < 0 || t == seen) return {};
@@ -431,6 +435,7 @@ void test_missing_costs_throws() {
 struct HalfAtTarget {
     const Bars* bars = nullptr;
     void prepare(const Markets& m) { bars = &m.base("X"); }
+    void update(const Markets&) {}
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>&) {
         int t = last_closed(*bars, now);
         if (t == 0) {

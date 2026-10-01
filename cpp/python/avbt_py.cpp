@@ -120,6 +120,30 @@ avbt::Result run(const std::string& name, const py::dict& params, const avbt::Ma
     return avbt::run(name, ps, markets, costs, settings);
 }
 
+// A strategy from the table, prepared on `markets` and kept alive between decides.
+struct PyLive {
+    avbt::Live live;
+    const avbt::Markets& markets;
+    PyLive(const std::string& name, const py::dict& params, const avbt::Markets& m) : markets(m) {
+        avbt::Params ps;
+        for (auto [k, v] : params) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+        std::string known;
+        for (const avbt::StrategyInfo& s : avbt::strategies()) {
+            if (s.name == name) live = s.live(ps);
+            known += (known.empty() ? "" : ", ") + s.name;
+        }
+        if (!live.decide) throw std::invalid_argument("no strategy " + name + "; known: " + known);
+        py::gil_scoped_release release;
+        live.prepare(markets);
+    }
+    std::vector<avbt::Order> decide(int64_t now, const std::vector<avbt::Position>& positions,
+                                    const std::optional<avbt::Report>& report) {
+        py::gil_scoped_release release;
+        live.update(markets);
+        return live.decide(now, report.value_or(avbt::Report{}), positions);
+    }
+};
+
 // optimize over StateTrend. `knobs` is [(name, [values])]: a name is a
 // StateTrendParams field, or "<instrument> signal" for that instrument's
 // signal timeframe. Runs and the best choice come back as {knob: value}.
@@ -254,6 +278,66 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .value("TrailingStop", avbt::Cause::TrailingStop)
         .value("PartialTakeProfit", avbt::Cause::PartialTakeProfit);
 
+    py::class_<avbt::Bar>(m, "Bar")
+        .def(py::init([](int64_t ts, double open, double high, double low, double close, int minutes_with_data,
+                         std::optional<double> volume) {
+                 return avbt::Bar{ts, open, high, low, close, minutes_with_data, volume};
+             }),
+             py::arg("ts"), py::arg("open"), py::arg("high"), py::arg("low"), py::arg("close"),
+             py::arg("minutes_with_data"), py::arg("volume") = py::none());
+
+    py::class_<avbt::State>(m, "State")
+        .def(py::init([](uint8_t market, uint8_t trend, uint8_t volatility) {
+                 auto code = [](uint8_t c, auto last, const char* what) {
+                     return to_codes(Codes(py::array_t<uint8_t>(1, &c)), last, what)[0];
+                 };
+                 return avbt::State{code(market, avbt::MarketState::Transition, "market"),
+                                    code(trend, avbt::TrendState::MixedConflicted, "trend"),
+                                    code(volatility, avbt::VolatilityState::Shock, "volatility")};
+             }),
+             py::arg("market") = 0, py::arg("trend") = 0, py::arg("volatility") = 0);
+
+    py::class_<avbt::Order> order(m, "Order");
+    py::enum_<avbt::Order::Kind>(order, "Kind")
+        .value("Open", avbt::Order::Kind::Open)
+        .value("Close", avbt::Order::Kind::Close);
+    order.def(py::init<>())
+        .def_readwrite("kind", &avbt::Order::kind)
+        .def_readwrite("instrument", &avbt::Order::instrument)
+        .def_readwrite("side", &avbt::Order::side)
+        .def_readwrite("stop_distance", &avbt::Order::stop_distance)
+        .def_readwrite("take_profit_distance", &avbt::Order::take_profit_distance)
+        .def_readwrite("leverage", &avbt::Order::leverage)
+        .def_readwrite("trail_distance", &avbt::Order::trail_distance)
+        .def_readwrite("take_profit_fraction", &avbt::Order::take_profit_fraction);
+
+    py::class_<avbt::Position>(m, "Position")
+        .def(py::init([](std::string instrument, avbt::Side side, double entry_price, double size,
+                             int64_t entry_time) {
+                 avbt::Position p;
+                 p.entry_time = entry_time;
+                 p.instrument = std::move(instrument);
+                 p.side = side;
+                 p.entry_price = entry_price;
+                 p.size = size;
+                 return p;
+             }),
+             py::arg("instrument"), py::arg("side"), py::arg("entry_price") = 0.0, py::arg("size") = 0.0,
+             py::arg("entry_time") = 0)
+        .def_readwrite("instrument", &avbt::Position::instrument)
+        .def_readwrite("side", &avbt::Position::side)
+        .def_readwrite("entry_price", &avbt::Position::entry_price)
+        .def_readwrite("size", &avbt::Position::size)
+        .def_readwrite("entry_time", &avbt::Position::entry_time);
+
+    py::class_<avbt::Report>(m, "Report")
+        .def(py::init<>())
+        .def_readwrite("balance", &avbt::Report::balance)
+        .def_readwrite("equity", &avbt::Report::equity)
+        .def_readwrite("free_cash", &avbt::Report::free_cash)
+        .def_readwrite("open_positions", &avbt::Report::open_positions)
+        .def_readwrite("halted", &avbt::Report::halted);
+
     py::class_<avbt::Market>(m, "Market")
         .def(py::init([](std::string instrument, std::vector<avbt::Bars> timeframes,
                          std::optional<avbt::States> states) {
@@ -268,6 +352,9 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def(py::init(&avbt::Markets::make), py::arg("markets"))
         .def_property_readonly("clock", [](const avbt::Markets& x) { return to_numpy(std::vector(x.clock())); })
         .def_property_readonly("timeframe", &avbt::Markets::timeframe)
+        .def("append", &avbt::Markets::append, py::arg("instrument"), py::arg("timeframe"), py::arg("bar"))
+        .def("append_states", &avbt::Markets::append_states, py::arg("instrument"), py::arg("ts"),
+             py::arg("state"))
         .def_property_readonly("instruments", [](const avbt::Markets& x) {
             std::vector<std::string> out;
             for (const avbt::Market& mk : x.all()) out.push_back(mk.instrument);
@@ -321,6 +408,11 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("name", &avbt::StrategyInfo::name)
         .def_readonly("params", &avbt::StrategyInfo::params)
         .def_readonly("timeframes", &avbt::StrategyInfo::timeframes);
+
+    py::class_<PyLive>(m, "Live")
+        .def(py::init<const std::string&, const py::dict&, const avbt::Markets&>(), py::arg("name"),
+             py::arg("params"), py::arg("markets"), py::keep_alive<1, 4>())
+        .def("decide", &PyLive::decide, py::arg("now"), py::arg("positions"), py::arg("report") = py::none());
 
     m.def("strategies", &avbt::strategies, py::return_value_policy::reference);
     m.def("run", &run, py::arg("name"), py::arg("params") = py::dict(), py::arg("markets"), py::arg("costs"),

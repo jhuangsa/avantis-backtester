@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +28,9 @@ namespace avbt {
 // of N closes at the open after bar signal + N, the bar of the fill being
 // bar 1. signal_bar is read only while a position is open and is overwritten
 // by every new entry, so a trade closed by a level leaves no stale memory.
+// A strategy prepared after a restart has no signal_bar for a position it
+// did not open; it takes the bar closed at the position's entry_time, the
+// bar it would have signalled on, since the fill is at the next open.
 template <class S>
 std::vector<Order> decide_entry_and_exits(S& s, int64_t now, const std::vector<Position>& positions) {
     int t = last_closed(*s.bars, now);
@@ -34,6 +38,8 @@ std::vector<Order> decide_entry_and_exits(S& s, int64_t now, const std::vector<P
     s.seen_bar = t;
     const auto& p = s.params;
     if (!positions.empty()) {
+        if (s.signal_bar < 0 && positions.front().entry_time > 0)
+            s.signal_bar = last_closed(*s.bars, positions.front().entry_time);
         bool timed = p.time_exit > 0 && t - s.signal_bar >= p.time_exit;
         bool ruled = false;
         if constexpr (requires { s.rule_exit(t); }) ruled = s.rule_exit(t);
@@ -63,11 +69,22 @@ struct LateDayShort {
     // The last bar decide acted on, and the bar of the last entry.
     int seen_bar = -1, signal_bar = -1;
 
+    std::optional<PctChange> rise_of;
+    // Bars fed to the indicators so far.
+    size_t done = 0;
+
     void prepare(const Markets& m) {
+        hour.clear(); rise.clear(); done = 0;
+        rise_of.emplace(params.lag);
+        update(m);
+    }
+    void update(const Markets& m) {
         bars = &m.at(params.instrument, params.timeframe);
-        const Bars& b = *bars;
-        hour = hour_of_day(b);
-        rise = pct_change(b.close, params.lag);
+        HourOfDay hour_of(params.timeframe);
+        for (; done < bars->ts.size(); ++done) {
+            hour.push_back(hour_of.update(bars->ts[done]));
+            rise.push_back(rise_of->update(bars->close[done]));
+        }
     }
     bool entry(int t) const { return hour[t] == params.hour && rise[t] >= params.rise; }
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
@@ -91,12 +108,25 @@ struct RallyShort {
     // The last bar decide acted on, and the bar of the last entry.
     int seen_bar = -1, signal_bar = -1;
 
+    std::optional<PctChange> rise_of;
+    std::optional<Sma> average_of;
+    // Bars fed to the indicators so far.
+    size_t done = 0;
+
     void prepare(const Markets& m) {
+        close.clear(); rise.clear(); average.clear(); done = 0;
+        rise_of.emplace(params.lag);
+        average_of.emplace(params.window);
+        update(m);
+    }
+    void update(const Markets& m) {
         bars = &m.at(params.instrument, params.timeframe);
-        const Bars& b = *bars;
-        close = b.close;
-        rise = pct_change(b.close, params.lag);
-        average = sma(b.close, params.window);
+        for (; done < bars->ts.size(); ++done) {
+            double c = bars->close[done];
+            close.push_back(c);
+            rise.push_back(rise_of->update(c));
+            average.push_back(average_of->update(c));
+        }
     }
     bool entry(int t) const { return rise[t] >= params.rise && close[t] > average[t]; }
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
@@ -120,10 +150,18 @@ struct CampaignShort {
     // The last bar decide acted on, and the bar of the last entry.
     int seen_bar = -1, signal_bar = -1;
 
+    std::optional<PctChange> rise_of;
+    // Bars fed to the indicators so far.
+    size_t done = 0;
+
     void prepare(const Markets& m) {
+        rise.clear(); done = 0;
+        rise_of.emplace(params.lag);
+        update(m);
+    }
+    void update(const Markets& m) {
         bars = &m.at(params.instrument, params.timeframe);
-        const Bars& b = *bars;
-        rise = pct_change(b.close, params.lag);
+        for (; done < bars->ts.size(); ++done) rise.push_back(rise_of->update(bars->close[done]));
     }
     bool entry(int t) const { return rise[t] >= params.rise; }
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
@@ -146,10 +184,20 @@ struct SpikeShort {
     // The last bar decide acted on, and the bar of the last entry.
     int seen_bar = -1, signal_bar = -1;
 
+    std::optional<BarChange> spike_of;
+    // Bars fed to the indicators so far.
+    size_t done = 0;
+
     void prepare(const Markets& m) {
+        spike.clear(); done = 0;
+        spike_of.emplace(1);
+        update(m);
+    }
+    void update(const Markets& m) {
         bars = &m.at(params.instrument, params.timeframe);
-        const Bars& b = *bars;
-        spike = bar_change(b, Field::High, Field::Close, 1);
+        for (; done < bars->ts.size(); ++done) {
+            spike.push_back(spike_of->update(bars->high[done], bars->close[done]));
+        }
     }
     bool entry(int t) const { return spike[t] > params.spike; }
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
@@ -174,12 +222,25 @@ struct GoldTrendLong {
     // The last bar decide acted on, and the bar of the last entry.
     int seen_bar = -1, signal_bar = -1;
 
+    std::optional<Sma> average_of;
+    std::optional<PctChange> drift_of;
+    // Bars fed to the indicators so far.
+    size_t done = 0;
+
     void prepare(const Markets& m) {
+        close.clear(); average.clear(); drift.clear(); done = 0;
+        average_of.emplace(params.window);
+        drift_of.emplace(params.lag);
+        update(m);
+    }
+    void update(const Markets& m) {
         bars = &m.at(params.instrument, params.timeframe);
-        const Bars& b = *bars;
-        close = b.close;
-        average = sma(b.close, params.window);
-        drift = pct_change(b.close, params.lag);
+        for (; done < bars->ts.size(); ++done) {
+            double c = bars->close[done];
+            close.push_back(c);
+            average.push_back(average_of->update(c));
+            drift.push_back(drift_of->update(c));
+        }
     }
     bool entry(int t) const { return close[t] > average[t] && drift[t] > 0.0; }
     bool rule_exit(int t) const { return close[t] < average[t]; }
@@ -201,6 +262,7 @@ struct Combined {
     std::map<std::string, int> owner;
 
     void prepare(const Markets& m) { a.prepare(m); b.prepare(m); }
+    void update(const Markets& m) { a.update(m); b.update(m); }
     std::vector<Order> decide(int64_t now, const Report& report, const std::vector<Position>& positions) {
         // A position gone (a level closed it, or the open was refused) frees its instrument.
         std::erase_if(owner, [&](const auto& o) {
@@ -272,22 +334,47 @@ struct StateTrend {
         std::vector<double> average, atr, high, low;
         // The last minute bar decide acted on.
         int seen_bar = -1;
+        Sma average_of;
+        Atr atr_of;
+        PriorMax high_of;
+        PriorMin low_of;
+        // Signal and minute bars fed to the indicators so far.
+        size_t signal_done = 0, minute_done = 0;
     };
     std::vector<Lines> lines;
 
     void prepare(const Markets& m) {
         lines.clear();
+        update(m);
+    }
+    void update(const Markets& m) {
         for (const Market& market : m.all()) {
             if (!market.states) continue;
-            auto tf = params.signal.find(market.instrument);
-            Lines l{.instrument = market.instrument,
+            auto it = std::find_if(lines.begin(), lines.end(),
+                                   [&](const Lines& l) { return l.instrument == market.instrument; });
+            if (it == lines.end()) {
+                auto tf = params.signal.find(market.instrument);
+                lines.push_back(Lines{
+                    .instrument = market.instrument,
                     .bars = &m.at(market.instrument, tf == params.signal.end() ? Timeframe::Hour1 : tf->second),
-                    .minute = &m.base(market.instrument), .states = &*market.states};
-            l.average = sma(l.bars->close, params.average);
-            l.atr = atr(*l.bars, params.atr_period);
-            l.high = prior_max(l.minute->high, params.breakout);
-            l.low = prior_min(l.minute->low, params.breakout);
-            lines.push_back(std::move(l));
+                    .minute = &m.base(market.instrument), .states = &*market.states,
+                    .average_of = Sma(params.average), .atr_of = Atr(params.atr_period),
+                    .high_of = PriorMax(params.breakout), .low_of = PriorMin(params.breakout)});
+                it = lines.end() - 1;
+            }
+            Lines& l = *it;
+            l.states = &*market.states;
+            const Bars& b = *l.bars;
+            for (; l.signal_done < b.ts.size(); ++l.signal_done) {
+                size_t i = l.signal_done;
+                l.average.push_back(l.average_of.update(b.close[i]));
+                l.atr.push_back(l.atr_of.update(b.high[i], b.low[i], b.close[i]));
+            }
+            for (; l.minute_done < l.minute->ts.size(); ++l.minute_done) {
+                size_t i = l.minute_done;
+                l.high.push_back(l.high_of.update(l.minute->high[i]));
+                l.low.push_back(l.low_of.update(l.minute->low[i]));
+            }
         }
     }
 

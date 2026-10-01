@@ -43,6 +43,7 @@ struct Toy {
     } params;
     bool opened = false;
     void prepare(const Markets&) {}
+    void update(const Markets&) {}
     std::vector<Order> decide(int64_t, const Report&, const std::vector<Position>&) {
         if (opened || params.a != 2) return {};
         opened = true;

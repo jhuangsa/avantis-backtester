@@ -15,7 +15,7 @@ double direction(Side side) { return side == Side::Long ? 1.0 : -1.0; }
 bool Portfolio::open(const std::string& instrument, Side side, double entry_price,
                      double stop_price, double leverage,
                      double take_profit_price, Fees fees,
-                     double trail, double take_profit_fraction) {
+                     double trail, double take_profit_fraction, int64_t entry_time) {
     if (halted_ || leverage <= 0.0 || entry_price <= 0.0 || trail < 0.0) return false;
     if (!(take_profit_fraction > 0.0 && take_profit_fraction <= 1.0)) return false;
     for (const Position& p : positions_) {
@@ -49,6 +49,7 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
         .mark_price = entry_price,
         .trail = trail,
         .take_profit_fraction = take_profit_fraction,
+        .entry_time = entry_time,
     });
     balance_ -= fees.open * size * entry_price;
     return true;

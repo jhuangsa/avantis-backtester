@@ -59,3 +59,13 @@ python3 examples/veranta_cpp_chart.py
 ```
 
 It writes `examples/veranta_cpp_chart.html`.
+
+## Trade live with the same code
+
+`Live(name, params, markets)` runs a strategy one bar at a time, with the same code and the same numbers as a backtest. Each time a bar closes:
+
+1. Add the closed bars with `markets.append(...)`, and each state label when it arrives with `markets.append_states(...)`.
+2. Call `live.decide(now, positions)`. It returns the orders.
+3. Send the orders to the exchange.
+
+`decide` returns only openings and rule exits. Your system places the stops, take profits, trailing stops, and partial take profits on the exchange, from each order's distances. After a restart, give each open position its `entry_time` so time exits still work. Details are in [cpp/README.md](cpp/README.md) and [ADR 0017](docs/adr/0017-indicators-update-one-bar-at-a-time.md).

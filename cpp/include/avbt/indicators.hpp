@@ -1,6 +1,8 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <deque>
+#include <utility>
 
 namespace avbt {
 
@@ -42,6 +44,107 @@ struct Bars {
 // hourly bar through this, so at 10:30 it sees the 09:00 bar, not the 10:00.
 int last_closed(const Bars& bars, int64_t now);
 
+// Rolling indicators: each takes one bar per update and returns that bar's
+// value, NaN while undefined. The full-series functions below are loops over
+// them, so live and backtest give bit-identical numbers. Constructors check
+// their arguments and throw std::invalid_argument.
+
+// Mean of the last n values. Keeps the running sum, never avg * n.
+class Sma {
+public:
+    explicit Sma(int n);
+    double update(double x);
+private:
+    int n_;
+    double sum_ = 0;
+    std::deque<double> window_;
+};
+
+// Max (min) of the n values before this one; the current value is excluded.
+class PriorMax {
+public:
+    explicit PriorMax(int n);
+    double update(double x);
+private:
+    int n_;
+    long long count_ = 0;
+    // (bar count, value), values decreasing front to back; the front is the max
+    std::deque<std::pair<long long, double>> window_;
+};
+
+class PriorMin {
+public:
+    explicit PriorMin(int n);
+    double update(double x);
+private:
+    int n_;
+    long long count_ = 0;
+    // (bar count, value), values increasing front to back; the front is the min
+    std::deque<std::pair<long long, double>> window_;
+};
+
+// (x - x[lag ago]) / x[lag ago].
+class PctChange {
+public:
+    explicit PctChange(int lag);
+    double update(double x);
+private:
+    int lag_;
+    std::deque<double> window_;
+};
+
+// now / then[lag ago] - 1; NaN if either is not finite.
+class BarChange {
+public:
+    explicit BarChange(int lag);
+    double update(double now, double then);
+private:
+    int lag_;
+    std::deque<double> then_;
+};
+
+class TrueRange {
+public:
+    double update(double high, double low, double close);
+private:
+    bool first_ = true;
+    double prev_close_ = 0;
+};
+
+// Seed: mean of TR[1..n] at bar n; then Wilder smoothing.
+class Atr {
+public:
+    explicit Atr(int n);
+    double update(double high, double low, double close);
+private:
+    int n_;
+    TrueRange tr_;
+    long long count_ = 0;
+    double sum_ = 0;
+    double prev_ = 0;
+};
+
+// Throws on bars coarser than an hour.
+class HourOfDay {
+public:
+    explicit HourOfDay(Timeframe tf);
+    double update(int64_t ts) const;
+};
+
+enum class Side { Long, Short };
+
+class Chandelier {
+public:
+    Chandelier(int n, double k, Side side);
+    double update(double high, double low, double close);
+private:
+    Atr atr_;
+    PriorMax max_;
+    PriorMin min_;
+    double k_;
+    Side side_;
+};
+
 std::vector<double> sma(const std::vector<double>& series, int period);
 
 std::vector<double> prior_max(const std::vector<double>& series, int period);
@@ -61,8 +164,6 @@ enum class Field { Open, High, Low, Close };
 
 // now_field[i] / then_field[i - lag] - 1.
 std::vector<double> bar_change(const Bars& bars, Field now_field, Field then_field, int lag);
-
-enum class Side { Long, Short };
 
 // Long: prior_max(high, n) - k * atr(n). Short: prior_min(low, n) + k * atr(n).
 std::vector<double> chandelier(const Bars& bars, int n, double k, Side side);

@@ -19,6 +19,14 @@ struct Market {
     std::optional<States> states = std::nullopt;
 };
 
+// One closed bar, for Markets::append.
+struct Bar {
+    int64_t ts = 0;
+    double open = 0, high = 0, low = 0, close = 0;
+    int minutes_with_data = 0;
+    std::optional<double> volume = std::nullopt;
+};
+
 // Several markets on one clock. Each market starts and ends with its own
 // data. The clock is every base bar open of every market, sorted, with no
 // repeats, so a market joins the run at its first bar. Every market has the
@@ -51,10 +59,26 @@ public:
     // the market has no bar then: its data has not started, or has ended.
     int bar_at(const std::string& instrument, int t) const;
 
+    // Adds one closed bar to the market's bars on this timeframe. A base bar
+    // whose ts is past the clock's end adds one clock step. Bars are only
+    // appended, so bar numbers never shift and references from at() and
+    // base() stay valid. Throws std::invalid_argument, naming the market,
+    // when the market or timeframe does not exist, ts is not later than
+    // that timeframe's last bar, volume is given when the column is empty or
+    // missing when it is not, or a base bar's ts is not on the clock yet and
+    // earlier than its end (that would shift the clock's steps).
+    void append(const std::string& instrument, Timeframe tf, const Bar& bar);
+    // Adds one minute's labels at ts. With no states yet, they start at ts.
+    // Throws std::invalid_argument, naming the market, when the market does
+    // not exist, ts is not a whole minute, or ts is not exactly one minute
+    // after the last row.
+    void append_states(const std::string& instrument, int64_t ts, const State& state);
+
 private:
     Markets(std::vector<Market> markets, std::vector<int64_t> clock)
         : markets_(std::move(markets)), clock_(std::move(clock)) {}
     const Market& find(const std::string& instrument) const;
+    Market& find(const std::string& instrument);
     std::vector<Market> markets_;
     std::vector<int64_t> clock_;
 };

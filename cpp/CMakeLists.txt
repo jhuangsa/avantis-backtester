@@ -20,6 +20,11 @@ target_link_libraries(test_indicators PRIVATE avbt)
 target_compile_options(test_indicators PRIVATE -Wall -Wextra)
 target_compile_definitions(test_indicators PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
 
+add_executable(test_rolling tests/test_rolling.cpp)
+target_link_libraries(test_rolling PRIVATE avbt)
+target_compile_options(test_rolling PRIVATE -Wall -Wextra)
+target_compile_definitions(test_rolling PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
+
 add_executable(test_portfolio tests/test_portfolio.cpp)
 target_link_libraries(test_portfolio PRIVATE avbt)
 target_compile_options(test_portfolio PRIVATE -Wall -Wextra)
@@ -50,6 +55,16 @@ target_link_libraries(test_run PRIVATE avbt)
 target_compile_options(test_run PRIVATE -Wall -Wextra)
 target_compile_definitions(test_run PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
 
+add_executable(test_live tests/test_live.cpp)
+target_link_libraries(test_live PRIVATE avbt)
+target_compile_options(test_live PRIVATE -Wall -Wextra)
+target_compile_definitions(test_live PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
+
+add_executable(test_append tests/test_append.cpp)
+target_link_libraries(test_append PRIVATE avbt)
+target_compile_options(test_append PRIVATE -Wall -Wextra)
+target_compile_definitions(test_append PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
+
 # Python module avbt_cpp, built only when pybind11 is found.
 # Point CMake at it with -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir).
 find_package(pybind11 CONFIG QUIET)
@@ -61,9 +76,12 @@ endif()
 
 enable_testing()
 add_test(NAME test_indicators COMMAND test_indicators)
+add_test(NAME test_rolling COMMAND test_rolling)
 add_test(NAME test_portfolio COMMAND test_portfolio)
 add_test(NAME test_backtest COMMAND test_backtest)
 add_test(NAME test_strategies COMMAND test_strategies)
 add_test(NAME test_states COMMAND test_states)
 add_test(NAME test_optimize COMMAND test_optimize)
 add_test(NAME test_run COMMAND test_run)
+add_test(NAME test_append COMMAND test_append)
+add_test(NAME test_live COMMAND test_live)

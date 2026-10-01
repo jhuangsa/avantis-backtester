@@ -19,9 +19,10 @@ This guide explains every part of the C++ code in `cpp/`: each file, type, funct
 13. [run.hpp and version.hpp: run a strategy by name](#runhpp-and-versionhpp-run-a-strategy-by-name)
 14. [optimize.hpp: Sharpe and the greedy search](#optimizehpp-sharpe-and-the-greedy-search)
 15. [avbt_py.cpp: the Python module](#avbt_pycpp-the-python-module)
-16. [Tests](#tests)
-17. [Write a new strategy](#write-a-new-strategy)
-18. [Rules that must stay true](#rules-that-must-stay-true)
+16. [Live: one bar at a time](#live-one-bar-at-a-time)
+17. [Tests](#tests)
+18. [Write a new strategy](#write-a-new-strategy)
+19. [Rules that must stay true](#rules-that-must-stay-true)
 
 ---
 
@@ -259,6 +260,21 @@ In the table, `n`, `period`, and `lag` must be at least 1, or the function throw
 
 How `prior_max` and `prior_min` work: they keep a **deque** (a list you can add to or remove from at both ends) of bar indexes whose values are in falling order for `prior_max`, or rising order for `prior_min`. The front of the deque is always the answer. Each index enters and leaves once, so the whole series takes time proportional to its length, whatever `n` is.
 
+### Rolling indicators
+
+Each indicator is a class with `update`, which takes one bar and returns that bar's value (NaN while undefined). The functions above are loops of `update`, so a live caller and a backtest get bit-identical numbers. Constructors check their arguments and throw `std::invalid_argument`. [ADR 0017](../docs/adr/0017-indicators-update-one-bar-at-a-time.md).
+
+| Class | `update` takes | Keeps |
+|---|---|---|
+| `Sma(n)` | a value | the running sum and the last `n` values |
+| `PriorMax(n)`, `PriorMin(n)` | a value | a deque of (bar count, value), plus the bar count |
+| `PctChange(lag)` | a value | the last `lag` values |
+| `BarChange(lag)` | `now`, `then` | the last `lag` values of `then` |
+| `TrueRange` | high, low, close | the previous close |
+| `Atr(n)` | high, low, close | a `TrueRange`, the count, the sum, the previous ATR |
+| `HourOfDay(tf)` | `ts` | nothing; throws on bars coarser than `Hour1` |
+| `Chandelier(n, k, side)` | high, low, close | an `Atr` and a `PriorMax` and `PriorMin` |
+
 `field_of` is a private helper in `indicators.cpp`: it returns the list named by a `Field`.
 
 ---
@@ -293,7 +309,10 @@ The constructor is private, so the only way to get a `Markets` is `Markets::make
 | `const std::vector<int64_t>& clock() const` | The clock: the UTC second at which each step opens. |
 | `Timeframe timeframe() const` | The base timeframe, shared by every market. |
 | `int bar_at(const std::string& instrument, int t) const` | The index of the market's base bar that opens at step `t`, or -1 when it has none then (its data has not started, or has ended). |
+| `void append(const std::string& instrument, Timeframe tf, const Bar& bar)` | Adds one closed bar to the market on that timeframe. A base bar past the clock's end adds one clock step. Throws, naming the market, when the market or timeframe does not exist, `ts` is not later than the last bar, the volume column does not match, or a base `ts` would shift existing clock steps. |
+| `void append_states(const std::string& instrument, int64_t ts, const State& state)` | Adds one minute of labels. With no states yet, they start at `ts`. Throws, naming the market, when the market does not exist, `ts` is not a whole minute, or `ts` is not exactly one minute after the last row. |
 
+`Bar` holds `ts`, `open`, `high`, `low`, `close`, `minutes_with_data`, and an optional `volume`. Bars are only appended, never dropped, so bar numbers never shift and a reference from `at` or `base` stays valid. Append a coarser bar only after it has closed. [ADR 0017](../docs/adr/0017-indicators-update-one-bar-at-a-time.md).
 ---
 
 ## states.hpp: state labels
@@ -568,14 +587,16 @@ What `backtest` returns.
 The requirements a type must meet to be a strategy. A type `S` is a strategy when:
 
 - `s.prepare(markets)` compiles, with `markets` a `const Markets&`;
+- `s.update(markets)` compiles;
 - `s.decide(now, report, positions)` compiles and returns `std::vector<Order>`, with `now` an `int64_t`, `report` a `const Report&`, and `positions` a `const std::vector<Position>&`.
 
 There is no base class and no `virtual` function (a function looked up while the program runs). The compiler checks the concept when you call `backtest`, and it calls `decide` directly.
 
-- `prepare` runs once, before the first step. A strategy computes its indicators there, on the timeframes it chooses.
+- `prepare` runs once, before the first step. It resets the strategy's indicators and calls `update`. A strategy chooses its timeframes.
+- `update` feeds each rolling indicator only the bars added since the last call, and pushes the outputs onto the strategy's vectors. It never clears state that `decide` relies on, such as `seen_bar` and `signal_bar`. `StateTrend` builds a market's lines once and only extends them. `Combined` forwards `update` to both strategies.
 - `decide` runs at the close of every clock step. `now` is the UTC second of that close. It must read bars only through `last_closed(bars, now)`, which never returns a bar still open.
 
-### `template <Strategy S> Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs, PortfolioSettings settings)`
+### `template <Strategy S, class OnStep> Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs, PortfolioSettings settings, OnStep on_step = {})`
 
 The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 
@@ -587,6 +608,7 @@ The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 - **End-of-data step.** Except on the run's last step, a market whose last base bar is this step has its position closed at that bar's close, with `Cause::EndOfData`.
 - **Holding step.** After the checks and the end-of-data close, each open position whose market has a bar at this step is charged `hold_long[i]` or `hold_short[i]` through `portfolio.hold`, at that bar's close. The step's equity then includes it.
 - **Decide step.** It passes `now`, the step's open plus `seconds(timeframe)`, which is the close of the step.
+- **`on_step` hook.** After `decide`, the loop calls `on_step(t, positions, orders)` with the step, the open positions, and the orders just returned. The default does nothing. `test_live.cpp` uses it.
 - The caller chooses the bars. The loop never trims them.
 
 The compiler makes one copy of `backtest` for each strategy type it is used with.
@@ -801,11 +823,40 @@ These example scripts use the module:
 
 ---
 
+## Live: one bar at a time
+
+A live caller runs the same strategy code as a backtest. Build `Markets` from history and `prepare` the strategy (in Python, build `Live(name, params, markets)`). Then, each time a bar closes:
+
+1. Append the closed bars with `Markets::append`, and the new state labels with `Markets::append_states`.
+2. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
+3. Send the orders it returns to the exchange.
+
+`positions` are the caller's open positions, with at least `instrument` and `side`. `report` is optional: Python's `decide(now, positions, report=None)` passes an empty `Report` when it is left out, and no strategy reads it today.
+
+**State labels arrive late.** A label reaches the caller about 7 minutes after its minute. Append each label when it arrives. `decide` reads only labels already appended, so it acts on the labels it has, as a trader would. A backtest has every label on time; the label-delay setting (a separate issue) is what makes a backtest see labels as late as live does.
+
+**Restart.** A fresh `Live` rebuilds every indicator from the history, but not the bar on which a strategy opened a position it now holds. Give each open position its `entry_time` (UTC second of the entry fill), as in `Position("ZORA", Side.Short, entry_time=...)`. A strategy with a time exit counts the bars from there, so its time exit lands on the same bar as without the restart. Without `entry_time`, a time exit closes the position at the first `decide`.
+
+### Stops live
+
+`decide` returns opens and rule exits only. In a backtest the portfolio handles stops, take profits, trailing stops, partial take profits, and liquidation. Live, none of that runs. The caller's system must place them on the exchange from each `Order`, once the open fills:
+
+- `stop_distance`, `take_profit_distance`, and `trail_distance` are fractions of the fill price, not prices. The caller computes the prices from the actual fill, as `backtest` does.
+- The caller's system moves the trailing stop as the price improves, and never moves it back.
+- The caller's system closes the partial take profit: when the take profit is hit, it closes `take_profit_fraction` of the position and leaves the rest open with no take profit.
+- The caller's system watches liquidation and the hard stop. A position that the exchange closes is no longer in `positions` at the next `decide`.
+
 ## Tests
 
 Each test program builds its own small price series by hand, runs the code, and compares the answers with values worked out by hand. It prints `FAIL ...` for each wrong value, and exits with 1 if anything failed or 0 if everything passed. The tests never read `data/`.
 
 **`test_indicators.cpp`**: for each indicator: a basic case, the smallest window (1), a window longer than the series, an empty series, missing values, and bad arguments being refused. It also checks `prior_min` excludes the current bar, an old maximum leaves the window, `hour_of_day` at day edges and before 1970, and refused on 4-hour bars, and `chandelier` for both sides.
+
+**`test_rolling.cpp`**: each rolling indicator, updated bar by bar, equals its full-series function bit for bit (NaN equals NaN), across NaN gaps and windows longer than the series.
+
+**`test_append.cpp`**: `Markets::append` and `append_states` grow the bars, a reference taken before an append stays valid, an out-of-order `ts`, a missing market or timeframe, and a states gap are refused, and a base bar past the clock's end extends the clock.
+
+**`test_live.cpp`**: records a backtest with `on_step`, then replays it as a live caller would: start from the first bar, `prepare`, and for each step append the bars and states, `update`, and `decide` with the recorded positions. The orders must be equal at every step, with no tolerance. It runs the five Veranta strategies, `StateTrend` on two markets with 1-minute and 1-hour bars, and a `Combined`. A strategy that looks ahead gives different orders and fails.
 
 **`test_portfolio.cpp`**:
 
@@ -865,8 +916,8 @@ Each test program builds its own small price series by hand, runs the code, and 
 
 ## Write a new strategy
 
-1. In `strategies.hpp`, add a struct with a `Params` struct (including `instrument`, `side`, `take_profit`, `stop`, `time_exit`, `leverage`), a `signal_bar = -1` field, `prepare`, `entry`, and a `decide` that calls `decide_entry_and_exits`. Add `rule_exit` if it has one.
-2. In `prepare`, compute every line once. In `entry` and `rule_exit`, read index `t` or earlier only. Choose a `timeframe` in `Params`, look the bars up with `m.at(instrument, params.timeframe)`, and let `decide_entry_and_exits` map `now` to `t`.
+1. In `strategies.hpp`, add a struct with a `Params` struct (including `instrument`, `side`, `take_profit`, `stop`, `time_exit`, `leverage`), a `signal_bar = -1` field, `prepare`, `update`, `entry`, and a `decide` that calls `decide_entry_and_exits`. Add `rule_exit` if it has one.
+2. In `update`, feed rolling indicators the new bars; `prepare` resets them and calls `update`. In `entry` and `rule_exit`, read index `t` or earlier only. Choose a `timeframe` in `Params`, look the bars up with `m.at(instrument, params.timeframe)`, and let `decide_entry_and_exits` map `now` to `t`.
 3. Add it to the `static_assert` at the end of the file.
 4. Add a test in `test_strategies.cpp` with a hand-built series.
 5. To call it from Python, add a field list and a row in `strategies()` in `run.hpp`. `run` then finds it by name. Costs come from the caller's `MarketCosts`, so the strategy has no fee.
@@ -885,4 +936,5 @@ These come from [CLAUDE.md](../CLAUDE.md) and the ADRs, and each has a test:
 - **Every result names its timeframe.**
 - **The caller chooses the bars.** C++ checks the markets but never trims or pads them.
 - **Closes fill before opens** on the same bar.
+- **Live equals backtest.** Updating bar by bar gives the same numbers and orders as a full run; `test_rolling.cpp` and `test_live.cpp` guard this.
 - **Costs belong to the market.** Every market needs a `Costs`, and no strategy sets a fee.

@@ -2,6 +2,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -24,6 +25,20 @@ struct Param {
     double max = std::numeric_limits<double>::infinity();
 };
 
+// One strategy object behind a type-erased face, for live use: prepare once
+// on the history, then update and decide after each appended bar.
+struct Live {
+    std::function<void(const Markets&)> prepare, update;
+    std::function<std::vector<Order>(int64_t, const Report&, const std::vector<Position>&)> decide;
+};
+
+template <Strategy S>
+Live live_of(S strategy) {
+    auto s = std::make_shared<S>(std::move(strategy));
+    return {[s](const Markets& m) { s->prepare(m); }, [s](const Markets& m) { s->update(m); },
+            [s](int64_t now, const Report& r, const std::vector<Position>& p) { return s->decide(now, r, p); }};
+}
+
 // One row of the strategy table. timeframes are the ones it reads by
 // default; run builds it from params and backtests it.
 struct StrategyInfo {
@@ -31,6 +46,7 @@ struct StrategyInfo {
     std::vector<Param> params;
     std::vector<Timeframe> timeframes;
     std::function<Result(const Params&, const Markets&, const MarketCosts&, PortfolioSettings)> run;
+    std::function<Live(const Params&)> live;
 };
 
 namespace detail {
@@ -105,6 +121,11 @@ StrategyInfo single(std::string name, std::vector<Field<typename S::Params>> fie
                 S strategy;
                 strategy.params = build(name, fields, given);
                 return backtest(strategy, m, c, s);
+            },
+            [=](const Params& given) {
+                S strategy;
+                strategy.params = build(name, fields, given);
+                return live_of(std::move(strategy));
             }};
 }
 
@@ -114,19 +135,24 @@ StrategyInfo combined(std::string name, std::vector<Field<typename A::Params>> f
                       std::vector<Field<typename B::Params>> fb) {
     std::vector<Param> ps = specs(fa, "a.");
     for (Param& p : specs(fb, "b.")) ps.push_back(p);
-    return {name, ps, {Timeframe::Hour1}, [=](const Params& given, const Markets& m, const MarketCosts& c,
-                                              PortfolioSettings s) {
-                Params pa, pb;
-                for (const auto& [k, v] : given) {
-                    if (k.starts_with("a.")) pa[k.substr(2)] = v;
-                    else if (k.starts_with("b.")) pb[k.substr(2)] = v;
-                    else throw std::invalid_argument(name + " params start with a. or b., got " + k);
-                }
-                Combined<A, B> strategy;
-                strategy.a.params = build(name + " a", fa, pa);
-                strategy.b.params = build(name + " b", fb, pb);
+    auto make = [=](const Params& given) {
+        Params pa, pb;
+        for (const auto& [k, v] : given) {
+            if (k.starts_with("a.")) pa[k.substr(2)] = v;
+            else if (k.starts_with("b.")) pb[k.substr(2)] = v;
+            else throw std::invalid_argument(name + " params start with a. or b., got " + k);
+        }
+        Combined<A, B> strategy;
+        strategy.a.params = build(name + " a", fa, pa);
+        strategy.b.params = build(name + " b", fb, pb);
+        return strategy;
+    };
+    return {name, ps, {Timeframe::Hour1},
+            [=](const Params& given, const Markets& m, const MarketCosts& c, PortfolioSettings s) {
+                auto strategy = make(given);
                 return backtest(strategy, m, c, s);
-            }};
+            },
+            [=](const Params& given) { return live_of(make(given)); }};
 }
 
 constexpr double inf = std::numeric_limits<double>::infinity();
