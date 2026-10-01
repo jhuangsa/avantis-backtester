@@ -3,6 +3,7 @@
 // or std::vector once; outputs are moved into a numpy array without a copy.
 
 #include "avbt/indicators.hpp"
+#include "avbt/optimize.hpp"
 #include "avbt/strategies.hpp"
 
 #include <pybind11/numpy.h>
@@ -152,15 +153,69 @@ std::vector<E> to_codes(const py::array_t<uint8_t, py::array::c_style | py::arra
     return out;
 }
 
-// StateTrend with the given params on {instrument: ([Bars, ...], States)}.
-py::dict run_state_trend(const std::map<std::string, std::pair<std::vector<avbt::Bars>, avbt::States>>& markets,
-                         const avbt::PortfolioSettings& settings,
-                         const avbt::StateTrend::Params& params) {
+using StateTrendMarkets = std::map<std::string, std::pair<std::vector<avbt::Bars>, avbt::States>>;
+
+avbt::Markets state_trend_markets(const StateTrendMarkets& markets) {
     std::vector<avbt::Market> list;
     for (const auto& [name, m] : markets) list.push_back({name, m.first, m.second});
+    return avbt::Markets::make(std::move(list));
+}
+
+// StateTrend with the given params on {instrument: ([Bars, ...], States)}.
+py::dict run_state_trend(const StateTrendMarkets& markets, const avbt::PortfolioSettings& settings,
+                         const avbt::StateTrend::Params& params) {
     avbt::StateTrend strategy;
     strategy.params = params;
-    return run_markets(strategy, avbt::Markets::make(std::move(list)), settings);
+    return run_markets(strategy, state_trend_markets(markets), settings);
+}
+
+// optimize over StateTrend. `knobs` is [(name, [values])]: a name is a
+// StateTrendParams field, or "<instrument> signal" for that instrument's
+// signal timeframe. Runs and the best choice come back as {knob: value}.
+py::dict optimize_state_trend(const StateTrendMarkets& markets, const avbt::PortfolioSettings& settings,
+                              const avbt::StateTrend::Params& start,
+                              const std::vector<std::pair<std::string, py::list>>& knobs, int rounds) {
+    using P = avbt::StateTrend::Params;
+    std::vector<avbt::Knob<P>> list;
+    for (const auto& [name, values] : knobs) {
+        avbt::Knob<P> k{.name = name};
+        for (py::handle v : values) {
+            if (name.ends_with(" signal")) {
+                auto tf = v.cast<avbt::Timeframe>();
+                std::string instrument = name.substr(0, name.size() - 7);
+                k.labels.push_back(avbt::name(tf));
+                k.choices.push_back([=](P& p) { p.signal[instrument] = tf; });
+            } else {
+                k.labels.push_back(py::str(v));
+                auto value = py::reinterpret_borrow<py::object>(v);
+                std::string field = name;
+                k.choices.push_back([=](P& p) {
+                    py::cast(&p, py::return_value_policy::reference).attr(field.c_str()) = value;
+                });
+            }
+        }
+        list.push_back(std::move(k));
+    }
+    auto s = avbt::optimize<avbt::StateTrend>(start, list, state_trend_markets(markets), settings, rounds);
+    auto named = [&](const std::vector<int>& choice) {
+        py::dict d;
+        for (std::size_t k = 0; k < list.size(); ++k) d[list[k].name.c_str()] = list[k].labels[choice[k]];
+        return d;
+    };
+    py::list runs;
+    for (const avbt::Run& r : s.runs) {
+        py::dict d = named(r.choice);
+        d["round"] = r.round;
+        d["sharpe"] = r.sharpe;
+        runs.append(d);
+    }
+    py::dict out;
+    out["best"] = s.best;
+    out["choice"] = named(s.choice);
+    out["sharpe"] = s.sharpe;
+    out["timeframe"] = avbt::name(s.timeframe);
+    out["runs"] = runs;
+    return out;
 }
 
 }  // namespace
@@ -216,7 +271,8 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readwrite("leverage", &avbt::StateTrend::Params::leverage)
         .def_readwrite("fee_rate", &avbt::StateTrend::Params::fee_rate)
         .def_readwrite("flip", &avbt::StateTrend::Params::flip)
-        .def_readwrite("min_stop", &avbt::StateTrend::Params::min_stop);
+        .def_readwrite("min_stop", &avbt::StateTrend::Params::min_stop)
+        .def_readwrite("signal", &avbt::StateTrend::Params::signal);
 
     using Codes = py::array_t<uint8_t, py::array::c_style | py::array::forcecast>;
     py::class_<avbt::States>(m, "States")
@@ -245,6 +301,8 @@ PYBIND11_MODULE(avbt_cpp, m) {
           py::arg("b_timeframe") = avbt::Timeframe::Hour1);
     m.def("run_state_trend", &run_state_trend, py::arg("markets"), py::arg("settings"),
           py::arg("params") = avbt::StateTrend::Params{});
+    m.def("optimize_state_trend", &optimize_state_trend, py::arg("markets"), py::arg("settings"),
+          py::arg("start"), py::arg("knobs"), py::arg("rounds"));
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));

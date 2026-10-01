@@ -136,6 +136,32 @@ void test_state_trend_min_stop() {
     check_value("min stop no trade", r.trades.size(), 0);
 }
 
+
+void test_state_trend_signal() {
+    // Hour1 named outright matches the default run. Minute signal bars give
+    // another ATR, so another stop and another result. A missing timeframe
+    // throws.
+    States s = same_states(7200, 6, MarketState::TrendingUp, TrendState::Uptrend, VolatilityState::Normal);
+    s.market[4] = MarketState::TrendingDown;
+    Markets m = Markets::make({{"BTC", {flat_bars(Timeframe::Min1, 7200, {110, 110, 110, 111, 111, 111}),
+                                        flat_bars(Timeframe::Hour1, 0, {100, 110, 120})}, s}});
+    auto run = [&](Timeframe tf) {
+        StateTrend st;
+        st.params.average = 2;
+        st.params.atr_period = 1;
+        st.params.breakout = 2;
+        st.params.signal["BTC"] = tf;
+        return backtest(st, m, PortfolioSettings{});
+    };
+    Result hour = run(Timeframe::Hour1), base = run_state_trend(s);
+    check_value("signal Hour1 trades", hour.trades.size(), base.trades.size());
+    check_value("signal Hour1 balance", hour.ending_balance, base.ending_balance);
+    check_true("signal Min1 differs", run(Timeframe::Min1).ending_balance != base.ending_balance);
+    bool threw = false;
+    try { run(Timeframe::Hour4); } catch (const std::invalid_argument&) { threw = true; }
+    check_true("signal missing timeframe throws", threw);
+}
+
 }
 
 int main() {
@@ -145,6 +171,7 @@ int main() {
     test_state_trend_opens_long();
     test_state_trend_flip_opens_short();
     test_state_trend_min_stop();
+    test_state_trend_signal();
     if (failures == 0) std::printf("all state checks passed\n");
     return failures == 0 ? 0 : 1;
 }

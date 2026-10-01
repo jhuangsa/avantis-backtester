@@ -15,10 +15,11 @@ This guide explains every part of the C++ code in `cpp/`: each file, type, funct
 9. [portfolio.hpp: the account](#portfoliohpp-the-account)
 10. [backtest.hpp: orders, trades, and the loop](#backtesthpp-orders-trades-and-the-loop)
 11. [strategies.hpp: the strategies and Combined](#strategieshpp-the-strategies-and-combined)
-12. [avbt_py.cpp: the Python module](#avbt_pycpp-the-python-module)
-13. [Tests](#tests)
-14. [Write a new strategy](#write-a-new-strategy)
-15. [Rules that must stay true](#rules-that-must-stay-true)
+12. [optimize.hpp: Sharpe and the greedy search](#optimizehpp-sharpe-and-the-greedy-search)
+13. [avbt_py.cpp: the Python module](#avbt_pycpp-the-python-module)
+14. [Tests](#tests)
+15. [Write a new strategy](#write-a-new-strategy)
+16. [Rules that must stay true](#rules-that-must-stay-true)
 
 ---
 
@@ -97,7 +98,8 @@ cpp/
 │   ├── markets.hpp           Market and Markets
 │   ├── portfolio.hpp         the account: positions, levels, fees, liquidation, hard stop
 │   ├── backtest.hpp          Order, Trade, Result, the Strategy concept, the backtest loop
-│   └── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
+│   ├── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
+│   └── optimize.hpp          sharpe, Knob, and optimize, the greedy search
 ├── src/
 │   ├── indicators.cpp        indicator code
 │   ├── markets.cpp           Markets::make and its lookups
@@ -109,12 +111,13 @@ cpp/
 Each header includes the ones below it:
 
 ```
+optimize.hpp ───► backtest.hpp
 strategies.hpp ─► backtest.hpp ─► portfolio.hpp ─► indicators.hpp
                               └─► markets.hpp ───► indicators.hpp
                                               └─► states.hpp ───► indicators.hpp
 ```
 
-`backtest.hpp` and `strategies.hpp` have no `.cpp` file because they hold templates, and a template's code must be visible wherever it is used.
+`backtest.hpp`, `strategies.hpp`, and `optimize.hpp` have no `.cpp` file because they hold templates, and a template's code must be visible wherever it is used.
 
 ## Build and test
 
@@ -565,13 +568,13 @@ All entries are known at a bar's close and fill at the next open. Distances are 
 
 ### `StateTrend`
 
-Trades every market that has `states`, each with its own position. It reads the 1-hour bars and the base (1-minute) bars, so each such market needs both.
+Trades every market that has `states`, each with its own position. It reads each market's signal bars and its base (1-minute) bars, so each such market needs both. `params.signal` maps an instrument to its signal timeframe, such as `{"BTC": Min15}`; an instrument not listed reads `Hour1`. A market that lacks its signal timeframe throws when the backtest starts.
 
 | Part | Rule |
 |---|---|
-| Bias | Up when the last closed hourly close is above its `average` (50) hours' average and the trend label is `Uptrend`. Down is the mirror. |
+| Bias | Up when the last closed signal close is above its `average` (50) bars' average and the trend label is `Uptrend`. Down is the mirror. |
 | Entry | With the bias, when the market label is the same trend or `Breakout`, the minute close breaks the prior `breakout` (30) minute high (low for a short), and volatility is known and not `Extreme` or `Shock`. |
-| Stop and take profit | `atr_stops` (2) hourly ATRs, and `reward` (2) times the stop. |
+| Stop and take profit | `atr_stops` (2) signal-bar ATRs, and `reward` (2) times the stop. |
 | Exit | The bias no longer matches the position, or the market label turns to the opposite trend. |
 
 `Unknown` never opens a trade. It does not close one either. Defaults: `leverage = 1`, `fee_rate = 0.0001`. It acts once per new minute bar.
@@ -600,6 +603,32 @@ The strategy that opens a position owns it and decides its exits. When both stra
 A `static_assert` at the end of the file checks, at compile time, that all six strategies and both `Combined` pairs meet the `Strategy` concept.
 
 ---
+
+## optimize.hpp: Sharpe and the greedy search
+
+File: `include/avbt/optimize.hpp`. ADR 0013.
+
+### `double sharpe(const Result& r)`
+
+The mean over the standard deviation of the hourly equity returns, times √(24 · 365). It samples `equity` every hour of base bars (every 60th value on 1-minute bars), the same as `examples/state_trend.py`. NaN when equity never moves.
+
+### `template <class P> struct Knob`
+
+One parameter the search may change. `choices[i]` is a function that writes one value into a `P`, and `labels[i]` is that value as text for printing, since a function cannot be read back. A parameter with no knob keeps its value in `start`.
+
+### `struct Run` and `template <class P> struct Search`
+
+A `Run` is one backtest: its `round`, its `choice` (`choice[k]` indexes knob `k`'s choices), and its `sharpe`. `Search` holds the `best` params, their `choice` and `sharpe`, the base `timeframe`, and every `Run`.
+
+### `template <Strategy S> Search optimize(start, knobs, markets, settings, rounds)`
+
+1. Every knob starts at its first choice. That is round 0.
+2. The pairs of knobs are listed in a fixed order: (0,1), (0,2), …, (1,2), ….
+3. Round `r` takes the next pair and runs every combination of its two knobs, the other knobs at the best so far. Any higher Sharpe becomes the best. NaN never does.
+4. A combination already run is not run again.
+5. The search stops after `rounds` rounds, or sooner, when a full pass over the pairs brings no gain.
+
+Each run makes a fresh `S`, so `prepare` starts clean.
 
 ## avbt_py.cpp: the Python module
 
@@ -630,7 +659,9 @@ File: `python/avbt_py.cpp`. It uses **pybind11**, a library that makes C++ funct
 | `campaign_and_spike` | `({"AVNT": [bars, ...], "DYM": [bars, ...]}, settings, a_timeframe=Hour1, b_timeframe=Hour1)`: `Combined<CampaignShort, SpikeShort>`. `a_timeframe` and `b_timeframe` are the timeframes the two strategies read. |
 | `late_day_and_rally` | `({"ZORA": [bars, ...]}, settings, a_timeframe=Hour1, b_timeframe=Hour1)`: `Combined<LateDayShort, RallyShort>`, with the same two timeframe arguments. |
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
-| `run_state_trend` | `({"BTC": ([bars, ...], states)}, settings)`: `StateTrend` with default params on each market. |
+| `StateTrendParams` | `StateTrend::Params`; `signal` is a dict such as `{"BTC": Timeframe.Min15}`. |
+| `run_state_trend` | `({"BTC": ([bars, ...], states)}, settings, params=StateTrendParams())`: `StateTrend` on each market. |
+| `optimize_state_trend` | `(markets, settings, start, knobs, rounds)`: `optimize<StateTrend>`. `knobs` is `[(name, [values])]`; a name is a `StateTrendParams` field, or `"BTC signal"` for that instrument's signal timeframe. Returns `{"best", "choice", "sharpe", "timeframe", "runs"}`; `choice` and each run name every knob's value. |
 | `sma`, `pct_change`, `prior_max`, `prior_min` | Take a numpy array and a number; return a numpy array. |
 | `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier` | Take `Bars`; return a numpy array. Fields and sides are strings. |
 
@@ -649,10 +680,11 @@ Each strategy function returns a dict:
 
 Each template copy is a separate compiled function, so a new strategy, or a new `Combined` pair, needs its own `m.def(...)` line.
 
-Three example scripts use the module:
+Four example scripts use the module:
 
 - `examples/veranta_rules_cpp.py` compares C++ trades with the Python engine's, trade by trade.
 - `examples/state_trend.py` runs `StateTrend` on BTC and ETH with states from `examples/clickhouse_data.py`.
+- `examples/state_trend_optimize.py` tunes `StateTrend` with `optimize_state_trend` on June and July 2026, then scores the winner on August.
 - `examples/veranta_cpp_chart.py` writes `examples/veranta_cpp_chart.html`: a summary table (trades, win rate, return, maximum drawdown, Sharpe ratio, exit causes) and a chart for each strategy.
 
 ---
@@ -706,6 +738,9 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_make_checks_states` | `Markets::make` refuses unequal columns and a start inside a minute; `states()` is `nullptr` without states |
 | `test_state_trend_unknown_no_trade` | all-`Unknown` labels open no trade |
 | `test_state_trend_opens_long` | a long opens at the next open, closes when the market label turns, and a `Shock` blocks it |
+| `test_state_trend_signal` | `signal` set to `Hour1` matches the default, `Min1` changes the result, and a missing timeframe throws |
+
+**`test_optimize.cpp`**: `sharpe` is NaN on flat equity; on a toy strategy whose best is known, `optimize` finds it, runs each combination once, stops after a pass with no gain, and runs one pair in one round.
 
 **`test_strategies.cpp`**: one hand-built series per strategy, so that the entry fires on a known bar and the exit happens for a known cause. It also checks that a strategy entering on the bar a level closed its trade fills at the next open, that `Combined` on two markets makes the same trades as each strategy alone, and that `Combined` on one market takes turns.
 

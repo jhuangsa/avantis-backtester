@@ -235,12 +235,13 @@ private:
 };
 
 // 6. Trade every market that has states, each its own position. The bias is
-// the hourly close against its average, agreeing with the trend label. Enter
+// the signal close (hourly unless params.signal says otherwise) against its
+// average, agreeing with the trend label. Enter
 // with the bias when the market label is a trend that way or a breakout, the
 // minute close breaks the prior high (low for a short), and volatility is not
 // extreme or a shock. Exit when the bias stops matching the position or the
 // market label turns to the opposite trend. Unknown never opens a trade and
-// never forces an exit. Stop: atr_stops hourly ATRs; take profit: reward
+// never forces an exit. Stop: atr_stops signal ATRs; take profit: reward
 // times the stop. With flip, every trade takes the other side; the signals,
 // exits, stop and take profit distances stay the same.
 struct StateTrend {
@@ -250,11 +251,14 @@ struct StateTrend {
         bool flip = false;
         // No entry when the stop would be nearer than this fraction of price.
         double min_stop = 0.0;
+        // The bars each instrument's average, ATR, and trend check read; an
+        // instrument not listed reads Hour1. Entries and fills stay on base bars.
+        std::map<std::string, Timeframe> signal;
     } params;
     // One market's bars, lines, and states.
     struct Lines {
         std::string instrument;
-        const Bars* hour = nullptr;
+        const Bars* bars = nullptr;
         const Bars* minute = nullptr;
         const States* states = nullptr;
         // prior_max and prior_min leave out the current bar, so the minute
@@ -269,10 +273,12 @@ struct StateTrend {
         lines.clear();
         for (const Market& market : m.all()) {
             if (!market.states) continue;
-            Lines l{.instrument = market.instrument, .hour = &m.at(market.instrument, Timeframe::Hour1),
+            auto tf = params.signal.find(market.instrument);
+            Lines l{.instrument = market.instrument,
+                    .bars = &m.at(market.instrument, tf == params.signal.end() ? Timeframe::Hour1 : tf->second),
                     .minute = &m.base(market.instrument), .states = &*market.states};
-            l.average = sma(l.hour->close, params.average);
-            l.atr = atr(*l.hour, params.atr_period);
+            l.average = sma(l.bars->close, params.average);
+            l.atr = atr(*l.bars, params.atr_period);
             l.high = prior_max(l.minute->high, params.breakout);
             l.low = prior_min(l.minute->low, params.breakout);
             lines.push_back(std::move(l));
@@ -285,10 +291,10 @@ struct StateTrend {
             int m = last_closed(*l.minute, now);
             if (m < 0 || m == l.seen_bar) continue;
             l.seen_bar = m;
-            int h = last_closed(*l.hour, now);
+            int h = last_closed(*l.bars, now);
             if (h < 0) continue;
             State s = state_at(*l.states, now);
-            double close = l.hour->close[h];
+            double close = l.bars->close[h];
             bool up = defined(l.average[h]) && close > l.average[h] && s.trend == TrendState::Uptrend;
             bool down = defined(l.average[h]) && close < l.average[h] && s.trend == TrendState::Downtrend;
 
