@@ -33,7 +33,8 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "lighter-ensemble"
-URL = os.environ.get("CH_URL", "https://klvu1o0hu6.us-east-1.aws.clickhouse.cloud:8443")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from btc_bars import clickhouse_url  # noqa: E402
 LIGHTER_START = date(2026, 7, 30)
 ANN_VOL = 0.10
 FEE_PREMIUM = 0.00028  # 2.8 bps, premium taker, zero LIT staked
@@ -63,7 +64,7 @@ def ch(sql, dest):
     password = os.environ["CH_PASSWORD"]
     partial = dest.with_suffix(dest.suffix + ".part")
     proc = subprocess.run(
-        ["curl", "-sS", "--fail-with-body", "--max-time", "240", "--user", f"{user}:{password}", URL, "--data-binary", "@-"],
+        ["curl", "-sS", "--fail-with-body", "--max-time", "240", "--user", f"{user}:{password}", clickhouse_url(), "--data-binary", "@-"],
         input=sql,
         text=True,
         stdout=partial.open("w"),

@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DEFAULT_URL = "https://klvu1o0hu6.us-east-1.aws.clickhouse.cloud:8443"
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "btc_1m.csv"
 
@@ -49,6 +48,16 @@ def _env(key: str) -> str | None:
     return None
 
 
+def clickhouse_url() -> str:
+    """CH_URL if set, else the original market-data service named in .env."""
+    if os.environ.get("CH_URL"):
+        return os.environ["CH_URL"]
+    host = _env("CLICKHOUSE_ORIGINAL_HOST")
+    if not host:
+        raise RuntimeError("CLICKHOUSE_ORIGINAL_HOST missing from environment and .env")
+    return f"https://{host}.us-east-1.aws.clickhouse.cloud:8443"
+
+
 def fetch_minutes(refresh: bool = False) -> pd.DataFrame:
     """Return the raw minute rows, from cache unless refresh is set."""
     if refresh or not CACHE.exists():
@@ -56,7 +65,7 @@ def fetch_minutes(refresh: bool = False) -> pd.DataFrame:
         password = _env("CLIKCHOUSE_PASSWORD")
         if not user or password is None:
             raise RuntimeError("ClickHouse credentials missing from environment and .env")
-        url = os.environ.get("CH_URL", DEFAULT_URL)
+        url = clickhouse_url()
         token = base64.b64encode(f"{user}:{password}".encode()).decode()
         req = urllib.request.Request(
             url, data=SQL.encode(), method="POST",

@@ -4,7 +4,8 @@ From the repository root, with ClickHouse credentials in the environment:
 
     CH_USER=... CH_PASSWORD=... python3 examples/hf_2bps.py
 
-CH_URL defaults to the untagged market-data host. Candles are cached under
+CH_URL defaults to the untagged market-data host, CLICKHOUSE_ORIGINAL_HOST
+in .env. Candles are cached under
 data/candles/hf_2bps/. Pass --refresh to download again.
 
 The series is symbol Crypto.ETH/USD, pair_name ETH_UPSIDE/USD (BTC_UPSIDE/USD
@@ -34,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backtest import (
     Above,
@@ -56,7 +58,6 @@ OOS_START = START + 0.8 * (END - START)
 OOS_TS = OOS_START.timestamp()
 SESSION_START = 13 * 60 + 30
 SESSION_END = 20 * 60
-DEFAULT_URL = "https://klvu1o0hu6.us-east-1.aws.clickhouse.cloud:8443"
 CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "hf_2bps"
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -485,7 +486,9 @@ def credentials():
     missing = [name for name in ("CH_USER", "CH_PASSWORD") if not os.environ.get(name)]
     if missing:
         raise SystemExit("set " + " and ".join(missing) + " to download candles")
-    return os.environ.get("CH_URL", DEFAULT_URL), os.environ["CH_USER"], os.environ["CH_PASSWORD"]
+    from btc_bars import clickhouse_url
+
+    return clickhouse_url(), os.environ["CH_USER"], os.environ["CH_PASSWORD"]
 
 
 def fetch_candles(symbol, pair_name, dest, refresh):
