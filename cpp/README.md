@@ -595,7 +595,7 @@ The compiler makes one copy of `backtest` for each strategy type it is used with
 
 ## strategies.hpp: the strategies and Combined
 
-File: `include/avbt/strategies.hpp`. The rules copy `examples/veranta_rules.py`.
+File: `include/avbt/strategies.hpp`. The rules are the five Veranta wallet ideas; `examples/veranta_rules_cpp.py` runs them.
 
 ### Shape of a strategy
 

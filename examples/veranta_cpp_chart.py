@@ -24,7 +24,7 @@ from plotly.subplots import make_subplots
 
 import veranta_rules_cpp as vc
 
-avbt_cpp, vr = vc.avbt_cpp, vc.vr
+avbt_cpp = vc.avbt_cpp
 OUT = Path(__file__).with_suffix(".html")
 CAUSE_COLOR = {"take_profit": "#1a9850", "stop": "#d73027", "order": "#4575b4",
                "liquidation": "#000000", "hard_stop": "#000000"}
@@ -33,13 +33,12 @@ CAUSE_COLOR = {"take_profit": "#1a9850", "stop": "#d73027", "order": "#4575b4",
 def runs():
     """(title, {instrument: bars dataframe}, C++ result) for each chart."""
     out = []
-    for rule in vr.RULES:
-        wallet, market, source, symbol, make = rule
+    for wallet, market, source, symbol, strategy in vc.RULES:
         df = vc.load(wallet, market, source, symbol)
-        name = market.split("/")[0].replace("XAU", "GOLD")
-        result = vc.run(vc.CPP[make], {name: vc.cpp_bars(df)}, {"instrument": name})
-        out.append((make.__name__, {name: df}, result))
-    rally = next(r for r in vr.RULES if r[4] is vr.rally_short)
+        name = vc.name_of(market)
+        result = vc.run(strategy, {name: vc.cpp_bars(df)}, {"instrument": name})
+        out.append((strategy, {name: df}, result))
+    rally = next(r for r in vc.RULES if r[4] == "rally_short")
     zora = vc.load(*rally[:4])
     both = vc.run("late_day_and_rally", {"ZORA": vc.cpp_bars(zora)})
     out.append(("late_day_short + rally_short", {"ZORA": zora}, both))
