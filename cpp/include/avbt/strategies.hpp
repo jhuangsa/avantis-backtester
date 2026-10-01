@@ -242,7 +242,9 @@ private:
 // extreme or a shock. Exit when the bias stops matching the position or the
 // market label turns to the opposite trend. Unknown never opens a trade and
 // never forces an exit. Stop: atr_stops signal ATRs; take profit: reward
-// times the stop. With flip, every trade takes the other side; the signals,
+// times the stop, closing take_fraction of the trade; the rest, and any
+// trade with trail_atrs above 0, trails its stop trail_atrs signal ATRs
+// (taken at entry) behind the best price. With flip, every trade takes the other side; the signals,
 // exits, stop and take profit distances stay the same.
 struct StateTrend {
     struct Params {
@@ -251,6 +253,10 @@ struct StateTrend {
         bool flip = false;
         // No entry when the stop would be nearer than this fraction of price.
         double min_stop = 0.0;
+        // Trailing stop gap in signal ATRs at entry; 0 keeps the stop fixed.
+        double trail_atrs = 0.0;
+        // Fraction of the trade the take profit closes, in (0, 1].
+        double take_fraction = 1.0;
         // The bars each instrument's average, ATR, and trend check read; an
         // instrument not listed reads Hour1. Entries and fills stay on base bars.
         std::map<std::string, Timeframe> signal;
@@ -326,7 +332,9 @@ struct StateTrend {
             orders.push_back(Order{.kind = Order::Kind::Open, .instrument = l.instrument,
                                    .side = long_entry != params.flip ? Side::Long : Side::Short,
                                    .stop_distance = stop, .take_profit_distance = params.reward * stop,
-                                   .leverage = params.leverage, .fee_rate = params.fee_rate});
+                                   .leverage = params.leverage, .fee_rate = params.fee_rate,
+                                   .trail_distance = params.trail_atrs * l.atr[h] / price,
+                                   .take_profit_fraction = params.take_fraction});
         }
         return orders;
     }

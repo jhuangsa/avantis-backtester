@@ -342,6 +342,8 @@ One open trade. The portfolio holds at most one per instrument.
 | `fee_rate` | Fraction of notional charged at every fill. |
 | `liquidation_price` | Where the loss reaches 85% of the collateral. |
 | `mark_price` | The last close seen; it values the unrealized result. |
+| `trail` | The price gap the stop keeps behind the best high (low for a short). 0: the stop never moves. |
+| `take_profit_fraction` | The fraction of the position the take profit closes. Below 1, the take profit fires once and the rest runs on its stop. |
 
 ### `enum class Cause`
 
@@ -413,21 +415,22 @@ It refuses the open (returns false) when:
 - the stop is not on the losing side of the entry;
 - the take profit is not on the winning side (a NaN take profit passes, because it means "none");
 - the stop would lose more than 80% of the collateral;
-- the collateral is more than the free cash.
+- the collateral is more than the free cash;
+- `trail` is negative, or `take_profit_fraction` is not above 0 and at most 1.
 
 On success, the open fee (`fee_rate × notional`) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
 
 **`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. No strategy uses partial closes yet.
+Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
 Applies one bar to every position that has a quote. For each position:
 
 1. **Stop.** Has the bar's worst price (low for a long, high for a short) reached the stop?
-2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close at the take profit, or at the open if the bar opened past it.
-3. **Neither.** Mark the position at the close.
+2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
+3. **Neither.** Mark the position at the close. With a `trail`, move the stop to the bar's high minus the trail (low plus the trail for a short), if that is better than the stop. The stop never moves back, and the new stop counts from the next bar.
 4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). If that price is at or past the liquidation price, close at the liquidation price instead, with cause `Liquidation`.
 
 If a bar reaches both the stop and the take profit, the stop fills. A bar does not show which price came first, so the backtest assumes the worse one ([ADR 0003](../docs/adr/0003-a-bar-with-both-levels-exits-at-the-stop.md)).
@@ -465,6 +468,8 @@ What a strategy returns at the close of a clock step. It fills at the open of th
 | `take_profit_distance` | NaN | Take-profit distance as a fraction. NaN for none. |
 | `leverage` | 1 | Leverage for the position. |
 | `fee_rate` | 0 | Fraction of notional charged at every fill of this position. |
+| `trail_distance` | 0 | Trailing-stop gap as a fraction of the fill price. 0 for a stop that never moves. |
+| `take_profit_fraction` | 1 | Fraction of the position the take profit closes. 0.5 sells half and lets the rest run. |
 
 Distances are fractions, not prices, because the strategy decides before it knows the next open. The loop turns them into prices at the fill: for a short filled at 1.00 with `stop_distance = 0.05`, the stop is 1.05.
 
@@ -512,7 +517,7 @@ There is no base class and no `virtual` function (a function looked up while the
 The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 
 - It makes a fresh `Portfolio` from `settings`.
-- It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps.
+- It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps. It forgets the entry step only when no position is left, so the rest of a partly closed trade keeps it.
 - **Fill step.** It moves close orders ahead of open orders, keeping their order otherwise (`std::stable_partition`). A close frees collateral, so a new open on the same bar can use it. It looks up the order's market bar with `bar_at`; an order for a market with no bar at this step is dropped. For each open order it computes the stop and take-profit prices from that base open and calls `portfolio.open`. A refused open is skipped, and nothing is recorded.
 - **Check step.** It builds one `Quote` per open position from that position's own base bar and calls `portfolio.check`. A position whose market has no bar at this step is not checked.
 - **End-of-data step.** Except on the run's last step, a market whose last base bar is this step has its position closed at that bar's close, with `Cause::EndOfData`.
@@ -574,7 +579,8 @@ Trades every market that has `states`, each with its own position. It reads each
 |---|---|
 | Bias | Up when the last closed signal close is above its `average` (50) bars' average and the trend label is `Uptrend`. Down is the mirror. |
 | Entry | With the bias, when the market label is the same trend or `Breakout`, the minute close breaks the prior `breakout` (30) minute high (low for a short), and volatility is known and not `Extreme` or `Shock`. |
-| Stop and take profit | `atr_stops` (2) signal-bar ATRs, and `reward` (2) times the stop. |
+| Stop and take profit | `atr_stops` (2) signal-bar ATRs, and `reward` (2) times the stop. The take profit closes `take_fraction` (1) of the trade; the rest runs on its stop. |
+| Trailing stop | `trail_atrs` (0) signal-bar ATRs, taken at entry, behind the best price. 0 keeps the stop fixed. |
 | Exit | The bias no longer matches the position, or the market label turns to the opposite trend. |
 
 `Unknown` never opens a trade. It does not close one either. Defaults: `leverage = 1`, `fee_rate = 0.0001`. It acts once per new minute bar.
@@ -711,8 +717,11 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_stop_wins_over_take_profit` | the stop fills when a bar reaches both |
 | `test_take_profit_wrong_side` | a take profit on the losing side is refused |
 | `test_fees` | the fee is charged at the open and at the close |
+| `test_trailing_stop`, `test_trailing_stop_short` | a trailing stop follows the best price, never moves back, and fills at its level |
+| `test_partial_take_profit` | a partial take profit closes its fraction, and the rest has no take profit and stays open |
+| `test_open_refuses_bad_trail_or_fraction` | an open is refused for a negative trail or a fraction outside (0, 1] |
 
-**`test_backtest.cpp`**, with small test-only strategies (`UpDown`, `Script`, `FollowY`):
+**`test_backtest.cpp`**, with small test-only strategies (`UpDown`, `Script`, `FollowY`, `HalfAtTarget`):
 
 | Test | Checks that |
 |---|---|
@@ -729,6 +738,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_market_starts_late` | the clock is the union of both markets; an order for a market before its first bar is dropped; the market trades from its first bar |
 | `test_market_ends_early` | a position in a market whose data ends is closed at its last close with `EndOfData` |
 | `test_coarser_timeframe` | a strategy on 4-hour bars acts once per 4-hour bar and fills at the open after the bar closes, never earlier |
+| `test_partial_close_keeps_entry_bar` | both parts of a partly closed trade keep the trade's entry step |
 
 **`test_states.cpp`**:
 

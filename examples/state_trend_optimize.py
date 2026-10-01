@@ -38,6 +38,9 @@ KNOBS = [
     ("atr_stops", [2.0, 1.5, 3.0]),
     ("flip", [False, True]),
     ("min_stop", [0.0, 0.01, 0.02]),
+    ("reward", [2.0, 1.0, 3.0]),
+    ("trail_atrs", [0.0, 2.0, 3.0]),
+    ("take_fraction", [1.0, 0.5]),
     ("BTC signal", [TF.Hour1, TF.Min5, TF.Min15, TF.Hour4]),
     ("ETH signal", [TF.Hour1, TF.Min5, TF.Min15, TF.Hour4]),
 ]
@@ -120,7 +123,7 @@ if __name__ == "__main__":
     settings = avbt_cpp.PortfolioSettings()
     default = avbt_cpp.StateTrendParams()
     train = {name: market(pid, START, SPLIT) for name, pid in PAIRS.items()}
-    s = avbt_cpp.optimize_state_trend(train, settings, default, KNOBS, rounds=42)
+    s = avbt_cpp.optimize_state_trend(train, settings, default, KNOBS, rounds=90)
     tuned = s["best"]
     print(f"searched {START} to {SPLIT}, base timeframe {s['timeframe']}, {len(s['runs'])} runs")
     print("best:", ", ".join(f"{k}={v}" for k, v in s["choice"].items()))
@@ -203,6 +206,8 @@ if __name__ == "__main__":
 
     def params(p):
         return (f"average {p.average} hours, breakout {p.breakout} minutes, stop {p.atr_stops} ATRs, "
+                f"take profit {p.reward}R closing {p.take_fraction:.0%}, "
+                f"trail {f'{p.trail_atrs} ATRs' if p.trail_atrs else 'off'}, "
                 f"min stop {p.min_stop:.0%}, flip {'on' if p.flip else 'off'}")
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>StateTrend tuning</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;
@@ -221,8 +226,12 @@ down when it is below and the label is downtrend.</li>
 1-minute close breaks the high (low) of the prior breakout minutes, and volatility is not extreme
 or a shock. The order fills at the next minute's open.</li>
 <li><b>Stop and take profit.</b> The stop is a number of hourly ATRs from the entry (ATR: the
-average size of one bar's range); the take profit is twice that. No entry when the stop would be
-closer than the min stop, so it skips calm hours.</li>
+average size of one bar's range). R is that distance, the amount a trade risks. The take profit is
+reward R from the entry (2R by default) and closes the take fraction of the trade; whatever is left
+has no take profit and runs on its stop. No entry when the stop would be closer than the min stop,
+so it skips calm hours.</li>
+<li><b>Trailing stop.</b> When trail is on, the stop follows the best price reached, trail ATRs
+behind it (the ATR taken at entry), and never moves back. A trailed stop fills at its level.</li>
 <li><b>Exit.</b> When the bias no longer holds or the market label turns to the opposite trend.</li>
 <li><b>Flip.</b> When on, every trade takes the other side: an upward breakout opens a short.</li>
 </ol>
@@ -233,6 +242,10 @@ closer than the min stop, so it skips calm hours.</li>
 <p><b>Most of the gain is early.</b> {early} of the {len(trades)} tuned trades, and
 {early_gain:.0%} of the gain, came in the first two weeks of June, when both markets fell fast;
 the 2% min stop keeps it out of calmer weeks.</p>
+<p><b>The take profit and trailing stop did not matter.</b> Every reward, trail, and take fraction
+scored the same Sharpe, because the tuned trades all closed on the exit rule before the price
+reached the stop or the take profit. A trend strategy whose own exit is this quick gains nothing
+from these levels.</p>
 <p>Both markets read 1-hour signal bars after tuning. The account starts at 10,000. The price panels
 show the tuned trades only; a short trade's line goes down when it made money. Hover a triangle for
 its exit cause and result; drag to zoom.</p>

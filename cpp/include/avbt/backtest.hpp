@@ -30,6 +30,10 @@ struct Order {
     double leverage = 1.0;
     // Fraction of notional charged at every fill.
     double fee_rate = 0.0;
+    // 0.03 trails the stop 3% of the fill behind the best price; 0 for none.
+    double trail_distance = 0.0;
+    // Fraction of the position the take profit closes. ADR 0014.
+    double take_profit_fraction = 1.0;
 };
 
 // One closed trade, with the clock steps of its fills. A step indexes
@@ -94,7 +98,10 @@ Result backtest(S& strategy, const Markets& markets, PortfolioSettings settings)
     auto record = [&](const Closed& c, int t) {
         result.trades.push_back(Trade{c.instrument, entry_bar[c.instrument], t, c.side,
                                       c.entry_price, c.exit_price, c.result, c.cause});
-        entry_bar.erase(c.instrument);
+        // A partial close leaves the rest of the trade open, with its entry bar.
+        bool still_open = std::any_of(portfolio.positions().begin(), portfolio.positions().end(),
+                                      [&](const Position& p) { return p.instrument == c.instrument; });
+        if (!still_open) entry_bar.erase(c.instrument);
     };
 
     strategy.prepare(markets);
@@ -115,7 +122,8 @@ Result backtest(S& strategy, const Markets& markets, PortfolioSettings settings)
             double stop = open * (1.0 - sign * o.stop_distance);
             double take = open * (1.0 + sign * o.take_profit_distance);
             // A refused open (no free cash, halted, a position already) records nothing.
-            if (portfolio.open(o.instrument, o.side, open, stop, o.leverage, take, o.fee_rate)) {
+            if (portfolio.open(o.instrument, o.side, open, stop, o.leverage, take, o.fee_rate,
+                               o.trail_distance * open, o.take_profit_fraction)) {
                 entry_bar[o.instrument] = t;
             }
         }

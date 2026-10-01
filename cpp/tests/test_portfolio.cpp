@@ -179,6 +179,50 @@ void test_fees() {
     check_value("fee balance", p.report().balance, 10195.8);
 }
 
+// A 5 trail on the 100 long: a bar to 110 lifts the stop to 105; a bar to
+// 108 leaves it there; a bar down to 103 fills it at 105, 20 * 5 = +100.
+void test_trailing_stop() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), 0.0, 5.0);
+    p.check({Quote{"BTC", 100.0, 110.0, 104.0, 108.0}});
+    check_value("trail lifts stop", p.positions().at(0).stop_price, 105.0);
+    p.check({Quote{"BTC", 108.0, 108.0, 106.0, 107.0}});
+    check_value("trail never falls", p.positions().at(0).stop_price, 105.0);
+    auto closed = p.check({Quote{"BTC", 106.0, 107.0, 103.0, 104.0}});
+    check_true("trail stop cause", closed.size() == 1 && closed[0].cause == Cause::Stop);
+    check_value("trail stop fill", closed.at(0).exit_price, 105.0);
+    check_value("trail stop balance", p.report().balance, 10100.0);
+}
+
+// A short trails above the lows: a bar down to 90 drops the 105 stop to 95.
+void test_trailing_stop_short() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Short, 100.0, 105.0, 10.0, std::nan(""), 0.0, 5.0);
+    p.check({Quote{"BTC", 100.0, 101.0, 90.0, 92.0}});
+    check_value("short trail drops stop", p.positions().at(0).stop_price, 95.0);
+}
+
+// Half of 20 units closes at the 110 take profit, +100; the other 10 stay
+// open with no take profit, so a bar to 130 closes nothing.
+void test_partial_take_profit() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0, 0.0, 0.0, 0.5);
+    auto closed = p.check({Quote{"BTC", 105.0, 112.0, 104.0, 111.0}});
+    check_true("partial take cause", closed.size() == 1 && closed[0].cause == Cause::TakeProfit);
+    check_value("partial take size", closed.at(0).size, 10.0);
+    check_value("partial take balance", p.report().balance, 10100.0);
+    check_value("rest size", p.positions().at(0).size, 10.0);
+    check_true("rest has no take profit", std::isnan(p.positions().at(0).take_profit_price));
+    check_true("rest runs", p.check({Quote{"BTC", 111.0, 130.0, 111.0, 125.0}}).empty());
+}
+
+void test_open_refuses_bad_trail_or_fraction() {
+    Portfolio p(PortfolioSettings{});
+    check_true("skip negative trail", !p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0, 0.0, -1.0));
+    check_true("skip zero fraction", !p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0, 0.0, 0.0, 0.0));
+    check_true("skip fraction above one", !p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0, 0.0, 0.0, 1.5));
+}
+
 }
 
 
@@ -198,6 +242,10 @@ int main() {
     test_stop_wins_over_take_profit();
     test_take_profit_wrong_side();
     test_fees();
+    test_trailing_stop();
+    test_trailing_stop_short();
+    test_partial_take_profit();
+    test_open_refuses_bad_trail_or_fraction();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

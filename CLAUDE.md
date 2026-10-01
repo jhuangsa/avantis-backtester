@@ -24,7 +24,7 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 
 **C++** (`cpp/`, built with `cpp/CMakeLists.txt`):
 - `include/avbt/indicators.hpp`, `src/indicators.cpp`: the `Bars` struct and the indicators.
-- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, fees, liquidation, hard stop); ADR 0008.
+- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, partial take profit, trailing stop, fees, liquidation, hard stop); ADR 0008, 0014.
 - `include/avbt/markets.hpp`, `src/markets.cpp`: `Market` and `Markets`, several markets, each on several timeframes, on one clock; ADR 0011.
 - `include/avbt/backtest.hpp`: `Order`, `Trade`, the `Strategy` concept, and the `backtest` template loop over `Markets`; ADR 0009, 0010, 0011.
 - `include/avbt/states.hpp`: the state labels of a market and `state_at`; ADR 0012.

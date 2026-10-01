@@ -14,8 +14,10 @@ double direction(Side side) { return side == Side::Long ? 1.0 : -1.0; }
 
 bool Portfolio::open(const std::string& instrument, Side side, double entry_price,
                      double stop_price, double leverage,
-                     double take_profit_price, double fee_rate) {
-    if (halted_ || leverage <= 0.0 || entry_price <= 0.0) return false;
+                     double take_profit_price, double fee_rate,
+                     double trail, double take_profit_fraction) {
+    if (halted_ || leverage <= 0.0 || entry_price <= 0.0 || trail < 0.0) return false;
+    if (!(take_profit_fraction > 0.0 && take_profit_fraction <= 1.0)) return false;
     for (const Position& p : positions_) {
         if (p.instrument == instrument) return false;
     }
@@ -43,6 +45,8 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
         .fee_rate = fee_rate,
         .liquidation_price = entry_price - direction(side) * liquidation_move,
         .mark_price = entry_price,
+        .trail = trail,
+        .take_profit_fraction = take_profit_fraction,
     });
     balance_ -= fee_rate * size * entry_price;
     return true;
@@ -91,12 +95,19 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         bool take_hit = is_long ? best >= p.take_profit_price : best <= p.take_profit_price;
         if (!stop_hit && take_hit) {
             bool past = is_long ? q.open > p.take_profit_price : q.open < p.take_profit_price;
+            double fraction = p.take_profit_fraction;
             out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price,
-                                 1.0, Cause::TakeProfit));
-            continue;
+                                 fraction, Cause::TakeProfit));
+            if (fraction >= 1.0) continue;
+            // A partial close keeps p in place; the rest runs on its stop.
+            p.take_profit_price = std::nan("");
         }
         if (!stop_hit) {
             p.mark_price = q.close;
+            if (p.trail > 0.0) {
+                p.stop_price = is_long ? std::max(p.stop_price, q.high - p.trail)
+                                       : std::min(p.stop_price, q.low + p.trail);
+            }
             continue;
         }
         // A bar that opens past the stop fills at the open. A gap past the

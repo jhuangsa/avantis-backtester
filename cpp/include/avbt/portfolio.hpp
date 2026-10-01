@@ -44,6 +44,12 @@ struct Position {
     double liquidation_price = 0.0;
     // The last close seen for the instrument; values the unrealized result.
     double mark_price = 0.0;
+    // Price gap the stop keeps behind the best high (low for a short); 0 for
+    // a stop that never moves.
+    double trail = 0.0;
+    // Fraction of the position the take profit closes. A partial take profit
+    // fires once: the take profit becomes NaN and the rest runs on its stop.
+    double take_profit_fraction = 1.0;
 };
 
 // What closed a position. Order is a strategy's close order; EndOfData is
@@ -95,10 +101,12 @@ public:
     // when the portfolio has halted, the instrument already has a position,
     // the stop or take profit is on the wrong side of the entry, leverage is
     // not positive, the stop would lose more than max_stop_loss of the
-    // collateral, or the collateral exceeds the free cash.
+    // collateral, or the collateral exceeds the free cash, the trail is
+    // negative, or take_profit_fraction is not in (0, 1].
     bool open(const std::string& instrument, Side side, double entry_price,
               double stop_price, double leverage,
-              double take_profit_price = std::nan(""), double fee_rate = 0.0);
+              double take_profit_price = std::nan(""), double fee_rate = 0.0,
+              double trail = 0.0, double take_profit_fraction = 1.0);
 
     // Closes `fraction` (0 to 1] of the instrument's position at `price`,
     // charges the close fee, and returns what closed. Returns nothing when
@@ -110,7 +118,9 @@ public:
     // and take profit (at the level, or at the open when the bar gaps past
     // it; the stop wins when the bar reaches both, ADR 0003), then
     // liquidation (at the liquidation price, when a gap passes both), then
-    // the hard stop on equity at the closes. Instruments without a quote keep
+    // the hard stop on equity at the closes. A position the bar left open
+    // then trails its stop toward the bar's best price, never back, so the
+    // new stop counts from the next bar. Instruments without a quote keep
     // their last mark. Returns every position it closed.
     std::vector<Closed> check(const std::vector<Quote>& quotes);
 

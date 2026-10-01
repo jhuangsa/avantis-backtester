@@ -361,6 +361,36 @@ void test_coarser_timeframe() {
 
 }
 
+// Opens at bar 0's close with a 10% take profit that closes half, and
+// closes the rest at bar 3's close.
+struct HalfAtTarget {
+    const Bars* bars = nullptr;
+    void prepare(const Markets& m) { bars = &m.base("X"); }
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>&) {
+        int t = last_closed(*bars, now);
+        if (t == 0) {
+            return {Order{.instrument = "X", .side = Side::Long, .stop_distance = 0.5,
+                          .take_profit_distance = 0.1, .take_profit_fraction = 0.5}};
+        }
+        if (t == 3) return {Order{.kind = Order::Kind::Close, .instrument = "X"}};
+        return {};
+    }
+};
+
+void test_partial_close_keeps_entry_bar() {
+    // Opens at open[1] = 100; bar 2 opens at 111, past the 110 target, so half
+    // fills at 111; the rest closes at open[4] = 111. Both trades entered at bar 1.
+    Bars b = flat_bars({100, 100, 111, 111, 111});
+    HalfAtTarget s;
+    Result r = backtest(s, one(b), PortfolioSettings{});
+    check_value("two trades", r.trades.size(), 2);
+    check_true("first is take profit", r.trades.at(0).cause == Cause::TakeProfit);
+    check_value("first entry bar", r.trades.at(0).entry_bar, 1);
+    check_value("first exit bar", r.trades.at(0).exit_bar, 2);
+    check_value("rest entry bar", r.trades.at(1).entry_bar, 1);
+    check_value("rest exit bar", r.trades.at(1).exit_bar, 4);
+}
+
 int main() {
     test_signal_fills_at_next_open();
     test_last_bar_order_never_fills();
@@ -375,6 +405,7 @@ int main() {
     test_market_starts_late();
     test_market_ends_early();
     test_coarser_timeframe();
+    test_partial_close_keeps_entry_bar();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;
 }

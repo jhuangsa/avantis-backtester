@@ -272,6 +272,8 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readwrite("fee_rate", &avbt::StateTrend::Params::fee_rate)
         .def_readwrite("flip", &avbt::StateTrend::Params::flip)
         .def_readwrite("min_stop", &avbt::StateTrend::Params::min_stop)
+        .def_readwrite("trail_atrs", &avbt::StateTrend::Params::trail_atrs)
+        .def_readwrite("take_fraction", &avbt::StateTrend::Params::take_fraction)
         .def_readwrite("signal", &avbt::StateTrend::Params::signal);
 
     using Codes = py::array_t<uint8_t, py::array::c_style | py::array::forcecast>;
