@@ -62,7 +62,8 @@ struct Search {
 template <Strategy S>
 Search<typename S::Params> optimize(const typename S::Params& start,
                                     const std::vector<Knob<typename S::Params>>& knobs,
-                                    const Markets& markets, PortfolioSettings settings, int rounds) {
+                                    const Markets& markets, const MarketCosts& costs,
+                                    PortfolioSettings settings, int rounds) {
     using P = typename S::Params;
     std::vector<std::pair<int, int>> pairs;
     for (int a = 0; a < static_cast<int>(knobs.size()); ++a) {
@@ -83,7 +84,7 @@ Search<typename S::Params> optimize(const typename S::Params& start,
         if (it != seen.end()) return it->second;
         S strategy;
         strategy.params = params_of(choice);
-        double s = sharpe(backtest(strategy, markets, settings));
+        double s = sharpe(backtest(strategy, markets, costs, settings));
         out.runs.push_back({round, choice, s});
         return seen[choice] = s;
     };

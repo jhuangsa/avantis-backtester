@@ -13,7 +13,8 @@ void check_bars(const std::string& instrument, const Bars& b) {
     std::size_t n = b.ts.size();
     if (n == 0) throw std::invalid_argument(where + "no bars");
     if (b.open.size() != n || b.high.size() != n || b.low.size() != n ||
-        b.close.size() != n || b.minutes_with_data.size() != n) {
+        b.close.size() != n || b.minutes_with_data.size() != n ||
+        (!b.volume.empty() && b.volume.size() != n)) {
         throw std::invalid_argument(where + "every Bars column must be the same size");
     }
     for (std::size_t i = 1; i < n; ++i) {

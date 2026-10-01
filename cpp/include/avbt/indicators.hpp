@@ -32,6 +32,8 @@ struct Bars {
     // into it. Zero means the bar had no data and was filled flat at the
     // previous close.
     std::vector<int> minutes_with_data;
+    // Optional: empty, or one value per bar. No strategy reads it yet.
+    std::vector<double> volume;
 };
 
 // The index of the last bar that has fully closed at time `now` (UTC

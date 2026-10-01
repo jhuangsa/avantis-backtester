@@ -12,14 +12,16 @@ This guide explains every part of the C++ code in `cpp/`: each file, type, funct
 6. [indicators.hpp: bars and indicators](#indicatorshpp-bars-and-indicators)
 7. [markets.hpp: several markets on one clock](#marketshpp-several-markets-on-one-clock)
 8. [states.hpp: state labels](#stateshpp-state-labels)
-9. [portfolio.hpp: the account](#portfoliohpp-the-account)
-10. [backtest.hpp: orders, trades, and the loop](#backtesthpp-orders-trades-and-the-loop)
-11. [strategies.hpp: the strategies and Combined](#strategieshpp-the-strategies-and-combined)
-12. [optimize.hpp: Sharpe and the greedy search](#optimizehpp-sharpe-and-the-greedy-search)
-13. [avbt_py.cpp: the Python module](#avbt_pycpp-the-python-module)
-14. [Tests](#tests)
-15. [Write a new strategy](#write-a-new-strategy)
-16. [Rules that must stay true](#rules-that-must-stay-true)
+9. [costs.hpp: what a market charges](#costshpp-what-a-market-charges)
+10. [portfolio.hpp: the account](#portfoliohpp-the-account)
+11. [backtest.hpp: orders, trades, and the loop](#backtesthpp-orders-trades-and-the-loop)
+12. [strategies.hpp: the strategies and Combined](#strategieshpp-the-strategies-and-combined)
+13. [run.hpp and version.hpp: run a strategy by name](#runhpp-and-versionhpp-run-a-strategy-by-name)
+14. [optimize.hpp: Sharpe and the greedy search](#optimizehpp-sharpe-and-the-greedy-search)
+15. [avbt_py.cpp: the Python module](#avbt_pycpp-the-python-module)
+16. [Tests](#tests)
+17. [Write a new strategy](#write-a-new-strategy)
+18. [Rules that must stay true](#rules-that-must-stay-true)
 
 ---
 
@@ -29,9 +31,10 @@ A **backtest** replays a trading idea on past prices and records the trades the 
 
 - one or more **markets**: past prices for each instrument, such as ZORA or gold;
 - one **strategy**: C++ code that decides when to open and close trades;
+- the **costs** of each market: fees and holding costs;
 - the **portfolio settings**: the starting balance, how much to risk per trade, and when to stop trading.
 
-It returns every closed **trade**, the account's **equity** at every bar, and the ending balance.
+It returns every closed **trade**, the account's **equity** at every bar, the ending balance, and the engine version.
 
 Python loads and cleans the price data. C++ does every calculation. The Python engine in `backtest/` is separate, and this guide does not cover it.
 
@@ -56,6 +59,7 @@ Python loads and cleans the price data. C++ does every calculation. The Python e
 | Collateral | The balance a position locks while it is open. |
 | Free cash | Balance minus all collateral: what a new trade can use. |
 | Fee | A charge at each fill, as a fraction of notional. 0.0001 is 1 basis point (one hundredth of one percent). |
+| Holding cost | A charge for keeping a position open through a bar, as a fraction of notional. It may be negative: the position then receives money. Funding and rollover are holding costs. |
 | Liquidation | The forced close of a position once its loss reaches 85% of its collateral. |
 | Balance | Realized money: it changes only when a fill happens. |
 | Unrealized result | The profit or loss of an open position, valued at the last close. |
@@ -96,9 +100,12 @@ cpp/
 │   ├── indicators.hpp        Timeframe, Bars, last_closed, Side, Field, and the indicators
 │   ├── states.hpp            state labels and state_at
 │   ├── markets.hpp           Market and Markets
-│   ├── portfolio.hpp         the account: positions, levels, fees, liquidation, hard stop
+│   ├── costs.hpp             Costs, MarketCosts, check_costs
+│   ├── portfolio.hpp         the account: positions, levels, fees, holding costs, liquidation, hard stop
 │   ├── backtest.hpp          Order, Trade, Result, the Strategy concept, the backtest loop
 │   ├── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
+│   ├── run.hpp               the strategy table, strategies(), and run
+│   ├── version.hpp           the engine version
 │   └── optimize.hpp          sharpe, Knob, and optimize, the greedy search
 ├── src/
 │   ├── indicators.cpp        indicator code
@@ -112,12 +119,15 @@ Each header includes the ones below it:
 
 ```
 optimize.hpp ───► backtest.hpp
+run.hpp ────────► strategies.hpp ─► backtest.hpp
+backtest.hpp ───► costs.hpp ─────► markets.hpp
+              └─► version.hpp
 strategies.hpp ─► backtest.hpp ─► portfolio.hpp ─► indicators.hpp
                               └─► markets.hpp ───► indicators.hpp
                                               └─► states.hpp ───► indicators.hpp
 ```
 
-`backtest.hpp`, `strategies.hpp`, and `optimize.hpp` have no `.cpp` file because they hold templates, and a template's code must be visible wherever it is used.
+`backtest.hpp`, `costs.hpp`, `strategies.hpp`, `run.hpp`, and `optimize.hpp` have no `.cpp` file because they hold templates, and a template's code must be visible wherever it is used.
 
 ## Build and test
 
@@ -136,8 +146,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 - `cmake -S . -B build` reads `CMakeLists.txt` and writes build files into `build/`.
-- `cmake --build build` compiles. It makes the library `libavbt.a` (the three `.cpp` files in `src/`), the four test programs, and the Python module when pybind11 is installed.
-- `ctest` runs the four test programs. A test program passes when it exits with code 0.
+- `cmake --build build` compiles. It makes the library `libavbt.a` (the three `.cpp` files in `src/`), the six test programs, and the Python module when pybind11 is installed.
+- `ctest` runs the test programs. A test program passes when it exits with code 0.
 
 The build uses C++20, compiles in Release mode (optimized) unless you choose another, and compiles with `-Wall -Wextra` (extra warnings). `_LIBCPP_ENABLE_ASSERTIONS=1` makes the standard library check, for example, that list indexes are in range.
 
@@ -215,6 +225,7 @@ One instrument's price history on one timeframe. Index `i` in every list is the 
 | `ts` | `std::vector<int64_t>` | Timestamp of each bar's start: seconds since 1970-01-01 UTC. |
 | `open`, `high`, `low`, `close` | `std::vector<double>` | The four prices of each bar. |
 | `minutes_with_data` | `std::vector<int>` | For each bar, how many 1-minute candles with real prices went into it, from 0 to `seconds(timeframe) / 60`. 0 means the bar had no data and was filled flat at the previous close. Nothing in C++ reads it yet. |
+| `volume` | `std::vector<double>` | Optional: empty, or one value per bar. No strategy reads it yet. |
 
 `Bars` has no methods. It only holds data.
 
@@ -303,9 +314,40 @@ A **state label** names the condition of a market in one minute. It is computed 
 
 ---
 
+## costs.hpp: what a market charges
+
+File: `include/avbt/costs.hpp`. Decision: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md). It has no `.cpp` file.
+
+Costs belong to the market, not the strategy. The caller gives one `Costs` for each market.
+
+### `struct Costs`
+
+| Field | Meaning |
+|---|---|
+| `open_fee` | Fraction of notional charged at the open fill. Default 0. |
+| `close_fee` | Fraction of notional charged at the close fill. Default 0. |
+| `hold_long` | Holding cost of a long, one value per base bar: the cost of holding through that bar, as a fraction of notional. Empty means none. |
+| `hold_short` | The same for a short. |
+
+Holding costs are signed: positive means the position pays, negative means it receives. NaN means zero, so a holding cost never blocks a trade. Example: `hold_long` of 0.0001 on a bar charges a long 0.01% of its notional for that bar.
+
+`MarketCosts` is `std::map<std::string, Costs>`, from instrument to costs.
+
+### `void check_costs(const Markets& markets, const MarketCosts& costs)`
+
+Throws `std::invalid_argument`, naming the market, when:
+
+- a market has no `Costs`;
+- a `Costs` names an instrument that is not a market;
+- a holding list is neither empty nor one value per base bar of its market.
+
+A missing `Costs` is an error and not zero cost, because a backtest with no costs looks better than reality. `backtest` calls this before the first step.
+
+---
+
 ## portfolio.hpp: the account
 
-Files: `include/avbt/portfolio.hpp`, `src/portfolio.cpp`. Decision: [ADR 0008](../docs/adr/0008-a-portfolio-scores-in-account-terms.md).
+Files: `include/avbt/portfolio.hpp`, `src/portfolio.cpp`. Decisions: [ADR 0008](../docs/adr/0008-a-portfolio-scores-in-account-terms.md), [ADR 0014](../docs/adr/0014-a-stop-may-trail-and-a-take-profit-may-close-part.md), [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md).
 
 The portfolio is the trading account. It holds the balance and the open positions, and it applies the rules of Veranta, the exchange whose rules this backtester copies. Strategies never call it. Only the backtest loop does.
 
@@ -327,6 +369,10 @@ Chosen once, fixed for the run.
 | `hard_stop` | 0.30 | When equity falls to 70% of the starting balance, everything closes and trading stops for good. |
 | `scale_risk_with_leverage` | false | When true, a trade risks `risk_per_trade × leverage`: at 5x, a stop loses 5% instead of 1%, so returns scale with leverage. |
 
+### `struct Fees`
+
+The two fees of one position, as fractions of notional: `open` and `close`. Both default to 0. The backtest fills them from the market's `Costs`.
+
 ### `struct Position`
 
 One open trade. The portfolio holds at most one per instrument.
@@ -340,7 +386,9 @@ One open trade. The portfolio holds at most one per instrument.
 | `collateral` | Balance locked: `notional / leverage`. |
 | `stop_price` | The stop level. |
 | `take_profit_price` | The take-profit level, or NaN for none. |
-| `fee_rate` | Fraction of notional charged at every fill. |
+| `fees` | The `Fees` charged at the open and at the close. |
+| `leverage` | The leverage the position opened with. |
+| `holding` | Holding costs so far, in account money. Positive means the position has paid. |
 | `liquidation_price` | Where the loss reaches 85% of the collateral. |
 | `mark_price` | The last close seen; it values the unrealized result. |
 | `trail` | The price gap the stop keeps behind the best high (low for a short). 0: the stop never moves. |
@@ -352,11 +400,13 @@ Why a position closed.
 
 | Value | Meaning |
 |---|---|
-| `Stop` | The price reached the stop (stop loss). |
+| `Stop` | The price reached the stop (stop loss), and it had not moved. |
 | `TakeProfit` | The price reached the take profit. |
 | `Liquidation` | The loss reached 85% of the collateral. |
 | `HardStop` | Equity fell to the hard-stop floor. |
 | `EndOfData` | The market's data ended while the position was open. The backtest closes it at the last close. |
+| `TrailingStop` | The stop had trailed, and the price reached it. |
+| `PartialTakeProfit` | The take profit closed part of the position. The rest stays open. |
 | `Order` | The strategy sent a close order: a **time exit** (the trade was open for its maximum number of bars) or a **rule exit** (a condition said to leave). |
 
 ### `struct Closed`
@@ -368,7 +418,10 @@ What `close` and `check` return for each closed position.
 | `instrument`, `side` | As in `Position`. |
 | `entry_price`, `exit_price` | The two fill prices. |
 | `size` | Units closed. |
-| `result` | Price result minus the open fee and the close fee on this size, in account money. |
+| `leverage` | The position's leverage. |
+| `fees` | The open fee and the close fee on this size. |
+| `holding` | This size's share of the holding costs. |
+| `result` | Price result minus `fees` and `holding`, in account money. |
 | `cause` | Why it closed. |
 
 ### `struct Quote`
@@ -382,7 +435,7 @@ A snapshot of the account.
 | Field | Meaning |
 |---|---|
 | `balance` | Realized money. |
-| `equity` | Balance plus every open position's unrealized result. |
+| `equity` | Balance plus every open position's unrealized result, minus its holding costs so far. |
 | `free_cash` | Balance minus all collateral. |
 | `open_positions` | Number of open positions. |
 | `halted` | True once the hard stop has fired. |
@@ -393,7 +446,7 @@ Its state is private: `settings_`, `balance_`, `positions_`, and `halted_`. Only
 
 **`Portfolio(PortfolioSettings settings)`**: the constructor. The balance starts at `starting_balance`.
 
-**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fee_rate = 0)`**
+**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1)`**
 
 Opens a position and returns true, or opens nothing and returns false.
 
@@ -419,11 +472,15 @@ It refuses the open (returns false) when:
 - the collateral is more than the free cash;
 - `trail` is negative, or `take_profit_fraction` is not above 0 and at most 1.
 
-On success, the open fee (`fee_rate × notional`) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
+On success, the open fee (`fees.open × notional`) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
+
+**`void hold(instrument, rate, price)`**
+
+Adds `rate × size × price` to the instrument's holding costs. A NaN rate adds nothing, and so does an instrument with no position. The backtest calls it once per base bar for each open position, with the bar's close as the price.
 
 **`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
+Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
@@ -432,7 +489,7 @@ Applies one bar to every position that has a quote. For each position:
 1. **Stop.** Has the bar's worst price (low for a long, high for a short) reached the stop?
 2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
 3. **Neither.** Mark the position at the close. With a `trail`, move the stop to the bar's high minus the trail (low plus the trail for a short), if that is better than the stop. The stop never moves back, and the new stop counts from the next bar.
-4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). If that price is at or past the liquidation price, close at the liquidation price instead, with cause `Liquidation`.
+4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the stop had trailed, otherwise `Stop`. If that price is at or past the liquidation price, close at the liquidation price instead, with cause `Liquidation`.
 
 If a bar reaches both the stop and the take profit, the stop fills. A bar does not show which price came first, so the backtest assumes the worse one ([ADR 0003](../docs/adr/0003-a-bar-with-both-levels-exits-at-the-stop.md)).
 
@@ -444,13 +501,13 @@ It returns every position it closed.
 
 **`const std::vector<Position>& positions() const`**: the open positions, read-only.
 
-**`double unrealized(const Position& p) const`** (private): `(mark_price - entry_price) × size` for a long; the opposite sign for a short.
+**`double unrealized(const Position& p) const`** (private): `(mark_price - entry_price) × size` for a long; the opposite sign for a short. Minus the position's `holding`.
 
 ---
 
 ## backtest.hpp: orders, trades, and the loop
 
-File: `include/avbt/backtest.hpp`. Decisions: [ADR 0009](../docs/adr/0009-a-cpp-strategy-is-code-checked-by-a-concept.md), [ADR 0010](../docs/adr/0010-a-cpp-backtest-runs-on-markets-on-one-clock.md), [ADR 0011](../docs/adr/0011-markets-carry-several-timeframes-and-their-own-history.md).
+File: `include/avbt/backtest.hpp`. Decisions: [ADR 0009](../docs/adr/0009-a-cpp-strategy-is-code-checked-by-a-concept.md), [ADR 0010](../docs/adr/0010-a-cpp-backtest-runs-on-markets-on-one-clock.md), [ADR 0011](../docs/adr/0011-markets-carry-several-timeframes-and-their-own-history.md), [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md).
 
 ### `bool defined(double x)`
 
@@ -468,7 +525,6 @@ What a strategy returns at the close of a clock step. It fills at the open of th
 | `stop_distance` | 0 | Stop distance as a fraction of the fill price. 0.05 puts the stop 5% away, on the losing side. |
 | `take_profit_distance` | NaN | Take-profit distance as a fraction. NaN for none. |
 | `leverage` | 1 | Leverage for the position. |
-| `fee_rate` | 0 | Fraction of notional charged at every fill of this position. |
 | `trail_distance` | 0 | Trailing-stop gap as a fraction of the fill price. 0 for a stop that never moves. |
 | `take_profit_fraction` | 1 | Fraction of the position the take profit closes. 0.5 sells half and lets the rest run. |
 
@@ -484,9 +540,14 @@ One closed trade.
 |---|---|
 | `instrument` | Which market. |
 | `entry_bar`, `exit_bar` | Clock steps of the two fills: indexes into `Result::clock`. |
+| `entry_time`, `exit_time` | The UTC seconds of those two steps: `clock[entry_bar]` and `clock[exit_bar]`. |
 | `side` | Long or short. |
 | `entry_price`, `exit_price` | The fill prices. |
-| `result` | Account money gained or lost, after both fees. |
+| `size` | Units closed in this trade. |
+| `leverage` | The position's leverage. |
+| `fees` | The open fee plus the close fee, in account money. |
+| `holding_costs` | The holding costs paid, in account money. Negative when the position received. |
+| `result` | Account money gained or lost, after fees and holding costs. |
 | `cause` | Why it closed (see `Cause`). |
 
 ### `struct Result`
@@ -500,6 +561,7 @@ What `backtest` returns.
 | `ending_balance` | Balance after the last step. Positions still open are not in it. |
 | `timeframe` | The base timeframe the run stepped on, so every result names its timeframe. |
 | `clock` | The UTC second at which each step opens. `entry_bar` and `exit_bar` index it. |
+| `version` | The engine version that made the result (`avbt::version`). |
 
 ### `concept Strategy`
 
@@ -513,15 +575,17 @@ There is no base class and no `virtual` function (a function looked up while the
 - `prepare` runs once, before the first step. A strategy computes its indicators there, on the timeframes it chooses.
 - `decide` runs at the close of every clock step. `now` is the UTC second of that close. It must read bars only through `last_closed(bars, now)`, which never returns a bar still open.
 
-### `template <Strategy S> Result backtest(S& strategy, const Markets& markets, PortfolioSettings settings)`
+### `template <Strategy S> Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs, PortfolioSettings settings)`
 
 The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 
+- It runs `check_costs(markets, costs)` first, so a market with no `Costs` fails before any step.
 - It makes a fresh `Portfolio` from `settings`.
 - It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps. It forgets the entry step only when no position is left, so the rest of a partly closed trade keeps it.
-- **Fill step.** It moves close orders ahead of open orders, keeping their order otherwise (`std::stable_partition`). A close frees collateral, so a new open on the same bar can use it. It looks up the order's market bar with `bar_at`; an order for a market with no bar at this step is dropped. For each open order it computes the stop and take-profit prices from that base open and calls `portfolio.open`. A refused open is skipped, and nothing is recorded.
+- **Fill step.** It moves close orders ahead of open orders, keeping their order otherwise (`std::stable_partition`). A close frees collateral, so a new open on the same bar can use it. It looks up the order's market bar with `bar_at`; an order for a market with no bar at this step is dropped. For each open order it computes the stop and take-profit prices from that base open and calls `portfolio.open` with the market's `Fees`. A refused open is skipped, and nothing is recorded.
 - **Check step.** It builds one `Quote` per open position from that position's own base bar and calls `portfolio.check`. A position whose market has no bar at this step is not checked.
 - **End-of-data step.** Except on the run's last step, a market whose last base bar is this step has its position closed at that bar's close, with `Cause::EndOfData`.
+- **Holding step.** After the checks and the end-of-data close, each open position whose market has a bar at this step is charged `hold_long[i]` or `hold_short[i]` through `portfolio.hold`, at that bar's close. The step's equity then includes it.
 - **Decide step.** It passes `now`, the step's open plus `seconds(timeframe)`, which is the close of the step.
 - The caller chooses the bars. The loop never trims them.
 
@@ -547,14 +611,14 @@ Each strategy is a struct with:
 - `rule_exit(int t)` (gold only): true when the exit rule holds.
 - `decide(...)`: calls `decide_entry_and_exits`.
 
-Every strategy's `Params` has `instrument`, `side`, `take_profit`, `stop`, `time_exit`, `leverage = 1`, `fee_rate = 0.0001`, and `timeframe = Timeframe::Hour1`. The `Params` bar counts (such as `time_exit = 3`) count bars of that timeframe.
+Every strategy's `Params` has `instrument`, `side`, `take_profit`, `stop`, `time_exit`, `leverage = 1`, and `timeframe = Timeframe::Hour1`. None has a fee: fees come from `Costs`. The `Params` bar counts (such as `time_exit = 3`) count bars of that timeframe.
 
 ### `decide_entry_and_exits(s, now, positions)`
 
 The shared decision, a template used by all five strategies. It first sets `t = last_closed(*s.bars, now)`. It returns nothing when `t` is -1 or equals `seen_bar`, so a strategy acts once per new bar on its timeframe, however fine the clock is. Then it sets `seen_bar = t` and:
 
 - **While a position is open:** return a close order if the time exit is due (`t - signal_bar >= time_exit`) or the rule exit holds. Otherwise return nothing.
-- **While flat:** if `entry(t)` is true, save `signal_bar = t` and return an open order with the strategy's side, stop, take profit, leverage, and fee.
+- **While flat:** if `entry(t)` is true, save `signal_bar = t` and return an open order with the strategy's side, stop, take profit, and leverage.
 
 **Time exit:** the bar of the fill is bar 1. With a signal at bar t and a time exit of N, the close order is returned at bar t+N and fills at the open of bar t+N+1. A time exit of 0 means none.
 
@@ -584,7 +648,7 @@ Trades every market that has `states`, each with its own position. It reads each
 | Trailing stop | `trail_atrs` (0) signal-bar ATRs, taken at entry, behind the best price. 0 keeps the stop fixed. |
 | Exit | The bias no longer matches the position, or the market label turns to the opposite trend. |
 
-`Unknown` never opens a trade. It does not close one either. Defaults: `leverage = 1`, `fee_rate = 0.0001`. It acts once per new minute bar.
+`Unknown` never opens a trade. It does not close one either. Default `leverage = 1`. It acts once per new minute bar.
 
 ### `template <Strategy A, Strategy B> struct Combined`
 
@@ -611,6 +675,49 @@ A `static_assert` at the end of the file checks, at compile time, that all six s
 
 ---
 
+## run.hpp and version.hpp: run a strategy by name
+
+Files: `include/avbt/run.hpp`, `include/avbt/version.hpp`. Decision: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md). Neither has a `.cpp` file.
+
+`run.hpp` lets a caller, such as the Python module, run any strategy from a name and a map of params. It holds the logic, so the Python bridge needs none.
+
+### Types
+
+| Type | What it is |
+|---|---|
+| `Value` | One param value: a `std::variant` of `bool`, `int`, `double`, `std::string`, `Timeframe`, or a map from instrument to `Timeframe` (the `signal` param of `StateTrend`). |
+| `Params` | `std::map<std::string, Value>`: a variant of a strategy's settings, by name. |
+| `Param` | One row of a strategy's param list: `name`, default `value`, and the `min` and `max` a number must lie in. |
+| `StrategyInfo` | One row of the strategy table: `name`, its `params`, the `timeframes` it reads by default, and a `run` function that builds the strategy and backtests it. |
+
+`signal` and `instrument` are in the table like any other param. Each Veranta strategy lists `instrument`, `take_profit`, `stop`, `time_exit`, `leverage`, and `timeframe`, plus its own settings.
+
+### `const std::vector<StrategyInfo>& strategies()`
+
+The table. It has eight entries:
+
+| Name | Strategy |
+|---|---|
+| `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | The five Veranta strategies. |
+| `state_trend` | `StateTrend`. |
+| `campaign_and_spike`, `late_day_and_rally` | `Combined` pairs. Their params start with `a.` or `b.`: `a.lag` is the first strategy's `lag`. |
+
+### `Result run(name, params, markets, costs, settings)`
+
+1. Finds `name` in the table.
+2. Builds the strategy. A param not given keeps its default.
+3. Calls `backtest` with `markets`, `costs`, and `settings`.
+
+It throws `std::invalid_argument` for an unknown name (the message lists the known names), an unknown param (the message lists the known params), a value of the wrong type or outside its range, and bad costs. A typo in a param name cannot fall back to the default.
+
+An `int` is accepted where a `double` is expected.
+
+### `avbt::version`
+
+`version.hpp` holds one constant, `avbt::version`. Every `Result` copies it into `Result::version`, and the Python module reads the same constant, so both report one number.
+
+---
+
 ## optimize.hpp: Sharpe and the greedy search
 
 File: `include/avbt/optimize.hpp`. ADR 0013.
@@ -627,7 +734,7 @@ One parameter the search may change. `choices[i]` is a function that writes one 
 
 A `Run` is one backtest: its `round`, its `choice` (`choice[k]` indexes knob `k`'s choices), and its `sharpe`. `Search` holds the `best` params, their `choice` and `sharpe`, the base `timeframe`, and every `Run`.
 
-### `template <Strategy S> Search optimize(start, knobs, markets, settings, rounds)`
+### `template <Strategy S> Search optimize(start, knobs, markets, costs, settings, rounds)`
 
 1. Every knob starts at its first choice. That is round 0.
 2. The pairs of knobs are listed in a fixed order: (0,1), (0,2), …, (1,2), ….
@@ -641,6 +748,8 @@ Each run makes a fresh `S`, so `prepare` starts clean.
 
 File: `python/avbt_py.cpp`. It uses **pybind11**, a library that makes C++ functions callable from Python. The module is named `avbt_cpp`.
 
+The bridge holds no rules of its own. It converts types and releases the Python GIL while `run` works; every check and error message lives in C++ (`check_costs`, `Markets::make`, `run`). A `std::invalid_argument` becomes a Python `ValueError`.
+
 **Helpers** (in an unnamed namespace, so only this file sees them):
 
 | Helper | What it does |
@@ -649,10 +758,6 @@ File: `python/avbt_py.cpp`. It uses **pybind11**, a library that makes C++ funct
 | `to_numpy(v)` | Hands a `std::vector<double>` or `std::vector<int64_t>` to numpy without copying it. |
 | `make_bars(...)` | Builds `Bars` from numpy arrays and checks that every list is the same length. |
 | `field_named`, `side_named` | Turn `"high"` into `Field::High`, `"short"` into `Side::Short`, and so on. |
-| `cause_name(c)` | Turns a `Cause` into `"stop"`, `"take_profit"`, `"liquidation"`, `"hard_stop"`, `"order"`, or `"end_of_data"`. |
-| `run_markets(strategy, markets, settings)` | Runs `backtest` and turns the `Result` into a Python dict. |
-| `run<S>(bars, settings)` | Makes strategy `S` with default settings and runs it on one market named after its instrument. `bars` is a list of `Bars`, finest first. |
-| `run_many<S>(bars_by_name, settings)` | Makes strategy `S` and runs it on `{name: [Bars, ...]}`, all checked by `Markets::make`. |
 
 **What Python sees:**
 
@@ -662,32 +767,32 @@ File: `python/avbt_py.cpp`. It uses **pybind11**, a library that makes C++ funct
 | `timeframe_name(tf)`, `timeframe_seconds(tf)` | `name` and `seconds` for a `Timeframe`. |
 | `Bars(timeframe, ts, open, high, low, close, minutes_with_data)` | Builds bars. `len(bars)` is the number of bars; `bars.timeframe` reads the timeframe back; `bars.ts`, `open`, `high`, `low`, `close` return copies of the columns as numpy arrays. |
 | `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30)` | The settings. |
-| `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | `([bars, ...], settings)`: one strategy on one market, given as its list of `Bars`, finest first. |
-| `campaign_and_spike` | `({"AVNT": [bars, ...], "DYM": [bars, ...]}, settings, a_timeframe=Hour1, b_timeframe=Hour1)`: `Combined<CampaignShort, SpikeShort>`. `a_timeframe` and `b_timeframe` are the timeframes the two strategies read. |
-| `late_day_and_rally` | `({"ZORA": [bars, ...]}, settings, a_timeframe=Hour1, b_timeframe=Hour1)`: `Combined<LateDayShort, RallyShort>`, with the same two timeframe arguments. |
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
-| `StateTrendParams` | `StateTrend::Params`; `signal` is a dict such as `{"BTC": Timeframe.Min15}`. |
-| `run_state_trend` | `({"BTC": ([bars, ...], states)}, settings, params=StateTrendParams())`: `StateTrend` on each market. |
-| `optimize_state_trend` | `(markets, settings, start, knobs, rounds)`: `optimize<StateTrend>`. `knobs` is `[(name, [values])]`; a name is a `StateTrendParams` field, or `"BTC signal"` for that instrument's signal timeframe. Returns `{"best", "choice", "sharpe", "timeframe", "runs"}`; `choice` and each run name every knob's value. |
+| `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
+| `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
+| `Costs(open_fee, close_fee, hold_long, hold_short)` | One market's costs. The two holding lists are numpy arrays with one value per base bar, or empty. |
+| `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
+| `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
+| `Result`, `Trade` | The result and its trades, with the fields in the tables above, as attributes: `result.trades`, `trade.entry_time`. |
+| `Side`, `Cause` | The two enums, now Python enums. `Cause` has `Stop`, `TrailingStop`, `PartialTakeProfit`, `TakeProfit`, `Liquidation`, `HardStop`, `Order`, and `EndOfData`. |
+| `version` | The engine version, the same constant C++ stamps on every `Result`. |
+| `optimize_state_trend` | `(markets, costs, settings, start, knobs, rounds)`: `optimize<StateTrend>`. `markets` is a `Markets`. `knobs` is `[(name, [values])]`; a name is a `StateTrendParams` field, or `"BTC signal"` for that instrument's signal timeframe. Returns `{"best", "choice", "sharpe", "timeframe", "runs"}`; `choice` and each run name every knob's value. |
 | `sma`, `pct_change`, `prior_max`, `prior_min` | Take a numpy array and a number; return a numpy array. |
 | `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier` | Take `Bars`; return a numpy array. Fields and sides are strings. |
 
-Each strategy function returns a dict:
+The old per-strategy functions (`late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long`, `campaign_and_spike`, `late_day_and_rally`, `run_state_trend`) are gone. Call `run` with the strategy's name.
+
+Costs are required. To run without costs, pass `Costs()` for each market.
 
 ```python
-{
-    "trades": [ {"instrument", "entry_bar", "exit_bar", "side",
-                 "entry_price", "exit_price", "result", "cause"}, ... ],  # cause may be "end_of_data"
-    "equity": numpy array, one value per clock step,
-    "ending_balance": float,
-    "timeframe": str,          # the base timeframe, such as "1 hour"
-    "clock": numpy array,      # UTC second of each step; entry_bar and exit_bar index it
-}
+markets = avbt_cpp.Markets([avbt_cpp.Market("ZORA", [bars_1h])])
+costs = {"ZORA": avbt_cpp.Costs(open_fee=0.0001, close_fee=0.0001)}
+result = avbt_cpp.run("late_day_short", {"stop": 0.05}, markets, costs, avbt_cpp.PortfolioSettings())
 ```
 
-Each template copy is a separate compiled function, so a new strategy, or a new `Combined` pair, needs its own `m.def(...)` line.
+A new strategy needs a row in the table in `run.hpp`, and no change to the bridge.
 
-Four example scripts use the module:
+These example scripts use the module:
 
 - `examples/veranta_rules_cpp.py` compares C++ trades with the Python engine's, trade by trade.
 - `examples/state_trend.py` runs `StateTrend` on BTC and ETH with states from `examples/clickhouse_data.py`.
@@ -760,11 +865,11 @@ Each test program builds its own small price series by hand, runs the code, and 
 
 ## Write a new strategy
 
-1. In `strategies.hpp`, add a struct with a `Params` struct (including `instrument`, `side`, `take_profit`, `stop`, `time_exit`, `leverage`, `fee_rate`), a `signal_bar = -1` field, `prepare`, `entry`, and a `decide` that calls `decide_entry_and_exits`. Add `rule_exit` if it has one.
+1. In `strategies.hpp`, add a struct with a `Params` struct (including `instrument`, `side`, `take_profit`, `stop`, `time_exit`, `leverage`), a `signal_bar = -1` field, `prepare`, `entry`, and a `decide` that calls `decide_entry_and_exits`. Add `rule_exit` if it has one.
 2. In `prepare`, compute every line once. In `entry` and `rule_exit`, read index `t` or earlier only. Choose a `timeframe` in `Params`, look the bars up with `m.at(instrument, params.timeframe)`, and let `decide_entry_and_exits` map `now` to `t`.
 3. Add it to the `static_assert` at the end of the file.
 4. Add a test in `test_strategies.cpp` with a hand-built series.
-5. To call it from Python, add an `m.def(...)` line in `avbt_py.cpp` with `run<YourStrategy>`, or `run_many<...>` for several markets.
+5. To call it from Python, add a field list and a row in `strategies()` in `run.hpp`. `run` then finds it by name. Costs come from the caller's `MarketCosts`, so the strategy has no fee.
 
 A strategy that does not fit `decide_entry_and_exits` can write its own `decide`, as long as it returns orders and reads bars only through `last_closed(bars, now)`.
 
@@ -780,3 +885,4 @@ These come from [CLAUDE.md](../CLAUDE.md) and the ADRs, and each has a test:
 - **Every result names its timeframe.**
 - **The caller chooses the bars.** C++ checks the markets but never trims or pads them.
 - **Closes fill before opens** on the same bar.
+- **Costs belong to the market.** Every market needs a `Costs`, and no strategy sets a fee.

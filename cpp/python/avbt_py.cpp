@@ -4,13 +4,17 @@
 
 #include "avbt/indicators.hpp"
 #include "avbt/optimize.hpp"
+#include "avbt/run.hpp"
 #include "avbt/strategies.hpp"
+#include "avbt/version.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include <map>
+#include <optional>
+#include <variant>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -44,7 +48,8 @@ avbt::Bars make_bars(avbt::Timeframe timeframe,
                      const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& ts,
                      const InArray& open, const InArray& high, const InArray& low,
                      const InArray& close,
-                     const py::array_t<int, py::array::c_style | py::array::forcecast>& minutes_with_data) {
+                     const py::array_t<int, py::array::c_style | py::array::forcecast>& minutes_with_data,
+                     const std::optional<InArray>& volume) {
     avbt::Bars bars;
     bars.timeframe = timeframe;
     bars.ts = to_vector(ts);
@@ -53,6 +58,7 @@ avbt::Bars make_bars(avbt::Timeframe timeframe,
     bars.low = to_vector(low);
     bars.close = to_vector(close);
     bars.minutes_with_data = to_vector(minutes_with_data);
+    if (volume) bars.volume = to_vector(*volume);
     const std::size_t n = bars.ts.size();
     if (bars.open.size() != n || bars.high.size() != n || bars.low.size() != n ||
         bars.close.size() != n || bars.minutes_with_data.size() != n) {
@@ -75,67 +81,20 @@ avbt::Side side_named(const std::string& name) {
     throw std::invalid_argument("side must be long or short, got " + name);
 }
 
-const char* cause_name(avbt::Cause c) {
-    switch (c) {
-        case avbt::Cause::Stop: return "stop";
-        case avbt::Cause::TakeProfit: return "take_profit";
-        case avbt::Cause::Liquidation: return "liquidation";
-        case avbt::Cause::HardStop: return "hard_stop";
-        case avbt::Cause::Order: return "order";
-        case avbt::Cause::EndOfData: return "end_of_data";
-    }
-    return "order";
+// One Python param value as an avbt::Value. bool is checked before int,
+// since a Python bool is an int.
+avbt::Value to_value(const std::string& name, py::handle v) {
+    if (py::isinstance<py::bool_>(v)) return v.cast<bool>();
+    if (py::isinstance<avbt::Timeframe>(v)) return v.cast<avbt::Timeframe>();
+    if (py::isinstance<py::int_>(v)) return v.cast<int>();
+    if (py::isinstance<py::float_>(v)) return v.cast<double>();
+    if (py::isinstance<py::str>(v)) return v.cast<std::string>();
+    if (py::isinstance<py::dict>(v)) return v.cast<std::map<std::string, avbt::Timeframe>>();
+    throw std::invalid_argument("param " + name + " has a type avbt cannot take");
 }
 
-// Runs a strategy on the markets and returns the result as a dict.
-template <class S>
-py::dict run_markets(S& strategy, const avbt::Markets& markets,
-                     const avbt::PortfolioSettings& settings) {
-    avbt::Result r = avbt::backtest(strategy, markets, settings);
-    py::list trades;
-    for (const avbt::Trade& t : r.trades) {
-        py::dict d;
-        d["instrument"] = t.instrument;
-        d["entry_bar"] = t.entry_bar;
-        d["exit_bar"] = t.exit_bar;
-        d["side"] = t.side == avbt::Side::Long ? "long" : "short";
-        d["entry_price"] = t.entry_price;
-        d["exit_price"] = t.exit_price;
-        d["result"] = t.result;
-        d["cause"] = cause_name(t.cause);
-        trades.append(d);
-    }
-    py::dict out;
-    out["trades"] = trades;
-    out["equity"] = to_numpy(std::move(r.equity));
-    out["ending_balance"] = r.ending_balance;
-    out["timeframe"] = avbt::name(r.timeframe);
-    // The UTC second at which each step opens; entry_bar and exit_bar index it.
-    out["clock"] = to_numpy(std::move(r.clock));
-    return out;
-}
-
-// A strategy with its default params on one market, named after its
-// instrument. `bars` holds the market's timeframes, finest first.
-template <class S>
-py::dict run(const std::vector<avbt::Bars>& bars, const avbt::PortfolioSettings& settings) {
-    S strategy;
-    return run_markets(strategy, avbt::Markets::make({{strategy.params.instrument, bars}}), settings);
-}
-
-// Several markets, given as {instrument: [Bars, ...]}, timeframes finest
-// first, run by a Combined strategy. a_timeframe and b_timeframe are the
-// timeframes its two strategies read.
-template <class S>
-py::dict run_many(const std::map<std::string, std::vector<avbt::Bars>>& bars,
-                  const avbt::PortfolioSettings& settings,
-                  avbt::Timeframe a_timeframe, avbt::Timeframe b_timeframe) {
-    std::vector<avbt::Market> markets;
-    for (const auto& [name, b] : bars) markets.push_back({name, b});
-    S strategy;
-    strategy.a.params.timeframe = a_timeframe;
-    strategy.b.params.timeframe = b_timeframe;
-    return run_markets(strategy, avbt::Markets::make(std::move(markets)), settings);
+py::object from_value(const avbt::Value& v) {
+    return std::visit([](const auto& x) { return py::cast(x); }, v);
 }
 
 // Copies uint8 codes into an enum column, checking each is at most `last`.
@@ -153,26 +112,19 @@ std::vector<E> to_codes(const py::array_t<uint8_t, py::array::c_style | py::arra
     return out;
 }
 
-using StateTrendMarkets = std::map<std::string, std::pair<std::vector<avbt::Bars>, avbt::States>>;
-
-avbt::Markets state_trend_markets(const StateTrendMarkets& markets) {
-    std::vector<avbt::Market> list;
-    for (const auto& [name, m] : markets) list.push_back({name, m.first, m.second});
-    return avbt::Markets::make(std::move(list));
-}
-
-// StateTrend with the given params on {instrument: ([Bars, ...], States)}.
-py::dict run_state_trend(const StateTrendMarkets& markets, const avbt::PortfolioSettings& settings,
-                         const avbt::StateTrend::Params& params) {
-    avbt::StateTrend strategy;
-    strategy.params = params;
-    return run_markets(strategy, state_trend_markets(markets), settings);
+avbt::Result run(const std::string& name, const py::dict& params, const avbt::Markets& markets,
+                 const avbt::MarketCosts& costs, const avbt::PortfolioSettings& settings) {
+    avbt::Params ps;
+    for (auto [k, v] : params) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+    py::gil_scoped_release release;
+    return avbt::run(name, ps, markets, costs, settings);
 }
 
 // optimize over StateTrend. `knobs` is [(name, [values])]: a name is a
 // StateTrendParams field, or "<instrument> signal" for that instrument's
 // signal timeframe. Runs and the best choice come back as {knob: value}.
-py::dict optimize_state_trend(const StateTrendMarkets& markets, const avbt::PortfolioSettings& settings,
+py::dict optimize_state_trend(const avbt::Markets& markets, const avbt::MarketCosts& costs,
+                              const avbt::PortfolioSettings& settings,
                               const avbt::StateTrend::Params& start,
                               const std::vector<std::pair<std::string, py::list>>& knobs, int rounds) {
     using P = avbt::StateTrend::Params;
@@ -196,7 +148,7 @@ py::dict optimize_state_trend(const StateTrendMarkets& markets, const avbt::Port
         }
         list.push_back(std::move(k));
     }
-    auto s = avbt::optimize<avbt::StateTrend>(start, list, state_trend_markets(markets), settings, rounds);
+    auto s = avbt::optimize<avbt::StateTrend>(start, list, markets, costs, settings, rounds);
     auto named = [&](const std::vector<int>& choice) {
         py::dict d;
         for (std::size_t k = 0; k < list.size(); ++k) d[list[k].name.c_str()] = list[k].labels[choice[k]];
@@ -241,7 +193,8 @@ PYBIND11_MODULE(avbt_cpp, m) {
 
     py::class_<avbt::Bars>(m, "Bars")
         .def(py::init(&make_bars), py::arg("timeframe"), py::arg("ts"), py::arg("open"),
-             py::arg("high"), py::arg("low"), py::arg("close"), py::arg("minutes_with_data"))
+             py::arg("high"), py::arg("low"), py::arg("close"), py::arg("minutes_with_data"),
+             py::arg("volume") = py::none())
         .def_readonly("timeframe", &avbt::Bars::timeframe)
         // Copies of the columns, for charts and checks.
         .def_property_readonly("ts", [](const avbt::Bars& b) { return to_numpy(std::vector(b.ts)); })
@@ -272,7 +225,6 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readwrite("atr_stops", &avbt::StateTrend::Params::atr_stops)
         .def_readwrite("reward", &avbt::StateTrend::Params::reward)
         .def_readwrite("leverage", &avbt::StateTrend::Params::leverage)
-        .def_readwrite("fee_rate", &avbt::StateTrend::Params::fee_rate)
         .def_readwrite("flip", &avbt::StateTrend::Params::flip)
         .def_readwrite("min_stop", &avbt::StateTrend::Params::min_stop)
         .def_readwrite("trail_atrs", &avbt::StateTrend::Params::trail_atrs)
@@ -291,23 +243,91 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("start", &avbt::States::start)
         .def("__len__", [](const avbt::States& s) { return s.market.size(); });
 
-    m.def("late_day_short", &run<avbt::LateDayShort>, py::arg("bars"), py::arg("settings"));
-    m.def("rally_short", &run<avbt::RallyShort>, py::arg("bars"), py::arg("settings"));
-    m.def("campaign_short", &run<avbt::CampaignShort>, py::arg("bars"), py::arg("settings"));
-    m.def("spike_short", &run<avbt::SpikeShort>, py::arg("bars"), py::arg("settings"));
-    m.def("gold_trend_long", &run<avbt::GoldTrendLong>, py::arg("bars"), py::arg("settings"));
-    m.def("campaign_and_spike", &run_many<avbt::Combined<avbt::CampaignShort, avbt::SpikeShort>>,
-          py::arg("markets"), py::arg("settings"),
-          py::arg("a_timeframe") = avbt::Timeframe::Hour1,
-          py::arg("b_timeframe") = avbt::Timeframe::Hour1);
-    m.def("late_day_and_rally", &run_many<avbt::Combined<avbt::LateDayShort, avbt::RallyShort>>,
-          py::arg("markets"), py::arg("settings"),
-          py::arg("a_timeframe") = avbt::Timeframe::Hour1,
-          py::arg("b_timeframe") = avbt::Timeframe::Hour1);
-    m.def("run_state_trend", &run_state_trend, py::arg("markets"), py::arg("settings"),
-          py::arg("params") = avbt::StateTrend::Params{});
-    m.def("optimize_state_trend", &optimize_state_trend, py::arg("markets"), py::arg("settings"),
-          py::arg("start"), py::arg("knobs"), py::arg("rounds"));
+    py::enum_<avbt::Side>(m, "Side").value("Long", avbt::Side::Long).value("Short", avbt::Side::Short);
+    py::enum_<avbt::Cause>(m, "Cause")
+        .value("Stop", avbt::Cause::Stop)
+        .value("TakeProfit", avbt::Cause::TakeProfit)
+        .value("Liquidation", avbt::Cause::Liquidation)
+        .value("HardStop", avbt::Cause::HardStop)
+        .value("Order", avbt::Cause::Order)
+        .value("EndOfData", avbt::Cause::EndOfData)
+        .value("TrailingStop", avbt::Cause::TrailingStop)
+        .value("PartialTakeProfit", avbt::Cause::PartialTakeProfit);
+
+    py::class_<avbt::Market>(m, "Market")
+        .def(py::init([](std::string instrument, std::vector<avbt::Bars> timeframes,
+                         std::optional<avbt::States> states) {
+                 return avbt::Market{std::move(instrument), std::move(timeframes), std::move(states)};
+             }),
+             py::arg("instrument"), py::arg("timeframes"), py::arg("states") = py::none())
+        .def_readonly("instrument", &avbt::Market::instrument)
+        .def_readonly("timeframes", &avbt::Market::timeframes)
+        .def_readonly("states", &avbt::Market::states);
+
+    py::class_<avbt::Markets>(m, "Markets")
+        .def(py::init(&avbt::Markets::make), py::arg("markets"))
+        .def_property_readonly("clock", [](const avbt::Markets& x) { return to_numpy(std::vector(x.clock())); })
+        .def_property_readonly("timeframe", &avbt::Markets::timeframe)
+        .def_property_readonly("instruments", [](const avbt::Markets& x) {
+            std::vector<std::string> out;
+            for (const avbt::Market& mk : x.all()) out.push_back(mk.instrument);
+            return out;
+        });
+
+    py::class_<avbt::Costs>(m, "Costs")
+        .def(py::init([](double open_fee, double close_fee, const std::optional<InArray>& hold_long,
+                         const std::optional<InArray>& hold_short) {
+                 return avbt::Costs{open_fee, close_fee, hold_long ? to_vector(*hold_long) : std::vector<double>{},
+                                    hold_short ? to_vector(*hold_short) : std::vector<double>{}};
+             }),
+             py::arg("open_fee"), py::arg("close_fee"), py::arg("hold_long") = py::none(),
+             py::arg("hold_short") = py::none())
+        .def_readonly("open_fee", &avbt::Costs::open_fee)
+        .def_readonly("close_fee", &avbt::Costs::close_fee)
+        .def_property_readonly("hold_long", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_long)); })
+        .def_property_readonly("hold_short", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_short)); });
+
+    py::class_<avbt::Trade>(m, "Trade")
+        .def_readonly("instrument", &avbt::Trade::instrument)
+        .def_readonly("entry_bar", &avbt::Trade::entry_bar)
+        .def_readonly("exit_bar", &avbt::Trade::exit_bar)
+        .def_readonly("entry_time", &avbt::Trade::entry_time)
+        .def_readonly("exit_time", &avbt::Trade::exit_time)
+        .def_readonly("side", &avbt::Trade::side)
+        .def_readonly("entry_price", &avbt::Trade::entry_price)
+        .def_readonly("exit_price", &avbt::Trade::exit_price)
+        .def_readonly("size", &avbt::Trade::size)
+        .def_readonly("leverage", &avbt::Trade::leverage)
+        .def_readonly("fees", &avbt::Trade::fees)
+        .def_readonly("holding_costs", &avbt::Trade::holding_costs)
+        .def_readonly("result", &avbt::Trade::result)
+        .def_readonly("cause", &avbt::Trade::cause);
+
+    py::class_<avbt::Result>(m, "Result")
+        .def_readonly("trades", &avbt::Result::trades)
+        .def_property_readonly("equity", [](const avbt::Result& r) { return to_numpy(std::vector(r.equity)); })
+        .def_readonly("ending_balance", &avbt::Result::ending_balance)
+        .def_readonly("timeframe", &avbt::Result::timeframe)
+        .def_property_readonly("clock", [](const avbt::Result& r) { return to_numpy(std::vector(r.clock)); })
+        .def_readonly("version", &avbt::Result::version);
+
+    py::class_<avbt::Param>(m, "Param")
+        .def_readonly("name", &avbt::Param::name)
+        .def_property_readonly("default", [](const avbt::Param& p) { return from_value(p.value); })
+        .def_readonly("min", &avbt::Param::min)
+        .def_readonly("max", &avbt::Param::max);
+
+    py::class_<avbt::StrategyInfo>(m, "StrategyInfo")
+        .def_readonly("name", &avbt::StrategyInfo::name)
+        .def_readonly("params", &avbt::StrategyInfo::params)
+        .def_readonly("timeframes", &avbt::StrategyInfo::timeframes);
+
+    m.def("strategies", &avbt::strategies, py::return_value_policy::reference);
+    m.def("run", &run, py::arg("name"), py::arg("params") = py::dict(), py::arg("markets"), py::arg("costs"),
+          py::arg("settings") = avbt::PortfolioSettings{});
+    m.attr("version") = avbt::version;
+    m.def("optimize_state_trend", &optimize_state_trend, py::arg("markets"), py::arg("costs"),
+          py::arg("settings"), py::arg("start"), py::arg("knobs"), py::arg("rounds"));
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));

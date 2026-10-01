@@ -22,6 +22,19 @@ void check_value(const std::string& label, double actual, double expected) {
 
 using namespace avbt;
 
+// Every market at the given fee, no holding costs.
+MarketCosts flat_costs(const Markets& m, double fee = 0.0) {
+    MarketCosts c;
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee};
+    return c;
+}
+
+// The old three-argument call: every market free.
+template <class S>
+Result backtest(S& s, const Markets& m, PortfolioSettings settings) {
+    return avbt::backtest(s, m, flat_costs(m), settings);
+}
+
 // Opens once at the start: long when a is 2 and b is 3, short when only a
 // is 2, otherwise nothing. c changes nothing.
 struct Toy {
@@ -68,7 +81,7 @@ void test_optimize() {
                                             knob("b", &Toy::Params::b, {0, 1, 2, 3}),
                                             knob("c", &Toy::Params::c, {0, 1})};
     Markets m = rising();
-    auto s = optimize<Toy>({}, knobs, m, PortfolioSettings{}, 10);
+    auto s = optimize<Toy>({}, knobs, m, flat_costs(m), PortfolioSettings{}, 10);
     check_value("best a", s.best.a, 2);
     check_value("best b", s.best.b, 3);
     check_value("best c stays first", s.best.c, 0);
@@ -80,7 +93,7 @@ void test_optimize() {
     std::set<std::vector<int>> unique;
     for (const Run& r : s.runs) unique.insert(r.choice);
     check_value("each combination once", unique.size(), s.runs.size());
-    check_value("one round", optimize<Toy>({}, knobs, m, PortfolioSettings{}, 1).runs.size(), 12);
+    check_value("one round", optimize<Toy>({}, knobs, m, flat_costs(m), PortfolioSettings{}, 1).runs.size(), 12);
 }
 
 }  // namespace

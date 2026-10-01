@@ -34,10 +34,22 @@ void check_true(const std::string& label, bool condition) {
 
 using namespace avbt;
 
+// Every market at the given fee, no holding costs.
+MarketCosts flat_costs(const Markets& m, double fee = 0.0) {
+    MarketCosts c;
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee};
+    return c;
+}
+
+// The old three-argument call: every market free.
+template <class S>
+Result backtest(S& s, const Markets& m, PortfolioSettings settings) {
+    return avbt::backtest(s, m, flat_costs(m), settings);
+}
+
 // Long when the close rises, close the trade when it falls. Logs every
 // order it returns as (bar, kind) for the lookahead test.
 struct UpDown {
-    double fee_rate = 0.0;
     const Bars* bars = nullptr;
     std::vector<std::pair<int, Order::Kind>> log;
 
@@ -47,8 +59,7 @@ struct UpDown {
         int t = last_closed(*bars, now);
         if (t < 1) return {};
         double close = bars->close[t], before = bars->close[t - 1];
-        Order o{.instrument = "X", .side = Side::Long, .stop_distance = 0.5,
-                .fee_rate = fee_rate};
+        Order o{.instrument = "X", .side = Side::Long, .stop_distance = 0.5};
         if (positions.empty() && close > before) {
             o.kind = Order::Kind::Open;
         } else if (!positions.empty() && close < before) {
@@ -111,8 +122,9 @@ void test_fee_at_open_and_close() {
     // 1% risk of 10,000 at a 50% stop from 102: 100 / 51 units.
     // Price result (101 - 102) * size; fees 0.001 * size * (102 + 101).
     Bars b = flat_bars({100, 101, 102, 103, 101, 101});
-    UpDown s{.fee_rate = 0.001};
-    Result r = backtest(s, one(b), PortfolioSettings{});
+    UpDown s;
+    Markets m = one(b);
+    Result r = avbt::backtest(s, m, flat_costs(m, 0.001), PortfolioSettings{});
     double size = 100.0 / 51.0;
     double expected = -1.0 * size - 0.001 * size * 203.0;
     check_value("result after fees", r.trades.at(0).result, expected);
@@ -359,6 +371,59 @@ void test_coarser_timeframe() {
     check_true("gains after the fill", r.equity[7] > 10000);
 }
 
+// UpDown opens at open[2] = 102 and closes at open[5] = 101. Each rate
+// below is charged at every base bar the position is open.
+Result held(double rate, std::size_t n = 6) {
+    Bars b = flat_bars({100, 101, 102, 103, 101, 101});
+    UpDown s;
+    Markets m = one(b);
+    MarketCosts c{{"X", Costs{.hold_long = std::vector<double>(n, rate)}}};
+    return avbt::backtest(s, m, c, PortfolioSettings{});
+}
+
+void test_holding_costs() {
+    Result free = held(0.0), pays = held(0.001), receives = held(-0.001), nan = held(std::nan(""));
+    double base = free.trades.at(0).result;
+    check_true("long pays", pays.trades.at(0).holding_costs > 0 && pays.trades.at(0).result < base);
+    check_value("pays in result", pays.trades.at(0).result, base - pays.trades.at(0).holding_costs);
+    check_true("pays lowers equity", pays.equity[4] < free.equity[4]);
+    check_true("negative receives", receives.trades.at(0).result > base);
+    check_true("negative raises equity", receives.equity[4] > free.equity[4]);
+    check_value("nan is zero", nan.trades.at(0).result, base);
+    bool threw = false;
+    try { held(0.001, 5); } catch (const std::invalid_argument&) { threw = true; }
+    check_true("hold length mismatch throws", threw);
+}
+
+void test_short_receives() {
+    // A short that pays a negative rate gains it.
+    Portfolio p(PortfolioSettings{});
+    p.open("X", Side::Short, 100.0, 150.0, 1.0);
+    double size = p.positions().at(0).size;
+    p.hold("X", -0.001, 100.0);
+    auto c = p.close("X", 100.0);
+    check_value("short receives", c->result, 0.001 * size * 100.0);
+}
+
+void test_open_and_close_fees() {
+    // Open fee 0.1% at the 102 fill, close fee 0.2% at the 101 fill.
+    Bars b = flat_bars({100, 101, 102, 103, 101, 101});
+    UpDown s;
+    Markets m = one(b);
+    Result r = avbt::backtest(s, m, {{"X", Costs{.open_fee = 0.001, .close_fee = 0.002}}}, PortfolioSettings{});
+    double size = r.trades.at(0).size;
+    check_value("fees", r.trades.at(0).fees, size * (0.001 * 102 + 0.002 * 101));
+    check_value("result after fees", r.trades.at(0).result, -size - r.trades.at(0).fees);
+}
+
+void test_missing_costs_throws() {
+    UpDown s;
+    Markets m = one(flat_bars({100, 101, 102}));
+    bool threw = false;
+    try { avbt::backtest(s, m, MarketCosts{}, PortfolioSettings{}); } catch (const std::invalid_argument&) { threw = true; }
+    check_true("missing costs throws", threw);
+}
+
 }
 
 // Opens at bar 0's close with a 10% take profit that closes half, and
@@ -384,7 +449,7 @@ void test_partial_close_keeps_entry_bar() {
     HalfAtTarget s;
     Result r = backtest(s, one(b), PortfolioSettings{});
     check_value("two trades", r.trades.size(), 2);
-    check_true("first is take profit", r.trades.at(0).cause == Cause::TakeProfit);
+    check_true("first is take profit", r.trades.at(0).cause == Cause::PartialTakeProfit);
     check_value("first entry bar", r.trades.at(0).entry_bar, 1);
     check_value("first exit bar", r.trades.at(0).exit_bar, 2);
     check_value("rest entry bar", r.trades.at(1).entry_bar, 1);
@@ -406,6 +471,10 @@ int main() {
     test_market_ends_early();
     test_coarser_timeframe();
     test_partial_close_keeps_entry_bar();
+    test_holding_costs();
+    test_short_receives();
+    test_open_and_close_fees();
+    test_missing_costs_throws();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;
 }

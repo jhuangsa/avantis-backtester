@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "examples"))
 
 import clickhouse_data as ch  # noqa: E402
 from btc_bars import resample  # noqa: E402
-from timeframes import avbt_cpp, to_bars  # noqa: E402
+from timeframes import avbt_cpp, run, to_bars, trade_rows  # noqa: E402
 
 TF = avbt_cpp.Timeframe
 START, END = "2026-06-01", "2026-09-01"
@@ -48,12 +48,12 @@ def market(pair_id: int):
 
 def report(r, label: str) -> None:
     """Print one run's balance, Sharpe, and trades per instrument."""
-    trades = pd.DataFrame(r["trades"])
+    trades = pd.DataFrame(trade_rows(r))
     # Sharpe from hourly equity returns, 24 * 365 hours a year.
-    returns = pd.Series(r["equity"][::60]).pct_change().dropna()
+    returns = pd.Series(r.equity[::60]).pct_change().dropna()
     sharpe = returns.mean() / returns.std() * (24 * 365) ** 0.5 if returns.std() > 0 else float("nan")
-    print(f"StateTrend {label}, {START} to {END}, base timeframe {r['timeframe']}")
-    print(f"ending balance {r['ending_balance']:.2f} from 10000.00, Sharpe {sharpe:.2f}")
+    print(f"StateTrend {label}, {START} to {END}, base timeframe {avbt_cpp.timeframe_name(r.timeframe)}")
+    print(f"ending balance {r.ending_balance:.2f} from 10000.00, Sharpe {sharpe:.2f}")
     if trades.empty:
         print("no trades")
         return
@@ -66,8 +66,6 @@ def report(r, label: str) -> None:
 if __name__ == "__main__":
     markets = {name: market(pid) for name, pid in PAIRS.items()}
     for label, values in [("as written", {}), ("flipped", {"flip": True}), ("flipped, tuned", TUNED)]:
-        params = avbt_cpp.StateTrendParams()
-        for key, value in values.items():
-            setattr(params, key, value)
-        report(avbt_cpp.run_state_trend(markets, avbt_cpp.PortfolioSettings(), params), label)
+        report(run("state_trend", {k: v[0] for k, v in markets.items()}, values,
+                   {k: v[1] for k, v in markets.items()}), label)
         print()

@@ -29,6 +29,12 @@ struct PortfolioSettings {
     bool scale_risk_with_leverage = false;
 };
 
+// Fractions of notional charged at the open fill and at the close fill.
+struct Fees {
+    double open = 0.0;
+    double close = 0.0;
+};
+
 // One open trade. A portfolio holds at most one per instrument.
 struct Position {
     std::string instrument;
@@ -41,8 +47,10 @@ struct Position {
     double stop_price = 0.0;
     // NaN when the position has no take profit.
     double take_profit_price = 0.0;
-    // Fraction of notional charged at every fill, open and close.
-    double fee_rate = 0.0;
+    Fees fees;
+    double leverage = 1.0;
+    // Holding costs so far, account money; positive means the position pays.
+    double holding = 0.0;
     // Where the loss reaches liquidation_loss of the collateral.
     double liquidation_price = 0.0;
     // The last close seen for the instrument; values the unrealized result.
@@ -56,8 +64,10 @@ struct Position {
 };
 
 // What closed a position. Order is a strategy's close order; EndOfData is
-// the backtest closing it because its market's data ended.
-enum class Cause { Stop, TakeProfit, Liquidation, HardStop, Order, EndOfData };
+// the backtest closing it because its market's data ended. TrailingStop is
+// a stop that trails; PartialTakeProfit is a take profit that closes part.
+enum class Cause { Stop, TakeProfit, Liquidation, HardStop, Order, EndOfData,
+                   TrailingStop, PartialTakeProfit };
 
 // A position, or part of one, that has closed.
 struct Closed {
@@ -66,7 +76,11 @@ struct Closed {
     double entry_price = 0.0;
     double exit_price = 0.0;
     double size = 0.0;
-    // Price result minus the open and close fees on this size.
+    double leverage = 1.0;
+    // Open plus close fee on this size, and its share of the holding costs.
+    double fees = 0.0;
+    double holding = 0.0;
+    // Price result minus fees and holding costs.
     double result = 0.0;
     Cause cause = Cause::Order;
 };
@@ -108,11 +122,15 @@ public:
     // negative, or take_profit_fraction is not in (0, 1].
     bool open(const std::string& instrument, Side side, double entry_price,
               double stop_price, double leverage,
-              double take_profit_price = std::nan(""), double fee_rate = 0.0,
+              double take_profit_price = std::nan(""), Fees fees = {},
               double trail = 0.0, double take_profit_fraction = 1.0);
 
+    // Adds rate * size * price to the position's holding costs. NaN adds
+    // nothing; no position does nothing.
+    void hold(const std::string& instrument, double rate, double price);
+
     // Closes `fraction` (0 to 1] of the instrument's position at `price`,
-    // charges the close fee, and returns what closed. Returns nothing when
+    // charges the close fee and that fraction of the holding costs, and returns what closed. Returns nothing when
     // there is no position.
     std::optional<Closed> close(const std::string& instrument, double price,
                                 double fraction = 1.0, Cause cause = Cause::Order);

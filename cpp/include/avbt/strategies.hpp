@@ -44,7 +44,7 @@ std::vector<Order> decide_entry_and_exits(S& s, int64_t now, const std::vector<P
     s.signal_bar = t;
     return {Order{.kind = Order::Kind::Open, .instrument = p.instrument, .side = p.side,
                   .stop_distance = p.stop, .take_profit_distance = p.take_profit,
-                  .leverage = p.leverage, .fee_rate = p.fee_rate}};
+                  .leverage = p.leverage}};
 }
 
 // 1. Short ZORA at a 16:00 UTC bar after a 72-bar rise of at least 10%.
@@ -55,7 +55,7 @@ struct LateDayShort {
         int hour = 16, lag = 72;
         double rise = 0.10, take_profit = 0.02, stop = 0.05;
         int time_exit = 3;
-        double leverage = 1.0, fee_rate = 0.0001;
+        double leverage = 1.0;
         Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> hour, rise;
@@ -83,7 +83,7 @@ struct RallyShort {
         int lag = 24, window = 21;
         double rise = 0.10, take_profit = 0.02, stop = 0.05;
         int time_exit = 4;
-        double leverage = 1.0, fee_rate = 0.0001;
+        double leverage = 1.0;
         Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> close, rise, average;
@@ -112,7 +112,7 @@ struct CampaignShort {
         int lag = 24;
         double rise = 0.09, take_profit = 0.20, stop = 0.30;
         int time_exit = 120;
-        double leverage = 1.0, fee_rate = 0.0001;
+        double leverage = 1.0;
         Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> rise;
@@ -138,7 +138,7 @@ struct SpikeShort {
         Side side = Side::Short;
         double spike = 0.05, take_profit = 0.06, stop = 0.08;
         int time_exit = 16;
-        double leverage = 1.0, fee_rate = 0.0001;
+        double leverage = 1.0;
         Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> spike;
@@ -166,7 +166,7 @@ struct GoldTrendLong {
         int window = 55, lag = 72;
         double take_profit = std::nan(""), stop = 0.015;
         int time_exit = 0;
-        double leverage = 1.0, fee_rate = 0.0001;
+        double leverage = 1.0;
         Timeframe timeframe = Timeframe::Hour1;
     } params;
     std::vector<double> close, average, drift;
@@ -249,7 +249,7 @@ private:
 struct StateTrend {
     struct Params {
         int average = 50, breakout = 30, atr_period = 14;
-        double atr_stops = 2.0, reward = 2.0, leverage = 1.0, fee_rate = 0.0001;
+        double atr_stops = 2.0, reward = 2.0, leverage = 1.0;
         bool flip = false;
         // No entry when the stop would be nearer than this fraction of price.
         double min_stop = 0.0;
@@ -332,7 +332,7 @@ struct StateTrend {
             orders.push_back(Order{.kind = Order::Kind::Open, .instrument = l.instrument,
                                    .side = long_entry != params.flip ? Side::Long : Side::Short,
                                    .stop_distance = stop, .take_profit_distance = params.reward * stop,
-                                   .leverage = params.leverage, .fee_rate = params.fee_rate,
+                                   .leverage = params.leverage,
                                    .trail_distance = params.trail_atrs * l.atr[h] / price,
                                    .take_profit_fraction = params.take_fraction});
         }

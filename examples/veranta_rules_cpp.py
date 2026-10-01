@@ -43,19 +43,16 @@ sys.path.insert(0, str(ROOT / "examples"))
 import avbt_cpp  # noqa: E402
 import veranta_rules as vr  # noqa: E402
 from btc_bars import resample  # noqa: E402
+from timeframes import run, trade_rows  # noqa: E402
 
 from backtest import Bar, backtest  # noqa: E402
 
 CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "veranta_rules_cpp"
 MINUTES = "https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1m&startTime={start}&limit=1000"
 HOUR = vr.HOUR
-CPP = {
-    vr.late_day_short: avbt_cpp.late_day_short,
-    vr.rally_short: avbt_cpp.rally_short,
-    vr.campaign_short: avbt_cpp.campaign_short,
-    vr.spike_short: avbt_cpp.spike_short,
-    vr.gold_trend_long: avbt_cpp.gold_trend_long,
-}
+CPP = {vr.late_day_short: "late_day_short", vr.rally_short: "rally_short",
+       vr.campaign_short: "campaign_short", vr.spike_short: "spike_short",
+       vr.gold_trend_long: "gold_trend_long"}
 PY_CAUSE = {"take profit": "take_profit", "stop loss": "stop", "time exit": "order",
             "rule exit": "order", "still open": "still open"}
 
@@ -112,17 +109,18 @@ def cpp_bars(df):
 def compare(wallet, market, source, symbol, make):
     df = load(wallet, market, source, symbol)
     bars = cpp_bars(df)
-    cpp = CPP[make](bars, avbt_cpp.PortfolioSettings())
+    name = market.split("/")[0].replace("XAU", "GOLD")
+    cpp = run(CPP[make], {name: bars}, {"instrument": name})
     py_bars = [Bar(open=o, high=h, low=l, close=c, volume=0.0)
                for o, h, l, c in zip(df.open, df.high, df.low, df.close)]
     hypothesis = make(df.ts.tolist(), py_bars)
     py = backtest(hypothesis, py_bars, fee=vr.FEE, bar_size="1h")
 
-    c_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in cpp["trades"]}
+    c_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in trade_rows(cpp)}
     p_set = {(t.entry_bar, t.exit_bar, PY_CAUSE[t.cause]) for t in py.trades}
     print(f"{hypothesis.name}  ({symbol}, {len(df)} bars)")
     print(f"  C++ {len(c_set)} trades, Python {len(p_set)}, same {len(c_set & p_set)}, "
-          f"C++ ending balance {cpp['ending_balance']:.2f}")
+          f"C++ ending balance {cpp.ending_balance:.2f}")
     for label, only in (("C++ only", c_set - p_set), ("Python only", p_set - c_set)):
         for entry, exit_, cause in sorted(only):
             print(f"    {label}: entry {entry} exit {exit_} {cause}")
@@ -136,22 +134,21 @@ def combined():
     start, end = max(avnt.ts.min(), dym.ts.min()), min(avnt.ts.max(), dym.ts.max())
     avnt = avnt[avnt.ts.between(start, end)].reset_index(drop=True)
     dym = dym[dym.ts.between(start, end)].reset_index(drop=True)
-    settings = avbt_cpp.PortfolioSettings()
-    both = avbt_cpp.campaign_and_spike({"AVNT": cpp_bars(avnt), "DYM": cpp_bars(dym)}, settings)
-    alone = {"AVNT": avbt_cpp.campaign_short(cpp_bars(avnt), settings),
-             "DYM": avbt_cpp.spike_short(cpp_bars(dym), settings)}
+    both = run("campaign_and_spike", {"AVNT": cpp_bars(avnt), "DYM": cpp_bars(dym)})
+    alone = {"AVNT": run("campaign_short", {"AVNT": cpp_bars(avnt)}),
+             "DYM": run("spike_short", {"DYM": cpp_bars(dym)})}
     print(f"Combined: 3-AVNT and 4-DYM in one account  ({len(avnt)} shared bars, "
           f"{pd.to_datetime(start, unit='s')} to {pd.to_datetime(end, unit='s')})")
-    for name, run in alone.items():
-        c_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in both["trades"]
+    for name, result in alone.items():
+        c_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in trade_rows(both)
                  if t["instrument"] == name}
-        a_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in run["trades"]}
+        a_set = {(t["entry_bar"], t["exit_bar"], t["cause"]) for t in trade_rows(result)}
         print(f"  {name}: combined {len(c_set)} trades, alone {len(a_set)}, same {len(c_set & a_set)}, "
-              f"alone ending balance {run['ending_balance']:.2f}")
+              f"alone ending balance {result.ending_balance:.2f}")
         for label, only in (("combined only", c_set - a_set), ("alone only", a_set - c_set)):
             for entry, exit_, cause in sorted(only):
                 print(f"    {label}: entry {entry} exit {exit_} {cause}")
-    print(f"  combined ending balance {both['ending_balance']:.2f}")
+    print(f"  combined ending balance {both.ending_balance:.2f}")
 
 
 def main():

@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "examples"))
 
 import clickhouse_data as ch  # noqa: E402
 from btc_bars import resample  # noqa: E402
-from timeframes import avbt_cpp, to_bars  # noqa: E402
+from timeframes import FEES, avbt_cpp, run, to_bars, trade_rows  # noqa: E402
 
 TF = avbt_cpp.Timeframe
 START, SPLIT, END = "2026-06-01", "2026-08-01", "2026-09-01"
@@ -59,7 +59,7 @@ def market(pair_id: int, start: str, end: str):
 
 def sharpe(r) -> float:
     """Sharpe from hourly equity returns, 24 * 365 hours a year."""
-    returns = pd.Series(r["equity"][::60]).pct_change().dropna()
+    returns = pd.Series(r.equity[::60]).pct_change().dropna()
     return returns.mean() / returns.std() * (24 * 365) ** 0.5 if returns.std() > 0 else float("nan")
 
 
@@ -123,12 +123,16 @@ if __name__ == "__main__":
     settings = avbt_cpp.PortfolioSettings()
     default = avbt_cpp.StateTrendParams()
     train = {name: market(pid, START, SPLIT) for name, pid in PAIRS.items()}
-    s = avbt_cpp.optimize_state_trend(train, settings, default, KNOBS, rounds=90)
+    frames, states = {k: v[0] for k, v in train.items()}, {k: v[1] for k, v in train.items()}
+    markets = avbt_cpp.Markets([avbt_cpp.Market(k, frames[k], states[k]) for k in frames])
+    s = avbt_cpp.optimize_state_trend(markets, {k: FEES for k in frames}, settings, default, KNOBS, rounds=90)
     tuned = s["best"]
     print(f"searched {START} to {SPLIT}, base timeframe {s['timeframe']}, {len(s['runs'])} runs")
     print("best:", ", ".join(f"{k}={v}" for k, v in s["choice"].items()))
 
-    runs = {label: avbt_cpp.run_state_trend(train, settings, p) for label, p in [("before", default), ("after", tuned)]}
+    fields = [k for k in dir(default) if not k.startswith("_")]
+    runs = {label: run("state_trend", frames, {k: getattr(p, k) for k in fields}, states, settings)
+            for label, p in [("before", default), ("after", tuned)]}
     rows = ["Account equity, before and after tuning"]
     for name in PAIRS:
         rows += [f"{name}: hourly close, its {tuned.average}-hour average, and every tuned trade",
@@ -137,10 +141,10 @@ if __name__ == "__main__":
                         subplot_titles=rows, row_heights=[3] + [4, 0.6] * len(PAIRS))
     for label, color in [("before", "#999"), ("after", "#1f77b4")]:
         r = runs[label]
-        fig.add_trace(go.Scatter(x=pd.to_datetime(r["clock"][::60], unit="s"), y=r["equity"][::60],
-                                 line_color=color, name=f"{label} tuning: {len(r['trades'])} trades, "
+        fig.add_trace(go.Scatter(x=pd.to_datetime(r.clock[::60], unit="s"), y=r.equity[::60],
+                                 line_color=color, name=f"{label} tuning: {len(r.trades)} trades, "
                                  f"Sharpe {sharpe(r):.2f}"), row=1, col=1)
-    trades = pd.DataFrame(runs["after"]["trades"])
+    trades = pd.DataFrame(trade_rows(runs["after"]))
     for i, (name, pid) in enumerate(PAIRS.items()):
         row = 2 + 2 * i
         hour = train[name][0][list(SIGNALS).index(TF.Hour1) + 1]
@@ -150,7 +154,7 @@ if __name__ == "__main__":
         fig.add_trace(go.Scatter(x=time, y=avbt_cpp.sma(hour.close, tuned.average), line=dict(color="#9467bd"),
                                  name=f"{tuned.average}-hour average", legendgroup="avg", showlegend=i == 0),
                       row=row, col=1)
-        add_trades(fig, trades[trades.instrument == name], runs["after"]["clock"], row, i == 0)
+        add_trades(fig, trades[trades.instrument == name], runs["after"].clock, row, i == 0)
         trend = trend_by_hour(pid, START, SPLIT)
         fig.add_trace(go.Bar(x=trend.index, y=[1] * len(trend), marker_color=trend.map(TREND_COLORS),
                              marker_line_width=0, hovertext=trend, showlegend=False), row=row + 1, col=1)
@@ -164,7 +168,7 @@ if __name__ == "__main__":
 
     # A closer look: BTC on its busiest day, on minute bars, where the entries happen.
     btc = trades[trades.instrument == "BTC"]
-    clock = pd.to_datetime(runs["after"]["clock"], unit="s")
+    clock = pd.to_datetime(runs["after"].clock, unit="s")
     day = clock[btc.entry_bar].floor("D").value_counts().idxmax()
     minute, hour = train["BTC"][0][0], train["BTC"][0][list(SIGNALS).index(TF.Hour1) + 1]
     mt, ht = pd.to_datetime(minute.ts, unit="s"), pd.to_datetime(hour.ts, unit="s")
@@ -179,13 +183,13 @@ if __name__ == "__main__":
     zoom.add_trace(go.Scatter(x=ht[h_in] + pd.Timedelta("1h"), y=avbt_cpp.sma(hour.close, tuned.average)[h_in],
                               line=dict(color="#9467bd", shape="hv"), name=f"{tuned.average}-hour average"))
     add_trades(zoom, btc[(clock[btc.entry_bar] >= day) & (clock[btc.entry_bar] < day + pd.Timedelta("1D"))],
-               runs["after"]["clock"], None, True)
+               runs["after"].clock, None, True)
     zoom.update_layout(height=550, margin=dict(t=30), yaxis_title="price",
                        title=f"BTC on {day:%Y-%m-%d}, its busiest day: {((clock[btc.entry_bar].floor('D')) == day).sum()} trades")
 
     entered = clock[trades.entry_bar]
     early = (entered < pd.Timestamp("2026-06-15")).sum()
-    equity = pd.Series(runs["after"]["equity"], index=clock)
+    equity = pd.Series(runs["after"].equity, index=clock)
     early_gain = (equity[:"2026-06-14"].iloc[-1] - equity.iloc[0]) / (equity.iloc[-1] - equity.iloc[0])
 
     table = rounds(s)
@@ -236,8 +240,8 @@ behind it (the ATR taken at entry), and never moves back. A trailed stop fills a
 <li><b>Flip.</b> When on, every trade takes the other side: an upward breakout opens a short.</li>
 </ol>
 <table><tr><th></th><th>Parameters</th><th>Trades</th><th>Ending balance</th><th>Sharpe</th></tr>
-""" + "".join(f"<tr><td>{label}</td><td>{params(p)}</td><td>{len(runs[label]['trades'])}</td>"
-              f"<td>{runs[label]['ending_balance']:,.2f}</td><td>{sharpe(runs[label]):.2f}</td></tr>"
+""" + "".join(f"<tr><td>{label}</td><td>{params(p)}</td><td>{len(runs[label].trades)}</td>"
+              f"<td>{runs[label].ending_balance:,.2f}</td><td>{sharpe(runs[label]):.2f}</td></tr>"
               for label, p in [("before", default), ("after", tuned)]) + f"""</table>
 <p><b>Most of the gain is early.</b> {early} of the {len(trades)} tuned trades, and
 {early_gain:.0%} of the gain, came in the first two weeks of June, when both markets fell fast;

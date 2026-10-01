@@ -28,6 +28,19 @@ void check_true(const std::string& label, bool condition) {
 
 using namespace avbt;
 
+// Every market at the given fee (the old strategy default), no holding costs.
+MarketCosts flat_costs(const Markets& m, double fee = 0.0001) {
+    MarketCosts c;
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee};
+    return c;
+}
+
+// The old three-argument call, at the old default fee.
+template <class S>
+Result backtest(S& s, const Markets& m, PortfolioSettings settings) {
+    return avbt::backtest(s, m, flat_costs(m), settings);
+}
+
 // Flat hourly bars at each close; bar 0 opens at first_hour:00 UTC.
 Bars flat_bars(const std::vector<double>& closes, int first_hour = 0) {
     Bars b;

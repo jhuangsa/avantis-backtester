@@ -36,26 +36,24 @@ def runs():
     for rule in vr.RULES:
         wallet, market, source, symbol, make = rule
         df = vc.load(wallet, market, source, symbol)
-        result = vc.CPP[make](vc.cpp_bars(df), avbt_cpp.PortfolioSettings())
         name = market.split("/")[0].replace("XAU", "GOLD")
+        result = vc.run(vc.CPP[make], {name: vc.cpp_bars(df)}, {"instrument": name})
         out.append((make.__name__, {name: df}, result))
     rally = next(r for r in vr.RULES if r[4] is vr.rally_short)
     zora = vc.load(*rally[:4])
-    both = avbt_cpp.late_day_and_rally({"ZORA": vc.cpp_bars(zora)}, avbt_cpp.PortfolioSettings())
+    both = vc.run("late_day_and_rally", {"ZORA": vc.cpp_bars(zora)})
     out.append(("late_day_short + rally_short", {"ZORA": zora}, both))
     return out
 
 
 def summary(title, frames, r):
-    trades = r["trades"]
-    equity = pd.Series(r["equity"])
+    trades = vc.trade_rows(r)
+    equity = pd.Series(r.equity)
     drawdown = (equity / equity.cummax() - 1).min()
     # Mean over standard deviation of the bar-to-bar equity returns, times
     # the square root of the bars in a year. Risk-free rate 0.
     returns = equity.pct_change().dropna()
-    base = next(t for t in avbt_cpp.Timeframe.__members__.values()
-                if avbt_cpp.timeframe_name(t) == r["timeframe"])
-    per_year = 365 * 24 * 3600 / avbt_cpp.timeframe_seconds(base)
+    per_year = 365 * 24 * 3600 / avbt_cpp.timeframe_seconds(r.timeframe)
     sharpe = returns.mean() / returns.std() * per_year ** 0.5 if returns.std() > 0 else float("nan")
     causes = pd.Series([t["cause"] for t in trades]).value_counts().to_dict()
     wins = sum(t["result"] > 0 for t in trades)
@@ -68,8 +66,8 @@ def summary(title, frames, r):
         "bars": len(df),
         "trades": len(trades),
         "win rate": f"{wins / len(trades):.0%}" if trades else "-",
-        "ending balance": f"{r['ending_balance']:,.2f}",
-        "return": f"{r['ending_balance'] / 10000 - 1:+.2%}",
+        "ending balance": f"{r.ending_balance:,.2f}",
+        "return": f"{r.ending_balance / 10000 - 1:+.2%}",
         "max drawdown": f"{drawdown:.2%}",
         "sharpe": f"{sharpe:.2f}",
         "exits": ", ".join(f"{k} {v}" for k, v in sorted(causes.items())),
@@ -83,7 +81,7 @@ def figure(title, frames, r):
         time = pd.to_datetime(df.ts, unit="s")
         fig.add_trace(go.Scatter(x=time, y=df.close, name=f"{name} close",
                                  line=dict(color="#888", width=1)), 1, 1)
-        mine = [t for t in r["trades"] if t["instrument"] == name]
+        mine = [t for t in vc.trade_rows(r) if t["instrument"] == name]
         fig.add_trace(go.Scatter(
             x=[time[t["entry_bar"]] for t in mine], y=[t["entry_price"] for t in mine],
             mode="markers", name="entry", marker=dict(symbol="triangle-down", size=8, color="#333"),
@@ -96,7 +94,7 @@ def figure(title, frames, r):
                     mode="markers", name=f"exit: {cause}", marker=dict(size=7, color=color),
                 ), 1, 1)
     time = pd.to_datetime(next(iter(frames.values())).ts, unit="s")
-    fig.add_trace(go.Scatter(x=time, y=r["equity"], name="equity",
+    fig.add_trace(go.Scatter(x=time, y=r.equity, name="equity",
                              line=dict(color="#4575b4", width=1.5)), 2, 1)
     fig.update_layout(title=title, height=600, template="plotly_white",
                       legend=dict(orientation="h", y=-0.08))

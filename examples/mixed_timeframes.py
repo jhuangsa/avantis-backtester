@@ -28,7 +28,7 @@ from plotly.subplots import make_subplots
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples"))
 
-from timeframes import all_timeframes, avbt_cpp  # noqa: E402
+from timeframes import all_timeframes, avbt_cpp, run, trade_rows  # noqa: E402
 
 TF = avbt_cpp.Timeframe
 CACHE = ROOT / "data" / "candles" / "veranta_rules_cpp"
@@ -47,20 +47,19 @@ def minutes(symbol):
 
 def main():
     markets = {name: all_timeframes(minutes(symbol)) for name, symbol, _ in (AVNT, DYM)}
-    r = avbt_cpp.campaign_and_spike(markets, avbt_cpp.PortfolioSettings(),
-                                    a_timeframe=AVNT[2], b_timeframe=DYM[2])
-    clock = pd.to_datetime(r["clock"], unit="s", utc=True)
-    trades = pd.DataFrame(r["trades"])
+    r = run("campaign_and_spike", markets, {"a.timeframe": AVNT[2], "b.timeframe": DYM[2]})
+    clock = pd.to_datetime(r.clock, unit="s", utc=True)
+    trades = pd.DataFrame(trade_rows(r))
     trades["entry"] = clock[trades.entry_bar]
     trades["exit"] = clock[trades.exit_bar]
 
-    print(f"base {r['timeframe']}, {len(clock):,} steps, {clock[0]} to {clock[-1]}")
+    print(f"base {avbt_cpp.timeframe_name(r.timeframe)}, {len(clock):,} steps, {clock[0]} to {clock[-1]}")
     for name, _, tf in (AVNT, DYM):
         first = pd.to_datetime(markets[name][0].ts[0], unit="s", utc=True)
         mine = trades[trades.instrument == name]
         print(f"{name} on {avbt_cpp.timeframe_name(tf)}: data from {first}, {len(mine)} trades,"
               f" causes {mine.cause.value_counts().to_dict()}")
-    print(f"ending balance {r['ending_balance']:.2f}")
+    print(f"ending balance {r.ending_balance:.2f}")
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                         subplot_titles=[f"{n} close, {avbt_cpp.timeframe_name(tf)} bars"
@@ -75,7 +74,7 @@ def main():
         fig.add_trace(go.Scatter(x=mine.exit, y=mine.exit_price, mode="markers", name=f"{name} exit",
                                  text=mine.cause, marker=dict(symbol="x", size=8, color="#4575b4")), row, 1)
     # One point per minute is too many to draw; the hourly equity is enough.
-    equity = pd.Series(r["equity"], index=clock).resample("1h").last()
+    equity = pd.Series(r.equity, index=clock).resample("1h").last()
     fig.add_trace(go.Scatter(x=equity.index, y=equity, name="equity", line=dict(color="#1a9850")), 3, 1)
     fig.update_layout(title="Campaign short (AVNT, 4 hours) + spike short (DYM, 15 minutes), one account",
                       height=900)

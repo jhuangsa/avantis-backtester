@@ -10,6 +10,7 @@ Run (self-check on a synthetic series): python3 examples/timeframes.py
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,25 @@ RULES = [
     (TF.Min30, "30min"), (TF.Hour1, "1h"), (TF.Hour4, "4h"), (TF.Hour8, "8h"),
     (TF.Hour12, "12h"), (TF.Day1, "1D"), (TF.Week1, "W-MON"), (TF.Month1, "MS"),
 ]
+
+
+FEES = avbt_cpp.Costs(0.0001, 0.0001)  # the old default: 0.01% at open and at close
+
+
+def run(name, frames, params=None, states=None, settings=None):
+    """Run strategy `name` on {instrument: [Bars]} (states: {instrument: States}), fees FEES on each."""
+    states = states or {}
+    markets = avbt_cpp.Markets([avbt_cpp.Market(k, v, states.get(k)) for k, v in frames.items()])
+    return avbt_cpp.run(name, params or {}, markets, {k: FEES for k in frames},
+                        settings or avbt_cpp.PortfolioSettings())
+
+
+def trade_rows(r) -> list[dict]:
+    """A Result's trades as dicts; side "long"/"short", cause in snake case ("take_profit")."""
+    fields = ["instrument", "entry_bar", "exit_bar", "entry_time", "exit_time", "entry_price",
+              "exit_price", "size", "leverage", "fees", "holding_costs", "result"]
+    return [{**{f: getattr(t, f) for f in fields}, "side": t.side.name.lower(),
+             "cause": re.sub(r"(?<!^)([A-Z])", r"_\1", t.cause.name).lower()} for t in r.trades]
 
 
 def to_bars(timeframe, df: pd.DataFrame) -> avbt_cpp.Bars:

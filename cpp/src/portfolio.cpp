@@ -14,7 +14,7 @@ double direction(Side side) { return side == Side::Long ? 1.0 : -1.0; }
 
 bool Portfolio::open(const std::string& instrument, Side side, double entry_price,
                      double stop_price, double leverage,
-                     double take_profit_price, double fee_rate,
+                     double take_profit_price, Fees fees,
                      double trail, double take_profit_fraction) {
     if (halted_ || leverage <= 0.0 || entry_price <= 0.0 || trail < 0.0) return false;
     if (!(take_profit_fraction > 0.0 && take_profit_fraction <= 1.0)) return false;
@@ -43,13 +43,14 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
         .collateral = collateral,
         .stop_price = stop_price,
         .take_profit_price = take_profit_price,
-        .fee_rate = fee_rate,
+        .fees = fees,
+        .leverage = leverage,
         .liquidation_price = entry_price - direction(side) * liquidation_move,
         .mark_price = entry_price,
         .trail = trail,
         .take_profit_fraction = take_profit_fraction,
     });
-    balance_ -= fee_rate * size * entry_price;
+    balance_ -= fees.open * size * entry_price;
     return true;
 }
 
@@ -61,14 +62,17 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
     fraction = std::min(fraction, 1.0);
 
     double size = it->size * fraction;
-    double close_fee = it->fee_rate * size * price;
-    double open_fee = it->fee_rate * size * it->entry_price;
+    double close_fee = it->fees.close * size * price;
+    double open_fee = it->fees.open * size * it->entry_price;
+    double holding = it->holding * fraction;
     double gross = direction(it->side) * (price - it->entry_price) * size;
-    // The open fee left the balance at the open; only the close fee leaves now.
-    balance_ += gross - close_fee;
+    // The open fee left the balance at the open; the close fee and holding costs leave now.
+    balance_ += gross - close_fee - holding;
+    it->holding -= holding;
     Closed closed{.instrument = it->instrument, .side = it->side,
                   .entry_price = it->entry_price, .exit_price = price, .size = size,
-                  .result = gross - close_fee - open_fee, .cause = cause};
+                  .leverage = it->leverage, .fees = open_fee + close_fee, .holding = holding,
+                  .result = gross - close_fee - open_fee - holding, .cause = cause};
     if (fraction >= 1.0) {
         positions_.erase(it);
     } else {
@@ -77,6 +81,13 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
         it->collateral *= 1.0 - fraction;
     }
     return closed;
+}
+
+void Portfolio::hold(const std::string& instrument, double rate, double price) {
+    if (std::isnan(rate)) return;
+    for (Position& p : positions_) {
+        if (p.instrument == instrument) p.holding += rate * p.size * price;
+    }
 }
 
 std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
@@ -98,7 +109,7 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
             bool past = is_long ? q.open > p.take_profit_price : q.open < p.take_profit_price;
             double fraction = p.take_profit_fraction;
             out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price,
-                                 fraction, Cause::TakeProfit));
+                                 fraction, fraction < 1.0 ? Cause::PartialTakeProfit : Cause::TakeProfit));
             if (fraction >= 1.0) continue;
             // A partial close keeps p in place; the rest runs on its stop.
             p.take_profit_price = std::nan("");
@@ -117,7 +128,8 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         double fill = gapped ? q.open : p.stop_price;
         bool liquidated = is_long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
         out.push_back(*close(p.instrument, liquidated ? p.liquidation_price : fill, 1.0,
-                             liquidated ? Cause::Liquidation : Cause::Stop));
+                             liquidated ? Cause::Liquidation
+                             : p.trail > 0.0 ? Cause::TrailingStop : Cause::Stop));
     }
 
     double floor = settings_.starting_balance * (1.0 - settings_.hard_stop);
@@ -142,7 +154,7 @@ Report Portfolio::report() const {
 }
 
 double Portfolio::unrealized(const Position& p) const {
-    return direction(p.side) * (p.mark_price - p.entry_price) * p.size;
+    return direction(p.side) * (p.mark_price - p.entry_price) * p.size - p.holding;
 }
 
 }
