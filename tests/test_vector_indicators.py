@@ -63,7 +63,7 @@ def _walk(n=5000, seed=7):
 def _bars(cpp, o, h, l, c):
     n = len(c)
     ts = np.arange(n, dtype=np.int64) * 60
-    return cpp.Bars(60, ts, o, h, l, c, np.zeros(n, dtype=np.int32))
+    return cpp.Bars(cpp.Timeframe.Min1, ts, o, h, l, c, np.zeros(n, dtype=np.int32))
 
 
 @pytest.mark.parametrize("w", [1, 2, 14, 50, 200])
