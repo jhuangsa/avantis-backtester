@@ -87,6 +87,32 @@ def add_trades(fig, trades: pd.DataFrame, clock, row: int, legend: bool) -> None
                       row=row, col=1 if row else None)
 
 
+def rounds(s) -> pd.DataFrame:
+    """Replays the search from its runs: per round, the pair tried, new runs, and what changed.
+
+    The pairs come in the order optimize uses; a combination already run is
+    not in the round's runs, and could not beat the best anyway.
+    """
+    names = [name for name, _ in KNOBS]
+    pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+    runs = pd.DataFrame(s["runs"])
+    best = runs.iloc[0]
+    rows = []
+    for r in range(1, runs["round"].max() + 1):
+        a, b = pairs[(r - 1) % len(pairs)]
+        here = runs[runs["round"] == r]
+        top = here.sharpe.max() if len(here) else float("nan")
+        before = best
+        if top > best.sharpe:
+            best = here.loc[here.sharpe.idxmax()]
+        changed = [f"{k}: {before[k]} → {best[k]}" for k in names if before[k] != best[k]]
+        rows.append({"round": r, "pair": f"{a} × {b}", "new runs": len(here),
+                     "best Sharpe": best.sharpe, "gain": best.sharpe - before.sharpe,
+                     "changed": ", ".join(changed) or "no change"})
+    assert all(best[k] == v for k, v in s["choice"].items()), "replay disagrees with optimize"
+    return pd.DataFrame(rows)
+
+
 TREND_COLORS = {"uptrend": "#2ca02c", "downtrend": "#d62728", "non_trending": "#bbb",
                 "mixed_conflicted": "#ff7f0e", "unknown": "#eee"}
 
@@ -159,12 +185,30 @@ if __name__ == "__main__":
     equity = pd.Series(runs["after"]["equity"], index=clock)
     early_gain = (equity[:"2026-06-14"].iloc[-1] - equity.iloc[0]) / (equity.iloc[-1] - equity.iloc[0])
 
+    table = rounds(s)
+    start_sharpe = s["runs"][0]["sharpe"]
+    climb = go.Figure()
+    climb.add_trace(go.Scatter(x=[0] + list(table["round"]), y=[start_sharpe] + list(table["best Sharpe"]),
+                               line=dict(color="#1f77b4", shape="hv"), name="best Sharpe so far"))
+    gained = table[table.gain > 0]
+    climb.add_trace(go.Scatter(x=gained["round"], y=gained["best Sharpe"], mode="markers",
+                               marker=dict(size=9, color="#2ca02c"), hovertext=gained["pair"] + ": " + gained["changed"],
+                               name="round with a gain (hover for what changed)"))
+    climb.update_layout(height=420, margin=dict(t=30), xaxis_title="round", yaxis_title="Sharpe",
+                        title="Best Sharpe after each round")
+    round_rows = "".join(
+        f"<tr{' class=gain' if row.gain > 0 else ''}><td>{row.round}</td><td>{row.pair}</td>"
+        f"<td>{row['new runs']}</td><td>{row.changed}</td><td>{row['best Sharpe']:.2f}</td>"
+        f"<td>{'+' + format(row.gain, '.2f') if row.gain > 0 else ''}</td></tr>" for _, row in table.iterrows())
+
     def params(p):
         return (f"average {p.average} hours, breakout {p.breakout} minutes, stop {p.atr_stops} ATRs, "
                 f"min stop {p.min_stop:.0%}, flip {'on' if p.flip else 'off'}")
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>StateTrend tuning</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;
-background:#fff;color:#222;line-height:1.5}} td,th{{padding:4px 12px;text-align:left}}</style></head><body>
+background:#fff;color:#222;line-height:1.5}} td,th{{padding:4px 12px;text-align:left}}
+table.rounds{{border-collapse:collapse;font-size:14px}} table.rounds td{{border-top:1px solid #eee}}
+tr.gain td{{background:#eaf6ea;font-weight:600}}</style></head><body>
 <h1>StateTrend on BTC and ETH, {START} to {SPLIT}</h1>
 <p>The optimizer searched these two months ({len(s['runs'])} backtests, base timeframe {s['timeframe']})
 for the parameters with the highest Sharpe. This page shows only the searched period, so the "after"
@@ -193,6 +237,17 @@ the 2% min stop keeps it out of calmer weeks.</p>
 show the tuned trades only; a short trade's line goes down when it made money. Hover a triangle for
 its exit cause and result; drag to zoom.</p>
 {fig.to_html(full_html=False, include_plotlyjs="cdn")}
+<h2>How the optimizer got there</h2>
+<p>Each knob starts at its first value: the defaults, Sharpe {start_sharpe:.2f}. Each round takes the
+next pair of knobs, in a fixed order, and backtests every combination of their values with the other
+knobs at the best so far. If any combination beats the best Sharpe, it becomes the best. With
+{len(KNOBS)} knobs there are {len(KNOBS) * (len(KNOBS) - 1) // 2} pairs, so the {len(table)} rounds go
+through them twice. "New runs" leaves out combinations already run, which are not run again.</p>
+<p>Knobs: {"; ".join(f"<b>{n}</b> " + ", ".join(avbt_cpp.timeframe_name(v) if isinstance(v, TF) else str(v) for v in vals) for n, vals in KNOBS)}.</p>
+{climb.to_html(full_html=False, include_plotlyjs=False)}
+<table class=rounds><tr><th>Round</th><th>Pair tried</th><th>New runs</th><th>What changed</th>
+<th>Best Sharpe</th><th>Gain</th></tr>{round_rows}</table>
+
 <h2>A closer look</h2>
 <p>Trades last minutes to hours, too short to see across two months. Here is one day on 1-minute bars.
 Because flip is on, each breakout is faded: in an up bias a close above the prior high (dotted green)
