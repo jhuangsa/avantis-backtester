@@ -19,8 +19,13 @@ namespace avbt {
 // the equity of the last step closed at or before it, so a day with no bars
 // is a 0% return; the part-days at either end are dropped. -inf when any
 // equity is at or below 0; NaN with fewer than 30 daily returns or none that
-// vary; else mean / sample sd * sqrt(365). ADR 0013.
+// vary; else mean / sample sd * sqrt(365). Throws std::invalid_argument
+// when equity and clock differ in length. ADR 0013.
 inline double sharpe(const Result& r) {
+    if (r.equity.size() != r.clock.size()) {
+        throw std::invalid_argument("Result has " + std::to_string(r.equity.size()) + " equity values and " +
+                                    std::to_string(r.clock.size()) + " clock steps");
+    }
     for (double e : r.equity) {
         if (e <= 0) return -std::numeric_limits<double>::infinity();
     }
@@ -165,6 +170,49 @@ inline Search optimize(const std::string& name, const Params& start, const std::
     auto score = [&](const Params& p) { return sharpe(info.run(p, markets, costs, settings)); };
     Search out = search(start, knobs, rounds, score, progress);
     out.timeframe = markets.timeframe();
+    return out;
+}
+
+// One walk-forward fold: the caller cuts the windows. test should start
+// where train ends.
+struct Fold {
+    const Markets* train;
+    MarketCosts train_costs;
+    const Markets* test;
+    MarketCosts test_costs;
+};
+
+// A fold's winner and how it did. overfit is train Sharpe minus test
+// Sharpe: near 0, the winner held up on days the search never saw; large,
+// the search fit noise.
+struct FoldResult {
+    Params best;
+    Summary train, test;
+    double overfit = 0.0;
+};
+
+// Called after each round with the fold's index, then Progress's arguments.
+using FoldProgress = std::function<bool(int, int, int, double, const Params&)>;
+
+// Per fold: optimize on train, then run the winner on train and on test.
+// A false from progress stops that fold's search, not the next fold's.
+inline std::vector<FoldResult> walk_forward(const std::string& name, const Params& start,
+                                            const std::vector<Knob>& knobs, const std::vector<Fold>& folds,
+                                            PortfolioSettings settings, int rounds,
+                                            const FoldProgress& progress = {}) {
+    if (folds.empty()) throw std::invalid_argument("walk_forward needs at least one fold");
+    std::vector<FoldResult> out;
+    for (int f = 0; f < static_cast<int>(folds.size()); ++f) {
+        const Fold& fold = folds[f];
+        Progress each;
+        if (progress) each = [&](int r, int n, double s, const Params& p) { return progress(f, r, n, s, p); };
+        Search s = optimize(name, start, knobs, *fold.train, fold.train_costs, settings, rounds, each);
+        FoldResult r{.best = s.best};
+        r.train = summary(run(name, s.best, *fold.train, fold.train_costs, settings));
+        r.test = summary(run(name, s.best, *fold.test, fold.test_costs, settings));
+        r.overfit = r.train.sharpe - r.test.sharpe;
+        out.push_back(r);
+    }
     return out;
 }
 

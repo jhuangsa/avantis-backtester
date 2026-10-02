@@ -178,9 +178,59 @@ void test_search() {
     check_value("zero rounds throws", threw, 1);
 }
 
+// A Result whose equity and clock differ in length throws, not crashes.
+void test_sharpe_length_mismatch_throws() {
+    Result r{.equity = std::vector<double>(40, 100.0)};
+    bool threw = false;
+    try {
+        sharpe(r);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check_value("mismatch throws", threw, 1);
+}
+
+// Bad settings throw before any bar is read.
+void test_bad_settings_throw() {
+    Markets m = rising();
+    for (PortfolioSettings bad : {PortfolioSettings{.starting_balance = 0}, PortfolioSettings{.risk_per_trade = -0.1},
+                                  PortfolioSettings{.hard_stop = 1.5}}) {
+        bool threw = false;
+        try {
+            run("state_trend", {}, m, flat_costs(m), bad);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        check_value("bad settings throw", threw, 1);
+    }
+}
+
+// One row per fold; progress sees each fold's index.
+void test_walk_forward() {
+    Markets a = rising(), b = rising();
+    std::vector<Fold> folds = {{&a, flat_costs(a), &b, flat_costs(b)}, {&b, flat_costs(b), &a, flat_costs(a)}};
+    std::vector<Knob> knobs = {knob("average", {50, 20}), knob("breakout", {30, 15})};
+    std::set<int> seen;
+    auto progress = [&](int f, int, int, double, const Params&) { return seen.insert(f), true; };
+    std::vector<FoldResult> rows = walk_forward("state_trend", {}, knobs, folds, {}, 2, progress);
+    check_value("rows", rows.size(), 2);
+    check_value("folds seen", seen == std::set<int>{0, 1}, 1);
+    check_value("best has knobs", rows[0].best.count("average") && rows[0].best.count("breakout"), 1);
+    bool threw = false;
+    try {
+        walk_forward("state_trend", {}, knobs, {}, {}, 2);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check_value("no folds throws", threw, 1);
+}
+
 }  // namespace
 
 int main() {
+    test_sharpe_length_mismatch_throws();
+    test_bad_settings_throw();
+    test_walk_forward();
     test_sharpe_gap_days_are_flat();
     test_sharpe_wipe_out_is_minus_infinity();
     test_sharpe_short_run_is_nan();

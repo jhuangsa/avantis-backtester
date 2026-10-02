@@ -2,7 +2,8 @@
 // first bar, prepare, then append each closed bar and state, update, and
 // decide with the positions the backtest had. The orders must be equal at
 // every step. Bars arrive only once closed, so a strategy that looks ahead
-// gives different orders. Returns 0 when every check passes.
+// gives different orders. decide_once, which keeps no state, must give
+// the same orders too. Returns 0 when every check passes.
 
 #include "avbt/run.hpp"
 #include "avbt/strategies.hpp"
@@ -137,6 +138,13 @@ Result replay(const std::string& name, const S& fresh, const std::vector<Market>
         const std::vector<Order>& want = steps[t].orders;
         bool ok = got.size() == want.size();
         for (size_t i = 0; ok && i < got.size(); ++i) ok = same(got[i], want[i]);
+        // decide_once starts fresh each call; it is slow, so check the steps
+        // with orders and every 101st.
+        if (ok && (!want.empty() || t % 101 == 0)) {
+            std::vector<Order> once = decide_once(live_of(fresh, settings), live, steps[t].positions, now);
+            ok = once.size() == want.size();
+            for (size_t i = 0; ok && i < once.size(); ++i) ok = same(once[i], want[i]);
+        }
         if (!ok) {
             ++failures;
             std::printf("FAIL %s: orders differ at step %zu\n", name.c_str(), t);
@@ -214,6 +222,27 @@ int main() {
         pair7.trades[0].entry_time != late7.trades[0].entry_time) {
         ++failures;
         std::printf("FAIL Combined delay 420: trades differ from StateTrend delay 420\n");
+    }
+
+    // An hourly strategy on minute steps: one minute after an open, with the
+    // open not filled, run gives nothing; decide_once must too, not repeat it.
+    std::vector<Market> zora = {market("ZORA", walk(5 * 24 * 60, 100, 0.004, 1), {Timeframe::Min1, Timeframe::Hour1},
+                                       false, 0)};
+    Markets mins = Markets::make(zora);
+    RallyShort hourly = rally;
+    hourly.params.instrument = "ZORA";
+    bool found = false;
+    for (int64_t now = 3600; now < 5 * 86400 && !found; now += 3600) {
+        if (decide_once(live_of(hourly), mins, {}, now).empty()) continue;
+        found = true;
+        if (!decide_once(live_of(hourly), mins, {}, now + 60).empty()) {
+            ++failures;
+            std::printf("FAIL decide_once repeats an open between hourly closes\n");
+        }
+    }
+    if (!found) {
+        ++failures;
+        std::printf("FAIL decide_once: no hourly open to check\n");
     }
 
     if (failures == 0) std::printf("test_live: all checks passed\n");

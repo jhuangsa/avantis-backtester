@@ -253,4 +253,33 @@ def test_param_type():
 
 def test_old_optimize_gone_and_version():
     assert not hasattr(avbt, "optimize_state_trend")
-    assert avbt.version == "0.3.0"
+    assert avbt.version == "0.4.0"
+
+
+def test_walk_forward(setup):
+    markets, costs = setup
+    calls = []
+    folds = [(markets, costs, markets, costs)] * 2
+    rows = avbt.walk_forward("state_trend", {}, KNOBS, folds, avbt.PortfolioSettings(), 2,
+                             lambda f, r, n, s, best: calls.append((f, r)))
+    assert len(rows) == 2 and {f for f, _ in calls} == {0, 1}
+    row = rows[0]
+    assert set(row) == {"best", "train", "test", "overfit"}
+    assert set(row["train"]) == {"sharpe", "total_return", "max_drawdown", "trades"}
+    # Train and test are the same window here, so nothing is overfit.
+    tr, te = row["train"]["sharpe"], row["test"]["sharpe"]
+    assert row["overfit"] == 0 or (np.isnan(tr) and np.isnan(row["overfit"]))
+    with pytest.raises(ValueError, match="fold"):
+        avbt.walk_forward("state_trend", {}, KNOBS, [], avbt.PortfolioSettings(), 2)
+
+
+def test_result_length_mismatch_raises():
+    with pytest.raises(ValueError):
+        avbt.Result(np.ones(40), avbt.Timeframe.Min1, np.array([], dtype=np.int64))
+
+
+@pytest.mark.parametrize("bad", [{"starting_balance": 0.0}, {"risk_per_trade": -0.1}, {"hard_stop": 1.5}])
+def test_bad_settings_raise(setup, bad):
+    markets, costs = setup
+    with pytest.raises(ValueError, match=next(iter(bad))):
+        avbt.run("state_trend", {}, markets, costs, avbt.PortfolioSettings(**bad))

@@ -125,3 +125,21 @@ def test_state_delay_defaults_to_60_and_must_be_whole_minutes():
             avbt.Live("state_trend", PARAMS, markets(100), settings)
         with pytest.raises(ValueError):
             avbt.run("state_trend", PARAMS, markets(100), {"BTC": avbt.Costs(0.0, 0.0)}, settings)
+
+
+def test_decide_matches_live_with_no_state_kept():
+    ts, o, h, l, c = columns(1)
+    grown = markets(N - 50)
+    live = avbt.Live("state_trend", PARAMS, grown)
+    seen = 0
+    for i in range(N - 50, N):
+        grown.append_states("BTC", int(ts[i]), avbt.State(6, 1, 2))
+        grown.append("BTC", avbt.Timeframe.Min1, avbt.Bar(int(ts[i]), o[i], h[i], l[i], c[i], 1))
+        now = int(ts[i]) + 60
+        want = live.decide(now, [])
+        got = avbt.decide("state_trend", PARAMS, grown, [], now)
+        assert [key(x) for x in got] == [key(x) for x in want]
+        seen += len(got)
+    assert seen > 0
+    with pytest.raises(ValueError, match="no strategy"):
+        avbt.decide("nope", {}, grown, [], now)

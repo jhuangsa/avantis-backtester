@@ -238,4 +238,24 @@ inline Result run(const std::string& name, const Params& params, const Markets& 
     return strategy(name).run(params, markets, costs, settings);
 }
 
+// The orders `live` gives at `now`, from a fresh start: prepare on the bars
+// so far, decide one base step earlier to learn which bars were already
+// seen, then decide at `now`. So it returns orders only at the step where
+// run would, with no state kept between calls. Positions need entry_time
+// for time exits; test_live checks the orders equal run's.
+inline std::vector<Order> decide_once(Live live, const Markets& markets, const std::vector<Position>& positions,
+                                      int64_t now) {
+    live.prepare(markets);
+    live.decide(now - seconds(markets.timeframe()), Report{}, positions);
+    return live.decide(now, Report{}, positions);
+}
+
+// The orders the strategy `name` gives at `now` on the bars so far. Throws
+// as run does.
+inline std::vector<Order> decide(const std::string& name, const Params& params, const Markets& markets,
+                                 const std::vector<Position>& positions, int64_t now,
+                                 PortfolioSettings settings = {}) {
+    return decide_once(strategy(name).live(params, settings), markets, positions, now);
+}
+
 }

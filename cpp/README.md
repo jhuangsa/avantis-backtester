@@ -107,7 +107,7 @@ cpp/
 │   ├── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
 │   ├── run.hpp               the strategy table, strategies(), and run
 │   ├── version.hpp           the engine version
-│   └── optimize.hpp          sharpe, summary, Knob, and optimize, the greedy search
+│   └── optimize.hpp          sharpe, summary, Knob, optimize (the greedy search), walk_forward
 ├── src/
 │   ├── indicators.cpp        indicator code
 │   ├── markets.cpp           Markets::make and its lookups
@@ -387,6 +387,9 @@ Chosen once, fixed for the run.
 | `risk_per_trade` | 0.01 | Fraction of the current balance lost if a trade's stop fills. |
 | `hard_stop` | 0.30 | When equity falls to 70% of the starting balance, everything closes and trading stops for good. |
 | `scale_risk_with_leverage` | false | When true, a trade risks `risk_per_trade × leverage`: at 5x, a stop loses 5% instead of 1%, so returns scale with leverage. |
+| `state_delay` | 60 | Seconds back at which a strategy reads state labels; whole minutes, at least 60. ADR 0012. |
+
+`use_settings` in `backtest.hpp` checks them when a run, `Live`, or `decide` starts: `starting_balance` above 0, `risk_per_trade` and `hard_stop` in (0, 1], `state_delay` as above. Anything else throws `std::invalid_argument`.
 
 ### `struct Fees`
 
@@ -739,6 +742,10 @@ It throws `std::invalid_argument` for an unknown name (the message lists the kno
 
 An `int` is accepted where a `double` is expected.
 
+### `decide(name, params, markets, positions, now, settings = {})` and `decide_once(live, markets, positions, now)`
+
+`decide` gives the orders of the strategy `name` at `now`, keeping nothing between calls. `decide_once` does the work: it prepares a fresh `Live` on `markets` (the bars so far), decides one base step before `now` so the strategy knows which bars it has already acted on, then decides at `now`. So it returns orders only at the step where `run` would: an hourly strategy on minute bars gives its open once, not every minute until the next hourly close. It throws as `run` does. Each call reads the whole history; `Live` is the fast path. `test_live.cpp` checks it gives `run`'s orders.
+
 ### `avbt::version`
 
 `version.hpp` holds one constant, `avbt::version`. Every `Result` copies it into `Result::version`, and the Python module reads the same constant, so both report one number.
@@ -782,6 +789,12 @@ Sharpe, total return (ending equity / starting equity − 1), max drawdown (the 
 
 Each run builds a fresh strategy, so `prepare` starts clean.
 
+### `walk_forward(name, start, knobs, folds, settings, rounds, progress = {})`
+
+A `Fold` holds a train `Markets` and its `MarketCosts`, and a test `Markets` and its `MarketCosts`; the caller cuts them. Per fold, `walk_forward` calls `optimize` on train, then runs the winner on train and on test. It returns one `FoldResult` per fold: `best`, the `train` and `test` `Summary`, and `overfit`, train Sharpe minus test Sharpe. `FoldProgress` is called with the fold's index and then `Progress`'s arguments; returning false stops that fold's search only. No folds throws.
+
+`sharpe` throws `std::invalid_argument` when `equity` and `clock` differ in length.
+
 ## avbt_py.cpp: the Python module
 
 File: `python/avbt_py.cpp`. It uses **pybind11**, a library that makes C++ functions callable from Python. The module is named `avbt_cpp`.
@@ -804,7 +817,7 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `Timeframe` | The enum, with the same twelve values (`Timeframe.Hour1`). |
 | `timeframe_name(tf)`, `timeframe_seconds(tf)` | `name` and `seconds` for a `Timeframe`. |
 | `Bars(timeframe, ts, open, high, low, close, minutes_with_data)` | Builds bars. `len(bars)` is the number of bars; `bars.timeframe` reads the timeframe back; `bars.ts`, `open`, `high`, `low`, `close` return copies of the columns as numpy arrays. |
-| `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30)` | The settings. |
+| `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30, scale_risk_with_leverage=False, state_delay=60)` | The settings. |
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
@@ -817,6 +830,8 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `sharpe` | `(result)`: `avbt::sharpe`. `Result(equity, timeframe, clock)` builds a result to score. |
 | `optimize` | `(name, start, knobs, markets, costs, settings, rounds, progress=None)`: `avbt::optimize`. `start` is a params dict; `knobs` is `{name: [values]}`. The search runs without the GIL; `progress(round, rounds, sharpe, best)` takes it, and an exception it raises stops the search and reaches the caller. Returns `{"best", "sharpe", "runs", "timeframe"}`; `best` passes to `run`, and each run is `{"round", "params", "sharpe"}`. |
 | `summary` | `(result)`: `avbt::summary` as a dict `{"sharpe", "total_return", "max_drawdown", "trades"}`. |
+| `walk_forward` | `(name, start, knobs, folds, settings, rounds, progress=None)`: `avbt::walk_forward`. Each fold is `(train_markets, train_costs, test_markets, test_costs)`. Runs without the GIL; `progress(fold, round, rounds, sharpe, best)` takes it. Returns one dict per fold: `{"best", "train", "test", "overfit"}`, `train` and `test` as `summary` gives them. |
+| `Live`, `decide` | `Live(name, params, markets, settings)` then `live.decide(now, positions)`; or `decide(name, params, markets, positions, now, settings)` in one call, `avbt::decide`. Both keep the GIL. See Live below. |
 | `sma`, `pct_change`, `prior_max`, `prior_min` | Take a numpy array and a number; return a numpy array. |
 | `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier` | Take `Bars`; return a numpy array. Fields and sides are strings. |
 
@@ -837,6 +852,7 @@ These example scripts use the module:
 - `examples/veranta_rules_cpp.py` compares C++ trades with the Python engine's, trade by trade.
 - `examples/state_trend.py` runs `StateTrend` on BTC and ETH with states from `examples/clickhouse_data.py`.
 - `examples/state_trend_optimize.py` tunes `StateTrend` with `optimize` on June and July 2026, then scores the winner on August.
+- `examples/walk_forward.py` cuts folds and runs `walk_forward` on `StateTrend`.
 - `examples/veranta_cpp_chart.py` writes `examples/veranta_cpp_chart.html`: a summary table (trades, win rate, return, maximum drawdown, Sharpe ratio, exit causes) and a chart for each strategy.
 
 ---
@@ -849,6 +865,8 @@ A live caller runs the same strategy code as a backtest. In order:
 2. Each time a bar closes, append the closed bars with `markets.append(...)` and the new state labels with `markets.append_states(...)`.
 3. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
 4. Send the orders it returns to the exchange.
+
+Or skip the object: `decide(name, params, markets, positions, now, settings)` warms up on `markets` every call and gives the same orders (see run.hpp above). Positions need `entry_time` for time exits, as after a restart. A `Combined` strategy on one instrument for both halves (`late_day_and_rally`) cannot tell from a position which half opened it, so it gives it to `a`; see Combined.
 
 `decide` does not take the full history on each call. Indicators update one bar at a time ([ADR 0017](../docs/adr/0017-indicators-update-one-bar-at-a-time.md)), so passing all bars every call would recompute everything and slow down as the history grows. Stops and take profits stay the caller's (see Stops live below).
 

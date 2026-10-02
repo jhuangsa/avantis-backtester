@@ -80,9 +80,20 @@ struct Result {
 // UTC second of that close, and returns orders. A strategy reads its bars
 // through last_closed(bars, now), which never returns a bar still open. No
 // base class, no virtual call.
-// Checks settings.state_delay and hands it to a strategy that reads labels.
+// Checks the settings and hands state_delay to a strategy that reads labels.
+// Throws std::invalid_argument unless starting_balance > 0, risk_per_trade
+// and hard_stop are in (0, 1], and state_delay is whole minutes, at least 60.
 template <class S>
 void use_settings(S& s, const PortfolioSettings& p) {
+    if (!(p.starting_balance > 0) || std::isinf(p.starting_balance)) {
+        throw std::invalid_argument("starting_balance must be above 0, got " + std::to_string(p.starting_balance));
+    }
+    if (!(p.risk_per_trade > 0 && p.risk_per_trade <= 1)) {
+        throw std::invalid_argument("risk_per_trade must be in (0, 1], got " + std::to_string(p.risk_per_trade));
+    }
+    if (!(p.hard_stop > 0 && p.hard_stop <= 1)) {
+        throw std::invalid_argument("hard_stop must be in (0, 1], got " + std::to_string(p.hard_stop));
+    }
     if (p.state_delay < 60 || p.state_delay % 60 != 0) {
         throw std::invalid_argument("state_delay must be a whole number of minutes, at least 60, got " +
                                     std::to_string(p.state_delay));
