@@ -219,17 +219,23 @@ inline const std::vector<StrategyInfo>& strategies() {
     return table;
 }
 
-// Builds the strategy `name` from params and backtests it. Throws
-// std::invalid_argument for an unknown name (the message lists the known
-// ones), an unknown param, a value of the wrong type or out of range, or bad costs.
-inline Result run(const std::string& name, const Params& params, const Markets& markets,
-                  const MarketCosts& costs, PortfolioSettings settings) {
+// The table row named `name`. Throws std::invalid_argument for an unknown
+// name; the message lists the known ones.
+inline const StrategyInfo& strategy(const std::string& name) {
     std::string known;
     for (const StrategyInfo& s : strategies()) {
-        if (s.name == name) return s.run(params, markets, costs, settings);
+        if (s.name == name) return s;
         known += (known.empty() ? "" : ", ") + s.name;
     }
     throw std::invalid_argument("no strategy " + name + "; known: " + known);
+}
+
+// Builds the strategy `name` from params and backtests it. Throws
+// std::invalid_argument for an unknown name, an unknown param, a value of
+// the wrong type or out of range, or bad costs.
+inline Result run(const std::string& name, const Params& params, const Markets& markets,
+                  const MarketCosts& costs, PortfolioSettings settings) {
+    return strategy(name).run(params, markets, costs, settings);
 }
 
 }

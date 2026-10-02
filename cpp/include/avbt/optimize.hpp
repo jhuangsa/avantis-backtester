@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "avbt/backtest.hpp"
+#include "avbt/run.hpp"
 
 namespace avbt {
 
@@ -41,65 +42,79 @@ inline double sharpe(const Result& r) {
     return var > 0 ? mean / std::sqrt(var) * std::sqrt(365.0) : std::nan("");
 }
 
-// One parameter the optimizer may change. choices[i] writes one value into
-// the params; labels[i] names that value for printing.
-template <class P>
-struct Knob {
-    std::string name;
-    std::vector<std::string> labels;
-    std::vector<std::function<void(P&)>> choices;
+// A result in four numbers. total_return is ending / starting equity - 1;
+// max_drawdown is the largest fall from an equity peak, as a positive fraction.
+struct Summary {
+    double sharpe = 0.0, total_return = 0.0, max_drawdown = 0.0;
+    int trades = 0;
 };
 
-// One backtest the search ran. choice[k] indexes knob k's choices.
+inline Summary summary(const Result& r) {
+    Summary s{.sharpe = sharpe(r), .trades = static_cast<int>(r.trades.size())};
+    if (r.equity.empty()) return s;
+    s.total_return = r.equity.back() / r.equity.front() - 1;
+    double peak = r.equity.front();
+    for (double e : r.equity) {
+        peak = std::max(peak, e);
+        s.max_drawdown = std::max(s.max_drawdown, 1 - e / peak);
+    }
+    return s;
+}
+
+// One param the search may change: its name and the values it may take,
+// as run takes them. Combined strategies prefix the name with a. or b.
+struct Knob {
+    std::string name;
+    std::vector<Value> values;
+};
+
+// One backtest the search ran.
 struct Run {
     int round = 0;
-    std::vector<int> choice;
+    Params params;
     double sharpe = 0.0;
 };
 
-template <class P>
 struct Search {
-    P best;
-    std::vector<int> choice;
+    Params best;
     double sharpe = 0.0;
     // The base timeframe every run stepped on.
     Timeframe timeframe = Timeframe::Min1;
     std::vector<Run> runs;
 };
 
-// Greedy search for the highest Sharpe. Every knob starts at its first
-// choice; a parameter with no knob keeps its value in `start`. Round r tries
+// Called after each round with (round, rounds, best Sharpe, best params);
+// returning false stops the search after that round.
+using Progress = std::function<bool(int, int, double, const Params&)>;
+
+// Greedy search for the highest Sharpe of `score`. Every knob starts at its
+// first value; a param with no knob keeps its value in `start`. Round r tries
 // every combination of one pair of knobs, the pairs in a fixed order (0,1),
 // (0,2), ..., (1,2), ..., the other knobs at the best so far. Any higher
 // Sharpe becomes the best; NaN never does. Each combination runs once. The
 // search stops early after a full pass over the pairs brings no gain. ADR 0013.
-template <Strategy S>
-Search<typename S::Params> optimize(const typename S::Params& start,
-                                    const std::vector<Knob<typename S::Params>>& knobs,
-                                    const Markets& markets, const MarketCosts& costs,
-                                    PortfolioSettings settings, int rounds) {
-    using P = typename S::Params;
+inline Search search(const Params& start, const std::vector<Knob>& knobs, int rounds,
+                     const std::function<double(const Params&)>& score_of, const Progress& progress = {}) {
     std::vector<std::pair<int, int>> pairs;
     for (int a = 0; a < static_cast<int>(knobs.size()); ++a) {
-        if (knobs[a].choices.empty()) throw std::invalid_argument(knobs[a].name + ": no choices");
+        if (knobs[a].values.empty()) throw std::invalid_argument(knobs[a].name + ": no values");
         for (int b = a + 1; b < static_cast<int>(knobs.size()); ++b) pairs.push_back({a, b});
     }
     if (pairs.empty()) throw std::invalid_argument("optimize needs at least two knobs");
 
     auto params_of = [&](const std::vector<int>& choice) {
-        P p = start;
-        for (std::size_t k = 0; k < knobs.size(); ++k) knobs[k].choices[choice[k]](p);
+        Params p = start;
+        for (std::size_t k = 0; k < knobs.size(); ++k) p[knobs[k].name] = knobs[k].values[choice[k]];
         return p;
     };
-    Search<P> out{.timeframe = markets.timeframe()};
+    Search out;
     std::map<std::vector<int>, double> seen;
     auto score = [&](const std::vector<int>& choice, int round) {
         auto it = seen.find(choice);
         if (it != seen.end()) return it->second;
-        S strategy;
-        strategy.params = params_of(choice);
-        double s = sharpe(backtest(strategy, markets, costs, settings));
-        out.runs.push_back({round, choice, s});
+        Params p = params_of(choice);
+        double s = score_of(p);
+        out.runs.push_back({round, p, s});
         return seen[choice] = s;
     };
     auto beats = [](double s, double top) { return !std::isnan(s) && (std::isnan(top) || s > top); };
@@ -110,8 +125,8 @@ Search<typename S::Params> optimize(const typename S::Params& start,
     for (int r = 1; r <= rounds && since_gain < pairs.size(); ++r) {
         auto [a, b] = pairs[(r - 1) % pairs.size()];
         std::vector<int> round_best = best;
-        for (int i = 0; i < static_cast<int>(knobs[a].choices.size()); ++i) {
-            for (int j = 0; j < static_cast<int>(knobs[b].choices.size()); ++j) {
+        for (int i = 0; i < static_cast<int>(knobs[a].values.size()); ++i) {
+            for (int j = 0; j < static_cast<int>(knobs[b].values.size()); ++j) {
                 std::vector<int> c = best;
                 c[a] = i;
                 c[b] = j;
@@ -121,10 +136,32 @@ Search<typename S::Params> optimize(const typename S::Params& start,
         }
         since_gain = round_best == best ? since_gain + 1 : 0;
         best = round_best;
+        if (progress && !progress(r, rounds, top, params_of(best))) break;
     }
     out.best = params_of(best);
-    out.choice = best;
     out.sharpe = top;
+    return out;
+}
+
+// search over the table strategy `name`, each run scored by sharpe. Every
+// knob value is checked first: a bad name, type, or range throws
+// std::invalid_argument naming the knob.
+inline Search optimize(const std::string& name, const Params& start, const std::vector<Knob>& knobs,
+                       const Markets& markets, const MarketCosts& costs, PortfolioSettings settings,
+                       int rounds, const Progress& progress = {}) {
+    const StrategyInfo& info = strategy(name);
+    for (const Knob& k : knobs) {
+        for (const Value& v : k.values) {
+            try {
+                info.live({{k.name, v}});
+            } catch (const std::invalid_argument& e) {
+                throw std::invalid_argument("knob " + k.name + ": " + e.what());
+            }
+        }
+    }
+    auto score = [&](const Params& p) { return sharpe(info.run(p, markets, costs, settings)); };
+    Search out = search(start, knobs, rounds, score, progress);
+    out.timeframe = markets.timeframe();
     return out;
 }
 
