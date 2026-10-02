@@ -3,6 +3,7 @@
 #include <cmath>
 #include <concepts>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,17 @@ struct Result {
 // UTC second of that close, and returns orders. A strategy reads its bars
 // through last_closed(bars, now), which never returns a bar still open. No
 // base class, no virtual call.
+// Checks settings.state_delay and hands it to a strategy that reads labels.
+template <class S>
+void use_settings(S& s, const PortfolioSettings& p) {
+    if (p.state_delay < 60 || p.state_delay % 60 != 0) {
+        throw std::invalid_argument("state_delay must be a whole number of minutes, at least 60, got " +
+                                    std::to_string(p.state_delay));
+    }
+    if constexpr (requires { s.state_delay; }) s.state_delay = p.state_delay;
+    if constexpr (requires { s.a; s.b; }) use_settings(s.a, p), use_settings(s.b, p);
+}
+
 template <class S>
 concept Strategy = requires(S s, const Markets& markets, int64_t now, const Report& report,
                             const std::vector<Position>& positions) {
@@ -108,6 +120,7 @@ template <Strategy S, class OnStep = NoStep>
 Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
                 PortfolioSettings settings, OnStep on_step = {}) {
     check_costs(markets, costs);
+    use_settings(strategy, settings);
     Portfolio portfolio(settings);
     Result result{.timeframe = markets.timeframe(), .clock = markets.clock()};
     // The portfolio does not know clock steps, so the loop keeps them.

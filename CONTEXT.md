@@ -141,9 +141,27 @@ _Avoid_: universe, basket
 One of three names for a market's condition in one minute: market, trend, or volatility. It is computed outside the engine and stored as a code, where 0 is Unknown. A strategy at `now` sees the label stamped one minute earlier. Unknown never opens a trade. See ADR 0012.
 _Avoid_: regime, signal
 
+**State delay**:
+How far back a strategy reads state labels. It matches how late labels arrive live, so a backtest reads them as late. See ADR 0012.
+_Avoid_: lag, label delay
+
 **Clock**:
 The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. The C++ engine refuses markets with different base timeframes.
 _Avoid_: calendar, index
 
 **Hard stop**:
 The fall below the starting balance, counting unrealized results, at which every position closes and the portfolio stops trading for good. 30% by default.
+
+### Tuning
+
+**Knob**:
+A strategy parameter that a search may change, with a default, a minimum, and a maximum.
+_Avoid_: hyperparameter, setting
+
+**Fold**:
+One training window and the test window right after it.
+_Avoid_: split, sample
+
+**Walk-forward**:
+Tuning on each fold's training window, then scoring the winner on that fold's test window. The caller builds the folds.
+_Avoid_: out-of-sample run, cross-validation

@@ -356,6 +356,8 @@ struct StateTrend {
         // instrument not listed reads Hour1. Entries and fills stay on base bars.
         std::map<std::string, Timeframe> signal;
     } params;
+    // Seconds back at which labels are read; set by use_settings.
+    int64_t state_delay = 60;
     // One market's bars, lines, and states.
     struct Lines {
         std::string instrument;
@@ -422,7 +424,7 @@ struct StateTrend {
             l.seen_bar = m;
             int h = last_closed(*l.bars, now);
             if (h < 0) continue;
-            State s = state_at(*l.states, now);
+            State s = state_at(*l.states, now, state_delay);
             double close = l.bars->close[h];
             bool up = defined(l.average[h]) && close > l.average[h] && s.trend == TrendState::Uptrend;
             bool down = defined(l.average[h]) && close < l.average[h] && s.trend == TrendState::Downtrend;

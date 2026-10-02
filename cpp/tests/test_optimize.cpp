@@ -64,13 +64,15 @@ Markets rising() {
     return Markets::make({{"X", {b}}});
 }
 
-Knob<Toy::Params> knob(const std::string& name, int Toy::Params::*field, std::vector<int> values) {
-    Knob<Toy::Params> k{.name = name};
-    for (int v : values) {
-        k.labels.push_back(std::to_string(v));
-        k.choices.push_back([=](Toy::Params& p) { p.*field = v; });
-    }
-    return k;
+Knob knob(const std::string& name, std::vector<int> values) {
+    return {name, std::vector<Value>(values.begin(), values.end())};
+}
+
+// Sharpe of Toy with a, b, c read from params.
+double toy_sharpe(const Params& p, const Markets& m) {
+    Toy t;
+    t.params = {std::get<int>(p.at("a")), std::get<int>(p.at("b")), std::get<int>(p.at("c"))};
+    return sharpe(backtest(t, m, PortfolioSettings{}));
 }
 
 // Daily bars on days 0-15, rising 10% a day, then no bars until day 30.
@@ -133,24 +135,47 @@ void test_sharpe_same_on_minute_and_hour_bars() {
     check_value("minute sharpe", sharpe(path(Timeframe::Min1, rise_then_flat())), expected);
 }
 
-void test_optimize() {
-    std::vector<Knob<Toy::Params>> knobs = {knob("a", &Toy::Params::a, {0, 1, 2}),
-                                            knob("b", &Toy::Params::b, {0, 1, 2, 3}),
-                                            knob("c", &Toy::Params::c, {0, 1})};
+void test_search() {
+    std::vector<Knob> knobs = {knob("a", {0, 1, 2}), knob("b", {0, 1, 2, 3}), knob("c", {0, 1})};
     Markets m = rising();
-    auto s = optimize<Toy>({}, knobs, m, flat_costs(m), PortfolioSettings{}, 10);
-    check_value("best a", s.best.a, 2);
-    check_value("best b", s.best.b, 3);
-    check_value("best c stays first", s.best.c, 0);
+    auto score = [&](const Params& p) { return toy_sharpe(p, m); };
+    Search s = search({}, knobs, 10, score);
+    check_value("best a", std::get<int>(s.best.at("a")), 2);
+    check_value("best b", std::get<int>(s.best.at("b")), 3);
+    check_value("best c stays first", std::get<int>(s.best.at("c")), 0);
     check_value("positive sharpe", s.sharpe > 0, 1);
     // Start 1; pair (a,b) 11 new; (a,c) at b=3 and (b,c) at a=2 each 3 new,
     // the rest already run. Then a full pass with no gain ends the search.
     check_value("runs", s.runs.size(), 18);
     check_value("last round", s.runs.back().round, 3);
-    std::set<std::vector<int>> unique;
-    for (const Run& r : s.runs) unique.insert(r.choice);
+    std::set<Params> unique;
+    for (const Run& r : s.runs) unique.insert(r.params);
     check_value("each combination once", unique.size(), s.runs.size());
-    check_value("one round", optimize<Toy>({}, knobs, m, flat_costs(m), PortfolioSettings{}, 1).runs.size(), 12);
+    check_value("one round", search({}, knobs, 1, score).runs.size(), 12);
+    // The same inputs give the same search.
+    Search again = search({}, knobs, 10, score);
+    check_value("same runs", again.runs.size(), s.runs.size());
+    for (std::size_t i = 0; i < s.runs.size(); ++i) {
+        check_value("same params", again.runs[i].params == s.runs[i].params, 1);
+        check_value("same sharpe", again.runs[i].sharpe, s.runs[i].sharpe);
+    }
+    // Progress sees each round; returning false stops after that round.
+    std::vector<int> seen;
+    auto stop_at_2 = [&](int r, int total, double, const Params&) {
+        seen.push_back(r * 100 + total);
+        return r < 2;
+    };
+    Search cut = search({}, knobs, 10, score, stop_at_2);
+    check_value("progress calls", seen.size(), 2);
+    check_value("progress args", seen[0] == 110 && seen[1] == 210, 1);
+    check_value("stopped after round 2", cut.runs.back().round, 2);
+    bool threw = false;
+    try {
+        search({}, knobs, 0, score);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check_value("zero rounds throws", threw, 1);
 }
 
 }  // namespace
@@ -161,7 +186,7 @@ int main() {
     test_sharpe_short_run_is_nan();
     test_sharpe_flat_is_nan();
     test_sharpe_same_on_minute_and_hour_bars();
-    test_optimize();
+    test_search();
     if (failures == 0) std::printf("all optimize checks passed\n");
     return failures == 0 ? 0 : 1;
 }

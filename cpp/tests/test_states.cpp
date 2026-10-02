@@ -72,6 +72,16 @@ void test_state_at_lag() {
     check_true("unknown past end", state_at(s, 780).volatility == VolatilityState::Unknown);
 }
 
+// A delay of 7 minutes reads the row stamped 7 minutes back, never a younger one.
+void test_state_at_delay() {
+    std::vector<TrendState> t(10, TrendState::Uptrend);
+    t[2] = TrendState::Downtrend;
+    States s{600, std::vector(10, MarketState::Mixed), t, std::vector(10, VolatilityState::Low)};
+    check_true("delay: row 2 at 600 + 9 min", state_at(s, 600 + 9 * 60, 420).trend == TrendState::Downtrend);
+    check_true("delay: not row 2 a minute early", state_at(s, 600 + 8 * 60, 420).trend == TrendState::Uptrend);
+    check_true("delay: unknown before 7 min", state_at(s, 600 + 6 * 60, 420).trend == TrendState::Unknown);
+}
+
 void test_make_checks_states() {
     Bars b = flat_bars(Timeframe::Min1, 0, {1, 1});
     States s = same_states(0, 2, MarketState::Mixed, TrendState::Uptrend, VolatilityState::Low);
@@ -179,6 +189,7 @@ void test_state_trend_signal() {
 
 int main() {
     test_state_at_lag();
+    test_state_at_delay();
     test_make_checks_states();
     test_state_trend_unknown_no_trade();
     test_state_trend_opens_long();

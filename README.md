@@ -82,7 +82,7 @@ import avbt_cpp as avbt
 | `Market(instrument, timeframes, states=None)` | One instrument, such as `"BTC"`, with its `Bars` on one or more timeframes. |
 | `Markets(markets)` | Every market, on one clock. Read `.clock`, `.timeframe`, `.instruments`. |
 | `Costs(open_fee, close_fee, hold_long=None, hold_short=None)` | Fees as fractions of the position's value, charged at the open and at the close. `hold_long` and `hold_short` give the cost of holding through each base bar, also as a fraction (positive pays, negative receives). Every market needs one. |
-| `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30, scale_risk_with_leverage=False)` | The account. `risk_per_trade` is the fraction of the balance lost if a stop is hit. `hard_stop`: once equity falls this fraction below the starting balance, every position closes and trading stops for good. |
+| `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30, scale_risk_with_leverage=False, state_delay=60)` | The account. `risk_per_trade` is the fraction of the balance lost if a stop is hit. `hard_stop`: once equity falls this fraction below the starting balance, every position closes and trading stops for good. `state_delay` is how many seconds back a strategy reads state labels (a whole number of minutes, at least 60); it counts back to the label's timestamp (the start of its minute), so for labels that arrive 7 minutes after their minute closes, set 480. |
 
 Prices must have no NaN. The engine does not check, and one NaN gives wrong levels, a dead ATR, or a NaN position. Pass minute candles through `clean_candles` in `examples/candles.py` before you resample them.
 
@@ -107,20 +107,20 @@ A `Result` has:
 | `timeframe` | The timeframe of the clock. |
 | `version` | The engine version that made the result. |
 
-`optimize_state_trend(markets, costs, settings, start, knobs, rounds)` tunes `state_trend` by a greedy search over pairs of settings.
+`optimize(name, start, knobs, markets, costs, settings, rounds, progress=None)` tunes any strategy by a greedy search over pairs of params; `summary(result)` gives its Sharpe, total return, max drawdown, and trade count.
 
 The indicators are also callable on their own: `sma`, `pct_change`, `prior_max`, `prior_min`, `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier`.
 
 ### 3. Trade live
 
 ```python
-live = avbt.Live("state_trend", params, markets)   # warms up on the history
+live = avbt.Live("state_trend", params, markets, settings)   # warms up on the history, once
 ```
 
 Each time a bar closes:
 
 1. Add the closed bar with `markets.append(instrument, timeframe, avbt.Bar(ts, open, high, low, close, minutes_with_data))`. Add a coarser bar, such as 1 hour, only once it has closed. Add each state label when it arrives with `markets.append_states(instrument, ts, avbt.State(market, trend, volatility))`.
-2. Call `orders = live.decide(now, positions)`. `now` is the close time in UTC seconds. `positions` is a list of `Position(instrument, side, entry_price=0, size=0, entry_time=0)`.
+2. Call `orders = live.decide(now, positions)`. It does not take the history: indicators update one bar at a time, so passing every bar each call would slow down as the history grows. `now` is the close time in UTC seconds. `positions` is a list of `Position(instrument, side, entry_price=0, size=0, entry_time=0)`.
 3. Send the orders to the exchange.
 
 `append` refuses a bar that is not later than the last one, an unknown market or timeframe, and a gap in the state labels.
@@ -132,3 +132,16 @@ Each `Order` has `kind` (`Order.Kind.Open` or `Close`), `instrument`, `side` (`S
 After a restart, build `Live` again on the history, and give each open position its `entry_time`, so time exits still close at the right bar.
 
 More detail: [cpp/README.md](cpp/README.md) and [ADR 0017](docs/adr/0017-indicators-update-one-bar-at-a-time.md).
+
+## Versions
+
+The version has three numbers, such as 0.3.0. The engine and every result carry it (`version`).
+
+- Renaming or removing anything, or changing what a result means, raises the middle number: 0.2 to 0.3.
+- Adding something new raises the last number: 0.2.0 to 0.2.1.
+- Names stay stable within a version.
+
+Version 0.3.0:
+
+- Removed `optimize_state_trend`. Call `optimize` with the strategy name.
+- Added `state_delay` in `PortfolioSettings`, `summary`, `Param.type`, and the `settings` argument of `Live`.

@@ -4,6 +4,7 @@
 // every step. Bars arrive only once closed, so a strategy that looks ahead
 // gives different orders. Returns 0 when every check passes.
 
+#include "avbt/run.hpp"
 #include "avbt/strategies.hpp"
 
 #include <cmath>
@@ -83,13 +84,14 @@ struct Step {
 };
 
 template <class S>
-void replay(const std::string& name, const S& fresh, const std::vector<Market>& full) {
+Result replay(const std::string& name, const S& fresh, const std::vector<Market>& full,
+              PortfolioSettings settings = {}) {
     Markets all = Markets::make(full);
     MarketCosts costs;
     for (const Market& m : full) costs[m.instrument] = Costs{.open_fee = 0.0001, .close_fee = 0.0001};
     S s = fresh;
     std::vector<Step> steps;
-    Result r = backtest(s, all, costs, PortfolioSettings{},
+    Result r = backtest(s, all, costs, settings,
                         [&](int, const std::vector<Position>& p, const std::vector<Order>& o) {
                             steps.push_back({p, o});
                         });
@@ -108,7 +110,7 @@ void replay(const std::string& name, const S& fresh, const std::vector<Market>& 
         first.push_back(f);
     }
     Markets live = Markets::make(first);
-    S l = fresh;
+    Live l = live_of(fresh, settings);
     l.prepare(live);
     int orders = 0;
     for (size_t t = 0; t < steps.size(); ++t) {
@@ -138,7 +140,7 @@ void replay(const std::string& name, const S& fresh, const std::vector<Market>& 
         if (!ok) {
             ++failures;
             std::printf("FAIL %s: orders differ at step %zu\n", name.c_str(), t);
-            return;
+            return r;
         }
         orders += static_cast<int>(want.size());
     }
@@ -146,6 +148,7 @@ void replay(const std::string& name, const S& fresh, const std::vector<Market>& 
         ++failures;
         std::printf("FAIL %s: no trades to compare\n", name.c_str());
     }
+    return r;
 }
 
 }
@@ -185,7 +188,33 @@ int main() {
     trend.params.average = 5;
     trend.params.atr_period = 5;
     trend.params.breakout = 10;
-    replay("StateTrend", trend, both);
+    Result base = replay("StateTrend", trend, both);
+    // Labels read 7 minutes back: live must match, and the trades must move.
+    Result late7 = replay("StateTrend delay 420", trend, both, PortfolioSettings{.state_delay = 420});
+    if (base.trades.empty() || late7.trades.empty()) {
+        std::printf("FAIL StateTrend delay 420: no trades to compare\n");
+        return 1;
+    }
+    bool moved = base.trades.size() != late7.trades.size() ||
+                 base.trades[0].entry_time != late7.trades[0].entry_time;
+    if (!moved) {
+        ++failures;
+        std::printf("FAIL StateTrend delay 420: same trades as delay 60\n");
+    }
+    // A combined strategy hands the delay to both halves.
+    Combined<StateTrend, StateTrend> pair;
+    pair.a = trend;
+    pair.b = trend;
+    Result pair7 = replay("Combined delay 420", pair, both, PortfolioSettings{.state_delay = 420});
+    if (pair7.trades.empty()) {
+        std::printf("FAIL Combined delay 420: no trades\n");
+        return 1;
+    }
+    if (pair7.trades.size() != late7.trades.size() ||
+        pair7.trades[0].entry_time != late7.trades[0].entry_time) {
+        ++failures;
+        std::printf("FAIL Combined delay 420: trades differ from StateTrend delay 420\n");
+    }
 
     if (failures == 0) std::printf("test_live: all checks passed\n");
     return failures == 0 ? 0 : 1;

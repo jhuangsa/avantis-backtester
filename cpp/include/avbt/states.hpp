@@ -37,9 +37,11 @@ struct State {
 // The labels a strategy may read at `now`: the row stamped one minute
 // before. At 10:00 it sees the 9:59 label, whose minute closed at 10:00, so
 // there is no lookahead whether or not a label uses its own minute. All
-// Unknown before the first row or past the last.
-inline State state_at(const States& s, int64_t now) {
-    int64_t at = now - seconds(Timeframe::Min1) - s.start;
+// Unknown before the first row or past the last. `delay` (seconds, a whole
+// number of minutes, at least 60) reads an older row, for labels that
+// arrive late; PortfolioSettings::state_delay.
+inline State state_at(const States& s, int64_t now, int64_t delay = 60) {
+    int64_t at = now - delay - s.start;
     if (at < 0) return {};
     std::size_t row = static_cast<std::size_t>(at / 60);
     if (row >= s.market.size()) return {};

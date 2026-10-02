@@ -1,12 +1,16 @@
 """avbt_cpp.Live: a strategy prepared on history, then fed one bar at a time."""
 
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cpp" / "build"))
+# The build for this Python: build-py313 for 3.13, else build.
+_cpp = Path(__file__).resolve().parents[1] / "cpp"
+sys.path.insert(0, str(_cpp / f"build-py{sys.version_info.major}{sys.version_info.minor}"))
+sys.path.insert(1, str(_cpp / "build"))
 avbt = pytest.importorskip("avbt_cpp")
 
 START = 1_699_999_200  # a whole hour, UTC
@@ -52,6 +56,27 @@ def test_live_on_appended_bars_matches_live_on_full_history():
     assert seen > 0
 
 
+def test_decide_while_another_thread_appends():
+    # decide keeps the GIL, so an append from another thread never runs mid-read.
+    ts, o, h, l, c = columns(1)
+    grown = markets(N - 500)
+    live = avbt.Live("state_trend", PARAMS, grown)
+
+    def grow():
+        for i in range(N - 500, N):
+            grown.append_states("BTC", int(ts[i]), avbt.State(6, 1, 2))
+            grown.append("BTC", avbt.Timeframe.Min1, avbt.Bar(int(ts[i]), o[i], h[i], l[i], c[i], 1))
+
+    t = threading.Thread(target=grow)
+    t.start()
+    while t.is_alive():
+        live.decide(int(ts[N - 1]) + 60, [])
+    t.join()
+    orders = live.decide(int(ts[N - 1]) + 60, [])
+    fresh = avbt.Live("state_trend", PARAMS, markets(N)).decide(int(ts[N - 1]) + 60, [])
+    assert [key(x) for x in orders] == [key(x) for x in fresh]
+
+
 def test_append_refuses_out_of_order_ts():
     m = markets(100)
     ts, o, h, l, c = columns(1)
@@ -90,3 +115,13 @@ def test_restart_with_entry_time_makes_the_same_time_exit():
     closes = [now for now in range(entry + 60, exit_ + 60, 60)
               if restarted.decide(now, held)]
     assert closes == [exit_]
+
+
+def test_state_delay_defaults_to_60_and_must_be_whole_minutes():
+    assert avbt.PortfolioSettings().state_delay == 60
+    for bad in (30, 90):
+        settings = avbt.PortfolioSettings(state_delay=bad)
+        with pytest.raises(ValueError):
+            avbt.Live("state_trend", PARAMS, markets(100), settings)
+        with pytest.raises(ValueError):
+            avbt.run("state_trend", PARAMS, markets(100), {"BTC": avbt.Costs(0.0, 0.0)}, settings)

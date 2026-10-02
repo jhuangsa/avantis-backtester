@@ -134,12 +134,14 @@ avbt::Result run(const std::string& name, const py::dict& params, const avbt::Ma
 struct PyLive {
     avbt::Live live;
     const avbt::Markets& markets;
-    PyLive(const std::string& name, const py::dict& params, const avbt::Markets& m) : markets(m) {
+    PyLive(const std::string& name, const py::dict& params, const avbt::Markets& m,
+           const avbt::PortfolioSettings& settings)
+        : markets(m) {
         avbt::Params ps;
         for (auto [k, v] : params) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
         std::string known;
         for (const avbt::StrategyInfo& s : avbt::strategies()) {
-            if (s.name == name) live = s.live(ps);
+            if (s.name == name) live = s.live(ps, settings);
             known += (known.empty() ? "" : ", ") + s.name;
         }
         if (!live.decide) throw std::invalid_argument("no strategy " + name + "; known: " + known);
@@ -148,60 +150,54 @@ struct PyLive {
     }
     std::vector<avbt::Order> decide(int64_t now, const std::vector<avbt::Position>& positions,
                                     const std::optional<avbt::Report>& report) {
-        py::gil_scoped_release release;
+        // Keeps the GIL: update reads markets, which another Python thread
+        // may append to. One bar per call, so the hold is short.
         live.update(markets);
         return live.decide(now, report.value_or(avbt::Report{}), positions);
     }
 };
 
-// optimize over StateTrend. `knobs` is [(name, [values])]: a name is a
-// StateTrendParams field, or "<instrument> signal" for that instrument's
-// signal timeframe. Runs and the best choice come back as {knob: value}.
-py::dict optimize_state_trend(const avbt::Markets& markets, const avbt::MarketCosts& costs,
-                              const avbt::PortfolioSettings& settings,
-                              const avbt::StateTrend::Params& start,
-                              const std::vector<std::pair<std::string, py::list>>& knobs, int rounds) {
-    using P = avbt::StateTrend::Params;
-    std::vector<avbt::Knob<P>> list;
-    for (const auto& [name, values] : knobs) {
-        avbt::Knob<P> k{.name = name};
-        for (py::handle v : values) {
-            if (name.ends_with(" signal")) {
-                auto tf = v.cast<avbt::Timeframe>();
-                std::string instrument = name.substr(0, name.size() - 7);
-                k.labels.push_back(avbt::name(tf));
-                k.choices.push_back([=](P& p) { p.signal[instrument] = tf; });
-            } else {
-                k.labels.push_back(py::str(v));
-                auto value = py::reinterpret_borrow<py::object>(v);
-                std::string field = name;
-                k.choices.push_back([=](P& p) {
-                    py::cast(&p, py::return_value_policy::reference).attr(field.c_str()) = value;
-                });
-            }
-        }
-        list.push_back(std::move(k));
+py::dict to_dict(const avbt::Params& ps) {
+    py::dict d;
+    for (const auto& [k, v] : ps) d[k.c_str()] = from_value(v);
+    return d;
+}
+
+// avbt::optimize. knobs is {name: [values]}. The search runs without the
+// GIL; progress(round, rounds, sharpe, best) takes it. A falsy return other
+// than None stops the search; None (no return) goes on. An exception it
+// raises stops the search and reaches the caller.
+py::dict optimize(const std::string& name, const py::dict& start, const py::dict& knobs,
+                  const avbt::Markets& markets, const avbt::MarketCosts& costs,
+                  const avbt::PortfolioSettings& settings, int rounds, const py::object& progress) {
+    avbt::Params ps;
+    for (auto [k, v] : start) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+    std::vector<avbt::Knob> list;
+    for (auto [k, values] : knobs) {
+        avbt::Knob knob{k.cast<std::string>()};
+        for (py::handle v : values) knob.values.push_back(to_value(knob.name, v));
+        list.push_back(std::move(knob));
     }
-    auto s = avbt::optimize<avbt::StateTrend>(start, list, markets, costs, settings, rounds);
-    auto named = [&](const std::vector<int>& choice) {
-        py::dict d;
-        for (std::size_t k = 0; k < list.size(); ++k) d[list[k].name.c_str()] = list[k].labels[choice[k]];
-        return d;
-    };
+    avbt::Progress call;
+    if (!progress.is_none()) {
+        call = [&](int r, int total, double sharpe, const avbt::Params& best) {
+            py::gil_scoped_acquire gil;
+            py::object out = progress(r, total, sharpe, to_dict(best));
+            return out.is_none() || py::bool_(out);
+        };
+    }
+    avbt::Search s;
+    {
+        py::gil_scoped_release release;
+        s = avbt::optimize(name, ps, list, markets, costs, settings, rounds, call);
+    }
     py::list runs;
     for (const avbt::Run& r : s.runs) {
-        py::dict d = named(r.choice);
-        d["round"] = r.round;
-        d["sharpe"] = r.sharpe;
-        runs.append(d);
+        runs.append(py::dict(py::arg("round") = r.round, py::arg("params") = to_dict(r.params),
+                             py::arg("sharpe") = r.sharpe));
     }
-    py::dict out;
-    out["best"] = s.best;
-    out["choice"] = named(s.choice);
-    out["sharpe"] = s.sharpe;
-    out["timeframe"] = avbt::name(s.timeframe);
-    out["runs"] = runs;
-    return out;
+    return py::dict(py::arg("best") = to_dict(s.best), py::arg("sharpe") = s.sharpe,
+                    py::arg("runs") = runs, py::arg("timeframe") = s.timeframe);
 }
 
 }  // namespace
@@ -240,16 +236,18 @@ PYBIND11_MODULE(avbt_cpp, m) {
 
     py::class_<avbt::PortfolioSettings>(m, "PortfolioSettings")
         .def(py::init([](double starting_balance, double risk_per_trade, double hard_stop,
-                         bool scale_risk_with_leverage) {
+                         bool scale_risk_with_leverage, int64_t state_delay) {
                  return avbt::PortfolioSettings{starting_balance, risk_per_trade, hard_stop,
-                                                scale_risk_with_leverage};
+                                                scale_risk_with_leverage, state_delay};
              }),
              py::arg("starting_balance") = 10000.0, py::arg("risk_per_trade") = 0.01,
-             py::arg("hard_stop") = 0.30, py::arg("scale_risk_with_leverage") = false)
+             py::arg("hard_stop") = 0.30, py::arg("scale_risk_with_leverage") = false,
+             py::arg("state_delay") = 60)
         .def_readwrite("starting_balance", &avbt::PortfolioSettings::starting_balance)
         .def_readwrite("risk_per_trade", &avbt::PortfolioSettings::risk_per_trade)
         .def_readwrite("hard_stop", &avbt::PortfolioSettings::hard_stop)
-        .def_readwrite("scale_risk_with_leverage", &avbt::PortfolioSettings::scale_risk_with_leverage);
+        .def_readwrite("scale_risk_with_leverage", &avbt::PortfolioSettings::scale_risk_with_leverage)
+        .def_readwrite("state_delay", &avbt::PortfolioSettings::state_delay);
 
     py::class_<avbt::StateTrend::Params>(m, "StateTrendParams")
         .def(py::init<>())
@@ -424,7 +422,11 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("name", &avbt::Param::name)
         .def_property_readonly("default", [](const avbt::Param& p) { return from_value(p.value); })
         .def_readonly("min", &avbt::Param::min)
-        .def_readonly("max", &avbt::Param::max);
+        .def_readonly("max", &avbt::Param::max)
+        .def_property_readonly("type", [](const avbt::Param& p) {
+            const char* names[] = {"bool", "int", "float", "str", "timeframe", "timeframes"};
+            return names[p.value.index()];
+        });
 
     py::class_<avbt::StrategyInfo>(m, "StrategyInfo")
         .def_readonly("name", &avbt::StrategyInfo::name)
@@ -432,8 +434,9 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("timeframes", &avbt::StrategyInfo::timeframes);
 
     py::class_<PyLive>(m, "Live")
-        .def(py::init<const std::string&, const py::dict&, const avbt::Markets&>(), py::arg("name"),
-             py::arg("params"), py::arg("markets"), py::keep_alive<1, 4>())
+        .def(py::init<const std::string&, const py::dict&, const avbt::Markets&, const avbt::PortfolioSettings&>(),
+             py::arg("name"), py::arg("params"), py::arg("markets"),
+             py::arg("settings") = avbt::PortfolioSettings{}, py::keep_alive<1, 4>())
         .def("decide", &PyLive::decide, py::arg("now"), py::arg("positions"), py::arg("report") = py::none());
 
     m.def("strategies", &avbt::strategies, py::return_value_policy::reference);
@@ -441,8 +444,13 @@ PYBIND11_MODULE(avbt_cpp, m) {
           py::arg("settings") = avbt::PortfolioSettings{});
     m.attr("version") = avbt::version;
     m.def("sharpe", &avbt::sharpe, py::arg("result"));
-    m.def("optimize_state_trend", &optimize_state_trend, py::arg("markets"), py::arg("costs"),
-          py::arg("settings"), py::arg("start"), py::arg("knobs"), py::arg("rounds"));
+    m.def("optimize", &optimize, py::arg("name"), py::arg("start"), py::arg("knobs"), py::arg("markets"),
+          py::arg("costs"), py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none());
+    m.def("summary", [](const avbt::Result& r) {
+        avbt::Summary s = avbt::summary(r);
+        return py::dict(py::arg("sharpe") = s.sharpe, py::arg("total_return") = s.total_return,
+                        py::arg("max_drawdown") = s.max_drawdown, py::arg("trades") = s.trades);
+    }, py::arg("result"));
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));

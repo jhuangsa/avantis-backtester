@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,9 @@ struct PortfolioSettings {
     // When true, a trade risks risk_per_trade * leverage of the balance, so
     // 5x leverage makes and loses 5 times as much as 1x. ADR 0015.
     bool scale_risk_with_leverage = false;
+    // Seconds back from now at which a strategy reads state labels; a whole
+    // number of minutes, at least 60, for labels that arrive late. ADR 0012.
+    int64_t state_delay = 60;
 };
 
 // Fractions of notional charged at the open fill and at the close fill.

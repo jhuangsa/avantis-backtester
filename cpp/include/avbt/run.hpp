@@ -33,7 +33,8 @@ struct Live {
 };
 
 template <Strategy S>
-Live live_of(S strategy) {
+Live live_of(S strategy, PortfolioSettings settings = {}) {
+    use_settings(strategy, settings);
     auto s = std::make_shared<S>(std::move(strategy));
     return {[s](const Markets& m) { s->prepare(m); }, [s](const Markets& m) { s->update(m); },
             [s](int64_t now, const Report& r, const std::vector<Position>& p) { return s->decide(now, r, p); }};
@@ -46,7 +47,7 @@ struct StrategyInfo {
     std::vector<Param> params;
     std::vector<Timeframe> timeframes;
     std::function<Result(const Params&, const Markets&, const MarketCosts&, PortfolioSettings)> run;
-    std::function<Live(const Params&)> live;
+    std::function<Live(const Params&, PortfolioSettings)> live;
 };
 
 namespace detail {
@@ -122,10 +123,10 @@ StrategyInfo single(std::string name, std::vector<Field<typename S::Params>> fie
                 strategy.params = build(name, fields, given);
                 return backtest(strategy, m, c, s);
             },
-            [=](const Params& given) {
+            [=](const Params& given, PortfolioSettings s) {
                 S strategy;
                 strategy.params = build(name, fields, given);
-                return live_of(std::move(strategy));
+                return live_of(std::move(strategy), s);
             }};
 }
 
@@ -152,7 +153,7 @@ StrategyInfo combined(std::string name, std::vector<Field<typename A::Params>> f
                 auto strategy = make(given);
                 return backtest(strategy, m, c, s);
             },
-            [=](const Params& given) { return live_of(make(given)); }};
+            [=](const Params& given, PortfolioSettings s) { return live_of(make(given), s); }};
 }
 
 constexpr double inf = std::numeric_limits<double>::infinity();
@@ -218,17 +219,23 @@ inline const std::vector<StrategyInfo>& strategies() {
     return table;
 }
 
-// Builds the strategy `name` from params and backtests it. Throws
-// std::invalid_argument for an unknown name (the message lists the known
-// ones), an unknown param, a value of the wrong type or out of range, or bad costs.
-inline Result run(const std::string& name, const Params& params, const Markets& markets,
-                  const MarketCosts& costs, PortfolioSettings settings) {
+// The table row named `name`. Throws std::invalid_argument for an unknown
+// name; the message lists the known ones.
+inline const StrategyInfo& strategy(const std::string& name) {
     std::string known;
     for (const StrategyInfo& s : strategies()) {
-        if (s.name == name) return s.run(params, markets, costs, settings);
+        if (s.name == name) return s;
         known += (known.empty() ? "" : ", ") + s.name;
     }
     throw std::invalid_argument("no strategy " + name + "; known: " + known);
+}
+
+// Builds the strategy `name` from params and backtests it. Throws
+// std::invalid_argument for an unknown name, an unknown param, a value of
+// the wrong type or out of range, or bad costs.
+inline Result run(const std::string& name, const Params& params, const Markets& markets,
+                  const MarketCosts& costs, PortfolioSettings settings) {
+    return strategy(name).run(params, markets, costs, settings);
 }
 
 }

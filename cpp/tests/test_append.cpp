@@ -1,4 +1,5 @@
 // Markets::append and append_states: growth, pointer validity, refusals.
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -65,6 +66,17 @@ int main() {
     Markets months = Markets::make({Market{"BTC", {m1}}});
     CHECK(throws([&] { months.append("BTC", Timeframe::Month1, Bar{86400, 1, 1, 1, 1, 60}); }));
     months.append("BTC", Timeframe::Month1, Bar{2678400, 1, 1, 1, 1, 60});
+
+    // Out-of-order times and NaN prices are refused, at make and at append.
+    Bars back = b;
+    back.ts = {60, 0};
+    CHECK(throws([&] { Markets::make({Market{"ETH", {back}}}); }));
+    Bars nan = b;
+    nan.close[1] = std::nan("");
+    CHECK(throws([&] { Markets::make({Market{"ETH", {nan}}}); }));
+    CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{180, 1, std::nan(""), 1, 1, 1}); }));
+    CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{60, 1, 1, 1, 1, 1}); }));
+    CHECK(base->ts.size() == 3);
 
     if (failures == 0) std::printf("test_append: all passed\n");
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

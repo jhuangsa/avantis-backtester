@@ -107,7 +107,7 @@ cpp/
 │   ├── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
 │   ├── run.hpp               the strategy table, strategies(), and run
 │   ├── version.hpp           the engine version
-│   └── optimize.hpp          sharpe, Knob, and optimize, the greedy search
+│   └── optimize.hpp          sharpe, summary, Knob, and optimize, the greedy search
 ├── src/
 │   ├── indicators.cpp        indicator code
 │   ├── markets.cpp           Markets::make and its lookups
@@ -762,19 +762,25 @@ Daily Sharpe from clock time, the same on bars of every length. Step `i` closes 
 
 One parameter the search may change. `choices[i]` is a function that writes one value into a `P`, and `labels[i]` is that value as text for printing, since a function cannot be read back. A parameter with no knob keeps its value in `start`.
 
-### `struct Run` and `template <class P> struct Search`
+### `struct Knob`, `struct Run`, `struct Search`, `Progress`
 
-A `Run` is one backtest: its `round`, its `choice` (`choice[k]` indexes knob `k`'s choices), and its `sharpe`. `Search` holds the `best` params, their `choice` and `sharpe`, the base `timeframe`, and every `Run`.
+A `Knob` is a param name and the `Value`s it may take, as `run` takes them; a combined strategy's names start with `a.` or `b.`. A `Run` is one backtest: its `round`, its `params`, and its `sharpe`. `Search` holds the `best` params, their `sharpe`, the base `timeframe`, and every `Run`. `Progress` is called after each round with (round, rounds, best Sharpe, best params); returning false stops the search after that round.
 
-### `template <Strategy S> Search optimize(start, knobs, markets, costs, settings, rounds)`
+### `Search optimize(name, start, knobs, markets, costs, settings, rounds, progress = {})`
 
-1. Every knob starts at its first choice. That is round 0.
+Tunes the table strategy `name`. It first checks every knob value (name, type, range) and throws `std::invalid_argument` naming the bad knob. It then calls `search`, which scores each run by `sharpe`:
+
+1. Every knob starts at its first value. That is round 0.
 2. The pairs of knobs are listed in a fixed order: (0,1), (0,2), …, (1,2), ….
 3. Round `r` takes the next pair and runs every combination of its two knobs, the other knobs at the best so far. Any higher Sharpe becomes the best. NaN never does.
 4. A combination already run is not run again.
-5. The search stops after `rounds` rounds, or sooner, when a full pass over the pairs brings no gain.
+5. The search stops after `rounds` rounds, or sooner, when a full pass over the pairs brings no gain, or when `progress` returns false.
 
-Each run makes a fresh `S`, so `prepare` starts clean.
+### `Summary summary(result)`
+
+Sharpe, total return (ending equity / starting equity − 1), max drawdown (the largest fall from an equity peak, a positive fraction), and trade count.
+
+Each run builds a fresh strategy, so `prepare` starts clean.
 
 ## avbt_py.cpp: the Python module
 
@@ -809,7 +815,8 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `Side`, `Cause` | The two enums, now Python enums. `Cause` has `Stop`, `TrailingStop`, `PartialTakeProfit`, `TakeProfit`, `Liquidation`, `HardStop`, `Order`, and `EndOfData`. |
 | `version` | The engine version, the same constant C++ stamps on every `Result`. |
 | `sharpe` | `(result)`: `avbt::sharpe`. `Result(equity, timeframe, clock)` builds a result to score. |
-| `optimize_state_trend` | `(markets, costs, settings, start, knobs, rounds)`: `optimize<StateTrend>`. `markets` is a `Markets`. `knobs` is `[(name, [values])]`; a name is a `StateTrendParams` field, or `"BTC signal"` for that instrument's signal timeframe. Returns `{"best", "choice", "sharpe", "timeframe", "runs"}`; `choice` and each run name every knob's value. |
+| `optimize` | `(name, start, knobs, markets, costs, settings, rounds, progress=None)`: `avbt::optimize`. `start` is a params dict; `knobs` is `{name: [values]}`. The search runs without the GIL; `progress(round, rounds, sharpe, best)` takes it, and an exception it raises stops the search and reaches the caller. Returns `{"best", "sharpe", "runs", "timeframe"}`; `best` passes to `run`, and each run is `{"round", "params", "sharpe"}`. |
+| `summary` | `(result)`: `avbt::summary` as a dict `{"sharpe", "total_return", "max_drawdown", "trades"}`. |
 | `sma`, `pct_change`, `prior_max`, `prior_min` | Take a numpy array and a number; return a numpy array. |
 | `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier` | Take `Bars`; return a numpy array. Fields and sides are strings. |
 
@@ -829,22 +836,25 @@ These example scripts use the module:
 
 - `examples/veranta_rules_cpp.py` compares C++ trades with the Python engine's, trade by trade.
 - `examples/state_trend.py` runs `StateTrend` on BTC and ETH with states from `examples/clickhouse_data.py`.
-- `examples/state_trend_optimize.py` tunes `StateTrend` with `optimize_state_trend` on June and July 2026, then scores the winner on August.
+- `examples/state_trend_optimize.py` tunes `StateTrend` with `optimize` on June and July 2026, then scores the winner on August.
 - `examples/veranta_cpp_chart.py` writes `examples/veranta_cpp_chart.html`: a summary table (trades, win rate, return, maximum drawdown, Sharpe ratio, exit causes) and a chart for each strategy.
 
 ---
 
 ## Live: one bar at a time
 
-A live caller runs the same strategy code as a backtest. Build `Markets` from history and `prepare` the strategy (in Python, build `Live(name, params, markets)`). Then, each time a bar closes:
+A live caller runs the same strategy code as a backtest. In order:
 
-1. Append the closed bars with `Markets::append`, and the new state labels with `Markets::append_states`.
-2. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
-3. Send the orders it returns to the exchange.
+1. Build `Markets` from the history, and build the strategy once: `Live(name, params, markets, settings)` in Python, or `prepare` in C++. This warms up every indicator on the history.
+2. Each time a bar closes, append the closed bars with `markets.append(...)` and the new state labels with `markets.append_states(...)`.
+3. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
+4. Send the orders it returns to the exchange.
+
+`decide` does not take the full history on each call. Indicators update one bar at a time ([ADR 0017](../docs/adr/0017-indicators-update-one-bar-at-a-time.md)), so passing all bars every call would recompute everything and slow down as the history grows. Stops and take profits stay the caller's (see Stops live below).
 
 `positions` are the caller's open positions, with at least `instrument` and `side`. `report` is optional: Python's `decide(now, positions, report=None)` passes an empty `Report` when it is left out, and no strategy reads it today.
 
-**State labels arrive late.** A label reaches the caller about 7 minutes after its minute. Append each label when it arrives. `decide` reads only labels already appended, so it acts on the labels it has, as a trader would. A backtest has every label on time; the label-delay setting (a separate issue) is what makes a backtest see labels as late as live does.
+**State labels arrive late.** A label is stamped with the start of its minute and reaches the caller some minutes after that minute closes. Append each label when it arrives. `decide` reads only labels already appended, so it acts on the labels it has, as a trader would. Set `settings.state_delay` (seconds, a whole number of minutes, at least 60) to match how late live labels arrive. `state_delay` counts back from now to the label's timestamp: at 10:00 with 420, the engine reads the label stamped 9:53. A label stamped 9:53 closes at 9:54, so if labels arrive 7 minutes after their minute closes, use 480. Then a backtest reads each label as late as live does. The default is 60.
 
 **Restart.** A fresh `Live` rebuilds every indicator from the history, but not the bar on which a strategy opened a position it now holds. Give each open position its `entry_time` (UTC second of the entry fill), as in `Position("ZORA", Side.Short, entry_time=...)`. A strategy with a time exit counts the bars from there, so its time exit lands on the same bar as without the restart. Without `entry_time` (it is `None`), the strategy cannot count the bars, so the position gets no time exit; rule exits, stops, and take profits still apply. A strategy reads only positions on its own instrument, so a caller may pass all of the account's positions.
 
@@ -920,7 +930,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_state_trend_opens_long` | a long opens at the next open, closes when the market label turns, and a `Shock` blocks it |
 | `test_state_trend_signal` | `signal` set to `Hour1` matches the default, `Min1` changes the result, and a missing timeframe throws |
 
-**`test_optimize.cpp`**: `sharpe` counts days with no bars as 0% returns, is −∞ after equity touches 0 during a day, NaN with fewer than 30 daily returns or on flat equity, and is the same on 1-minute and 1-hour bars; on a toy strategy whose best is known, `optimize` finds it, runs each combination once, stops after a pass with no gain, and runs one pair in one round.
+**`test_optimize.cpp`**: `sharpe` counts days with no bars as 0% returns, is −∞ after equity touches 0 during a day, NaN with fewer than 30 daily returns or on flat equity, and is the same on 1-minute and 1-hour bars; on a toy strategy whose best is known, `search` finds it, runs each combination once, stops after a pass with no gain, runs one pair in one round, gives the same runs for the same inputs, and stops when `progress` returns false.
 
 **`test_strategies.cpp`**: one hand-built series per strategy, so that the entry fires on a known bar and the exit happens for a known cause. It also checks that a strategy entering on the bar a level closed its trade fills at the next open, that `Combined` on two markets makes the same trades as each strategy alone, and that `Combined` on one market takes turns. Restart checks: a strategy ignores a position on another instrument, a position with no entry time gets no time exit while an entry time of 0 does, a fresh `Combined` gives a held position to the strategy that trades it, and `StateTrend` keeps a position while its average has no value.
 

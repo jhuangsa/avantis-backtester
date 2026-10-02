@@ -1,6 +1,6 @@
 # A greedy pair search tunes a strategy
 
-`optimize` in `cpp/include/avbt/optimize.hpp` searches a strategy's params for the highest Sharpe. A knob is one parameter and the values it may take. The search changes two knobs at a time, because a full grid over every knob grows too fast to run.
+`optimize` in `cpp/include/avbt/optimize.hpp` searches any strategy in the table, by name, for the params with the highest Sharpe. A knob is one param name and the values it may take, as `run` takes them. The search changes two knobs at a time, because a full grid over every knob grows too fast to run.
 
 The rules:
 
