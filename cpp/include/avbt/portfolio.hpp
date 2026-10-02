@@ -1,5 +1,7 @@
 #pragma once
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,6 +17,9 @@ inline constexpr double liquidation_loss = 0.85;
 // Veranta refuses a stop further than this fraction of collateral, so the
 // stop always sits before the liquidation price.
 inline constexpr double max_stop_loss = 0.80;
+
+// Position::entry_time when the entry time is not known. 0 is a real time.
+inline constexpr int64_t unknown_time = std::numeric_limits<int64_t>::min();
 
 // Chosen once when the portfolio is made; fixed for the run.
 struct PortfolioSettings {
@@ -58,12 +63,14 @@ struct Position {
     // Price gap the stop keeps behind the best high (low for a short); 0 for
     // a stop that never moves.
     double trail = 0.0;
+    // True once the trail has moved the stop; only then is a stop-out a TrailingStop.
+    bool trailed = false;
     // Fraction of the position the take profit closes. A partial take profit
     // fires once: the take profit becomes NaN and the rest runs on its stop.
     double take_profit_fraction = 1.0;
-    // UTC seconds of the entry fill; 0 when unknown. A strategy restarted
-    // live reads it to find the signal bar of a time exit.
-    int64_t entry_time = 0;
+    // UTC seconds of the entry fill; unknown_time when unknown. A strategy
+    // restarted live reads it to find the signal bar of a time exit.
+    int64_t entry_time = unknown_time;
 };
 
 // What closed a position. Order is a strategy's close order; EndOfData is
@@ -127,7 +134,7 @@ public:
               double stop_price, double leverage,
               double take_profit_price = std::nan(""), Fees fees = {},
               double trail = 0.0, double take_profit_fraction = 1.0,
-              int64_t entry_time = 0);
+              int64_t entry_time = unknown_time);
 
     // Adds rate * size * price to the position's holding costs. NaN adds
     // nothing; no position does nothing.

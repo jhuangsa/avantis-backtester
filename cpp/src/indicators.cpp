@@ -127,7 +127,8 @@ double PctChange::update(double x) {
     if (static_cast<int>(window_.size()) == lag_) {
         double old = window_.front();
         window_.pop_front();
-        out = (x - old) / old;
+        // a zero start has no percent change
+        if (old != 0.0) out = (x - old) / old;
     }
     window_.push_back(x);
     return out;
@@ -145,7 +146,7 @@ double BarChange::update(double now, double then) {
         double old = then_.front();
         then_.pop_front();
         // a missing value leaves the bar undefined
-        if (std::isfinite(now) && std::isfinite(old)) {
+        if (std::isfinite(now) && std::isfinite(old) && old != 0.0) {
             out = now / old - 1;
         }
     }

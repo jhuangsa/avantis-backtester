@@ -195,6 +195,15 @@ void test_trailing_stop() {
     check_value("trail stop balance", p.report().balance, 10100.0);
 }
 
+// A trail that never moved the stop: the stop-out is a plain Stop.
+void test_unmoved_trail_is_a_stop() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), Fees{}, 5.0);
+    auto closed = p.check({Quote{"BTC", 100.0, 100.0, 94.0, 96.0}});
+    check_true("unmoved trail cause", closed.size() == 1 && closed[0].cause == Cause::Stop);
+    check_value("unmoved trail fill", closed.at(0).exit_price, 95.0);
+}
+
 // A short trails above the lows: a bar down to 90 drops the 105 stop to 95.
 void test_trailing_stop_short() {
     Portfolio p(PortfolioSettings{});
@@ -256,6 +265,7 @@ int main() {
     test_take_profit_wrong_side();
     test_fees();
     test_trailing_stop();
+    test_unmoved_trail_is_a_stop();
     test_trailing_stop_short();
     test_partial_take_profit();
     test_open_refuses_bad_trail_or_fraction();

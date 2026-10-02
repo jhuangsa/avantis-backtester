@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -51,10 +52,10 @@ struct Toy {
     }
 };
 
-// 600 minutes rising with a wiggle, so hourly returns vary.
+// 32 days of minutes rising with a wiggle, so daily returns vary.
 Markets rising() {
     Bars b;
-    for (int i = 0; i < 600; ++i) {
+    for (int i = 0; i < 32 * 1440; ++i) {
         double c = 100 + 0.01 * i + std::sin(i);
         b.ts.push_back(60 * i);
         for (auto* v : {&b.open, &b.high, &b.low, &b.close}) v->push_back(c);
@@ -72,9 +73,64 @@ Knob<Toy::Params> knob(const std::string& name, int Toy::Params::*field, std::ve
     return k;
 }
 
+// Daily bars on days 0-15, rising 10% a day, then no bars until day 30.
+// The 31 midnights give 15 returns of 0.1 and 15 of 0. With k of n returns
+// equal to x and the rest 0, mean / sd = sqrt(k (n - 1) / (n (n - k))),
+// here sqrt(29 / 30).
+void test_sharpe_gap_days_are_flat() {
+    Result r{.timeframe = Timeframe::Day1};
+    double e = 100;
+    for (int d = 0; d <= 15; ++d, e *= 1.1) {
+        r.clock.push_back(86400 * d);
+        r.equity.push_back(e);
+    }
+    r.clock.push_back(86400 * 30);
+    r.equity.push_back(r.equity.back());
+    check_value("gap sharpe", sharpe(r), std::sqrt(29.0 / 30 * 365));
+}
+
+// Steps of the given timeframe over len(days) days from 0; every step on day
+// d has equity days[d].
+Result path(Timeframe tf, const std::vector<double>& days) {
+    Result r{.timeframe = tf};
+    for (int64_t t = 0; t < 86400 * static_cast<int64_t>(days.size()); t += seconds(tf)) {
+        r.clock.push_back(t);
+        r.equity.push_back(days[t / 86400]);
+    }
+    return r;
+}
+
+// 16 days rising 10% a day, then 16 flat days: 15 returns of 0.1, 16 of 0.
+std::vector<double> rise_then_flat() {
+    std::vector<double> days = {100};
+    for (int d = 1; d < 32; ++d) days.push_back(d <= 15 ? days.back() * 1.1 : days.back());
+    return days;
+}
+
+// Equity at 0 for one hour on day 10 counts, though it is back by midnight.
+void test_sharpe_wipe_out_is_minus_infinity() {
+    Result r = path(Timeframe::Hour1, rise_then_flat());
+    r.equity[24 * 10 + 5] = 0;
+    check_value("wipe-out", sharpe(r) == -std::numeric_limits<double>::infinity(), 1);
+}
+
+// 30 days of hourly bars give midnights 1 to 30: 29 returns, too few.
+void test_sharpe_short_run_is_nan() {
+    std::vector<double> days = rise_then_flat();
+    days.resize(30);
+    check_value("short run nan", std::isnan(sharpe(path(Timeframe::Hour1, days))), 1);
+}
+
 void test_sharpe_flat_is_nan() {
-    Result r{.equity = std::vector<double>(600, 100.0)};
-    check_value("flat equity nan", std::isnan(sharpe(r)), 1);
+    check_value("flat nan", std::isnan(sharpe(path(Timeframe::Hour1, std::vector<double>(40, 100.0)))), 1);
+}
+
+// 32 days give midnights 1 to 32: 31 returns, 15 of 0.1 and 16 of 0, so
+// mean / sd = sqrt(15 * 30 / (31 * 16)) on any bar length.
+void test_sharpe_same_on_minute_and_hour_bars() {
+    double expected = std::sqrt(15.0 * 30 / (31 * 16) * 365);
+    check_value("hour sharpe", sharpe(path(Timeframe::Hour1, rise_then_flat())), expected);
+    check_value("minute sharpe", sharpe(path(Timeframe::Min1, rise_then_flat())), expected);
 }
 
 void test_optimize() {
@@ -100,7 +156,11 @@ void test_optimize() {
 }  // namespace
 
 int main() {
+    test_sharpe_gap_days_are_flat();
+    test_sharpe_wipe_out_is_minus_infinity();
+    test_sharpe_short_run_is_nan();
     test_sharpe_flat_is_nan();
+    test_sharpe_same_on_minute_and_hour_bars();
     test_optimize();
     if (failures == 0) std::printf("all optimize checks passed\n");
     return failures == 0 ? 0 : 1;

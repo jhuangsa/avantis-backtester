@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -12,19 +13,32 @@
 
 namespace avbt {
 
-// Sharpe of the equity sampled hourly, annualized over 24 * 365 hours, as in
-// examples/state_trend.py. NaN when equity never moves.
+// Daily Sharpe from clock time. Step i closes at clock[i] + seconds(timeframe).
+// At each UTC midnight from the first close to the last, the day's value is
+// the equity of the last step closed at or before it, so a day with no bars
+// is a 0% return; the part-days at either end are dropped. -inf when any
+// equity is at or below 0; NaN with fewer than 30 daily returns or none that
+// vary; else mean / sample sd * sqrt(365). ADR 0013.
 inline double sharpe(const Result& r) {
-    std::size_t step = std::max<int64_t>(1, 3600 / seconds(r.timeframe));
-    std::vector<double> returns;
-    for (std::size_t i = step; i < r.equity.size(); i += step) {
-        returns.push_back(r.equity[i] / r.equity[i - step] - 1);
+    for (double e : r.equity) {
+        if (e <= 0) return -std::numeric_limits<double>::infinity();
     }
-    if (returns.size() < 2) return std::nan("");
+    if (r.equity.empty()) return std::nan("");
+    const int64_t day = 86400, len = seconds(r.timeframe);
+    int64_t first = r.clock.front() + len, last = r.clock.back() + len;
+    std::vector<double> days;
+    std::size_t i = 0;
+    for (int64_t midnight = (first + day - 1) / day * day; midnight <= last; midnight += day) {
+        while (i + 1 < r.clock.size() && r.clock[i + 1] + len <= midnight) ++i;
+        days.push_back(r.equity[i]);
+    }
+    std::vector<double> returns;
+    for (std::size_t k = 1; k < days.size(); ++k) returns.push_back(days[k] / days[k - 1] - 1);
+    if (returns.size() < 30) return std::nan("");
     double mean = 0, var = 0;
     for (double x : returns) mean += x / returns.size();
     for (double x : returns) var += (x - mean) * (x - mean) / (returns.size() - 1);
-    return var > 0 ? mean / std::sqrt(var) * std::sqrt(24.0 * 365) : std::nan("");
+    return var > 0 ? mean / std::sqrt(var) * std::sqrt(365.0) : std::nan("");
 }
 
 // One parameter the optimizer may change. choices[i] writes one value into

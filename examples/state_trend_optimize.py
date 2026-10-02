@@ -57,12 +57,6 @@ def market(pair_id: int, start: str, end: str):
     return bars, avbt_cpp.States(first, *codes)
 
 
-def sharpe(r) -> float:
-    """Sharpe from hourly equity returns, 24 * 365 hours a year."""
-    returns = pd.Series(r.equity[::60]).pct_change().dropna()
-    return returns.mean() / returns.std() * (24 * 365) ** 0.5 if returns.std() > 0 else float("nan")
-
-
 def trend_by_hour(pair_id: int, start: str, end: str) -> pd.Series:
     """The trend label at each hour, as text."""
     first, _, trend, _ = ch.clean_states(ch.states(pair_id, START, END))
@@ -143,7 +137,7 @@ if __name__ == "__main__":
         r = runs[label]
         fig.add_trace(go.Scatter(x=pd.to_datetime(r.clock[::60], unit="s"), y=r.equity[::60],
                                  line_color=color, name=f"{label} tuning: {len(r.trades)} trades, "
-                                 f"Sharpe {sharpe(r):.2f}"), row=1, col=1)
+                                 f"Sharpe {avbt_cpp.sharpe(r):.2f}"), row=1, col=1)
     trades = pd.DataFrame(trade_rows(runs["after"]))
     for i, (name, pid) in enumerate(PAIRS.items()):
         row = 2 + 2 * i
@@ -241,7 +235,7 @@ behind it (the ATR taken at entry), and never moves back. A trailed stop fills a
 </ol>
 <table><tr><th></th><th>Parameters</th><th>Trades</th><th>Ending balance</th><th>Sharpe</th></tr>
 """ + "".join(f"<tr><td>{label}</td><td>{params(p)}</td><td>{len(runs[label].trades)}</td>"
-              f"<td>{runs[label].ending_balance:,.2f}</td><td>{sharpe(runs[label]):.2f}</td></tr>"
+              f"<td>{runs[label].ending_balance:,.2f}</td><td>{avbt_cpp.sharpe(runs[label]):.2f}</td></tr>"
               for label, p in [("before", default), ("after", tuned)]) + f"""</table>
 <p><b>Most of the gain is early.</b> {early} of the {len(trades)} tuned trades, and
 {early_gain:.0%} of the gain, came in the first two weeks of June, when both markets fell fast;

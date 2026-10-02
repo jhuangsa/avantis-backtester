@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import base64
 import io
+import sys
 import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candles import clean_candles  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "data" / "candles"
@@ -88,7 +92,7 @@ def minutes(pair_id: int, start: str, end: str) -> pd.DataFrame:
     GROUP BY timestamp ORDER BY timestamp
     SETTINGS max_execution_time = 60
     FORMAT CSVWithNames"""
-    return _cached(cache_path(pair_id, "1m", start, end), ORIGINAL, sql)
+    return clean_candles(_cached(cache_path(pair_id, "1m", start, end), ORIGINAL, sql))[0]
 
 
 def states(pair_id: int, start: str, end: str) -> pd.DataFrame:

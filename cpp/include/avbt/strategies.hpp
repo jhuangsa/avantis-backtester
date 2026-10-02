@@ -28,19 +28,23 @@ namespace avbt {
 // of N closes at the open after bar signal + N, the bar of the fill being
 // bar 1. signal_bar is read only while a position is open and is overwritten
 // by every new entry, so a trade closed by a level leaves no stale memory.
+// Only a position on params.instrument is the strategy's; others are ignored.
 // A strategy prepared after a restart has no signal_bar for a position it
 // did not open; it takes the bar closed at the position's entry_time, the
-// bar it would have signalled on, since the fill is at the next open.
+// bar it would have signalled on, since the fill is at the next open. With
+// no entry_time, or one before the bars, there is no time exit.
 template <class S>
 std::vector<Order> decide_entry_and_exits(S& s, int64_t now, const std::vector<Position>& positions) {
     int t = last_closed(*s.bars, now);
     if (t < 0 || t == s.seen_bar) return {};
     s.seen_bar = t;
     const auto& p = s.params;
-    if (!positions.empty()) {
-        if (s.signal_bar < 0 && positions.front().entry_time > 0)
-            s.signal_bar = last_closed(*s.bars, positions.front().entry_time);
-        bool timed = p.time_exit > 0 && t - s.signal_bar >= p.time_exit;
+    auto mine = std::find_if(positions.begin(), positions.end(),
+                             [&](const Position& x) { return x.instrument == p.instrument; });
+    if (mine != positions.end()) {
+        if (s.signal_bar < 0 && mine->entry_time != unknown_time)
+            s.signal_bar = last_closed(*s.bars, mine->entry_time);
+        bool timed = p.time_exit > 0 && s.signal_bar >= 0 && t - s.signal_bar >= p.time_exit;
         bool ruled = false;
         if constexpr (requires { s.rule_exit(t); }) ruled = s.rule_exit(t);
         if (timed || ruled) return {Order{.kind = Order::Kind::Close, .instrument = p.instrument}};
@@ -249,29 +253,57 @@ struct GoldTrendLong {
     }
 };
 
+// True when the strategy can trade this instrument: its params.instrument,
+// or for a strategy without one, its own trades().
+template <class S>
+bool trades(const S& s, const std::string& instrument) {
+    if constexpr (requires { s.trades(instrument); }) return s.trades(instrument);
+    else return s.params.instrument == instrument;
+}
+
 // Two strategies run as one, in one account. The strategy whose open
 // order starts a position owns it: only the owner sees that position and
 // decides its exits. While one owns an instrument, the other's opens on it
 // are dropped, so two strategies on one instrument take turns. Their orders
 // go out together, A's first, so A wins when both open on the same bar.
+// A position does not name its owner, so after a restart a position with no
+// owner goes to A if A trades its instrument, else to B if B does. An open
+// claims its instrument until a later decide finds no position there (a
+// level closed it, or the open was refused); a repeat decide at the same
+// `now`, before the fill, keeps the claim.
 template <Strategy A, Strategy B>
 struct Combined {
     A a;
     B b;
     // Instrument -> 0 for A, 1 for B.
     std::map<std::string, int> owner;
+    // Instrument -> the `now` of the decide whose open claimed it.
+    std::map<std::string, int64_t> claimed;
 
-    void prepare(const Markets& m) { a.prepare(m); b.prepare(m); }
+    void prepare(const Markets& m) { owner.clear(); claimed.clear(); a.prepare(m); b.prepare(m); }
     void update(const Markets& m) { a.update(m); b.update(m); }
+    bool trades(const std::string& instrument) const {
+        return avbt::trades(a, instrument) || avbt::trades(b, instrument);
+    }
     std::vector<Order> decide(int64_t now, const Report& report, const std::vector<Position>& positions) {
-        // A position gone (a level closed it, or the open was refused) frees its instrument.
+        auto held = [&](const std::string& instrument) {
+            return std::any_of(positions.begin(), positions.end(),
+                               [&](const Position& p) { return p.instrument == instrument; });
+        };
         std::erase_if(owner, [&](const auto& o) {
-            return std::none_of(positions.begin(), positions.end(),
-                                [&](const Position& p) { return p.instrument == o.first; });
+            if (held(o.first)) return false;
+            auto c = claimed.find(o.first);
+            return c == claimed.end() || c->second != now;
         });
+        std::erase_if(claimed, [&](const auto& c) { return !owner.contains(c.first) || held(c.first); });
+        for (const Position& p : positions) {
+            if (owner.contains(p.instrument)) continue;
+            if (avbt::trades(a, p.instrument)) owner[p.instrument] = 0;
+            else if (avbt::trades(b, p.instrument)) owner[p.instrument] = 1;
+        }
         std::vector<Order> orders;
-        take(orders, a.decide(now, report, owned(positions, 0)), 0);
-        take(orders, b.decide(now, report, owned(positions, 1)), 1);
+        take(orders, a.decide(now, report, owned(positions, 0)), 0, now);
+        take(orders, b.decide(now, report, owned(positions, 1)), 1, now);
         return orders;
     }
 
@@ -285,11 +317,12 @@ private:
         return out;
     }
 
-    void take(std::vector<Order>& orders, std::vector<Order> mine, int who) {
+    void take(std::vector<Order>& orders, std::vector<Order> mine, int who, int64_t now) {
         for (Order& o : mine) {
             if (o.kind == Order::Kind::Open) {
                 if (owner.contains(o.instrument)) continue;
                 owner[o.instrument] = who;
+                claimed[o.instrument] = now;
             }
             orders.push_back(std::move(o));
         }
@@ -302,8 +335,8 @@ private:
 // with the bias when the market label is a trend that way or a breakout, the
 // minute close breaks the prior high (low for a short), and volatility is not
 // extreme or a shock. Exit when the bias stops matching the position or the
-// market label turns to the opposite trend. Unknown never opens a trade and
-// never forces an exit. Stop: atr_stops signal ATRs; take profit: reward
+// market label turns to the opposite trend. Unknown, or an average with no
+// value yet, never opens a trade and never forces a bias exit. Stop: atr_stops signal ATRs; take profit: reward
 // times the stop, closing take_fraction of the trade; the rest, and any
 // trade with trail_atrs above 0, trails its stop trail_atrs signal ATRs
 // (taken at entry) behind the best price. With flip, every trade takes the other side; the signals,
@@ -343,6 +376,9 @@ struct StateTrend {
     };
     std::vector<Lines> lines;
 
+    bool trades(const std::string& instrument) const {
+        return std::any_of(lines.begin(), lines.end(), [&](const Lines& l) { return l.instrument == instrument; });
+    }
     void prepare(const Markets& m) {
         lines.clear();
         update(m);
@@ -396,8 +432,10 @@ struct StateTrend {
             if (open != positions.end()) {
                 // The side the signal wanted, before any flip.
                 bool is_long = (open->side == Side::Long) != params.flip;
-                // An Unknown label is no evidence either way, so it keeps the position.
-                bool bias_gone = s.trend != TrendState::Unknown && (is_long ? !up : !down);
+                // An Unknown label, or an average with no value yet, is no
+                // evidence either way, so it keeps the position.
+                bool bias_gone = s.trend != TrendState::Unknown && defined(l.average[h]) &&
+                                 (is_long ? !up : !down);
                 bool turned = s.market == (is_long ? MarketState::TrendingDown : MarketState::TrendingUp);
                 if (bias_gone || turned) {
                     orders.push_back(Order{.kind = Order::Kind::Close, .instrument = l.instrument});

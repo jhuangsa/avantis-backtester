@@ -161,6 +161,7 @@ void test_no_lookahead() {
 void test_timeframe_carried() {
     Bars b = flat_bars({100, 101});
     b.timeframe = Timeframe::Min15;
+    b.ts = {0, 900};
     UpDown s;
     check_true("timeframe", backtest(s, one(b), PortfolioSettings{}).timeframe == Timeframe::Min15);
 }
@@ -190,6 +191,13 @@ void test_markets_refuse_misaligned() {
     check_true("timestamps that do not rise refused", refused({{"X", {falling}}}));
     Bars ragged = a;
     ragged.low.pop_back();
+    Bars gap = flat_bars({100, 101, 102});
+    gap.ts[2] += 3600;
+    check_true("missing base bar refused", refused({{"X", {gap}}}));
+    Bars sparse_four = flat_bars({100, 101});
+    sparse_four.timeframe = Timeframe::Hour4;
+    sparse_four.ts = {0, 8 * 3600};
+    check_true("missing coarser bar passes", !refused({{"X", {a, sparse_four}}}));
     check_true("ragged columns refused", refused({{"X", {ragged}}}));
 }
 

@@ -1,11 +1,28 @@
 #include "avbt/markets.hpp"
 
 #include <algorithm>
+#include <ctime>
 #include <stdexcept>
 
 namespace avbt {
 
 namespace {
+
+// True when the base bars skip a bar: two in a row more than one bar apart.
+// A month varies in length, so Month1 is never checked.
+bool skips(Timeframe tf, int64_t before, int64_t after) {
+    return tf != Timeframe::Month1 && after - before != seconds(tf);
+}
+
+// True when a bar opening at ts starts on its timeframe's grid: a whole multiple of
+// its length, or for Month1 the first second of a UTC month.
+bool on_grid(Timeframe tf, int64_t ts) {
+    if (tf != Timeframe::Month1) return ts % seconds(tf) == 0;
+    std::time_t t = static_cast<std::time_t>(ts);
+    std::tm u{};
+    gmtime_r(&t, &u);
+    return u.tm_mday == 1 && u.tm_hour == 0 && u.tm_min == 0 && u.tm_sec == 0;
+}
 
 // Throws when the bars are empty, their columns differ in length, or their timestamps do not rise.
 void check_bars(const std::string& instrument, const Bars& b) {
@@ -37,6 +54,21 @@ Markets Markets::make(std::vector<Market> markets) {
         }
         for (std::size_t k = 0; k < m.timeframes.size(); ++k) {
             check_bars(m.instrument, m.timeframes[k]);
+            // A missing base bar would drop orders and hold old prices; ADR 0011.
+            const Bars& b = m.timeframes[k];
+            // Off-grid base bars let one market's step run ahead of another's; issue 8.
+            for (std::size_t i = 0; k == 0 && i < b.ts.size(); ++i) {
+                if (!on_grid(b.timeframe, b.ts[i])) {
+                    throw std::invalid_argument(m.instrument + ", " + name(b.timeframe) +
+                                                ": base bar ts " + std::to_string(b.ts[i]) + " is off the timeframe grid");
+                }
+            }
+            for (std::size_t i = 1; k == 0 && i < b.ts.size(); ++i) {
+                if (skips(b.timeframe, b.ts[i - 1], b.ts[i])) {
+                    throw std::invalid_argument(m.instrument + ", " + name(b.timeframe) +
+                                                ": a base bar is missing after ts " + std::to_string(b.ts[i - 1]));
+                }
+            }
             // Strictly finer to coarser, which also rules out a timeframe twice.
             if (k > 0 && m.timeframes[k].timeframe <= m.timeframes[k - 1].timeframe) {
                 throw std::invalid_argument(m.instrument + ": timeframes must go finest first, each once");
@@ -109,6 +141,12 @@ void Markets::append(const std::string& instrument, Timeframe tf, const Bar& bar
         throw std::invalid_argument(where + "volume must be given exactly when the bars have volume");
     }
     bool is_base = b == &m.timeframes.front();
+    if (is_base && !b->ts.empty() && skips(tf, b->ts.back(), bar.ts)) {
+        throw std::invalid_argument(where + "appended base bar must be one bar after the last");
+    }
+    if (is_base && !on_grid(tf, bar.ts)) {
+        throw std::invalid_argument(where + "base bar ts " + std::to_string(bar.ts) + " is off the timeframe grid");
+    }
     bool extends = is_base && (clock_.empty() || bar.ts > clock_.back());
     if (is_base && !extends && !std::binary_search(clock_.begin(), clock_.end(), bar.ts)) {
         throw std::invalid_argument(where + "base bar ts is before the clock's end and not on the clock");

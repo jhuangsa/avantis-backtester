@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cpp" / "build"))
 avbt = pytest.importorskip("avbt_cpp")
 
-START = 1_700_000_400  # a whole hour, UTC
+START = 1_699_999_200  # a whole hour, UTC
 
 
 def bars(tf, n, seed):
@@ -87,6 +87,18 @@ def test_param_types(setup):
     avbt.run("rally_short", {"instrument": "DYM", "timeframe": avbt.Timeframe.Hour1}, markets, costs)
 
 
+
+def test_numpy_param_types(setup):
+    markets, costs = setup
+    params = {"average": np.int64(20), "reward": np.float32(2.5), "flip": np.bool_(True),
+              "atr_period": np.arange(14, 15)[0]}
+    assert np.array_equal(avbt.run("state_trend", params, markets, costs).equity,
+        avbt.run("state_trend", {"average": 20, "reward": 2.5, "flip": True, "atr_period": 14},
+                 markets, costs).equity)
+    # An integer too big for an int converts; the range check then refuses it.
+    with pytest.raises(ValueError, match="outside"):
+        avbt.run("state_trend", {"min_stop": 2**40}, markets, costs)
+
 def test_errors(setup):
     markets, costs = setup
     with pytest.raises(ValueError):
@@ -95,5 +107,18 @@ def test_errors(setup):
         avbt.run("state_trend", {"no_such": 1}, markets, costs)
     with pytest.raises(ValueError):
         avbt.run("state_trend", {}, markets, {k: v for k, v in costs.items() if k != "BTC"})
+    one = np.ones(1)
+    off = avbt.Bars(avbt.Timeframe.Hour1, np.array([START + 1800]), one, one, one, one, np.full(1, 60, dtype=np.int32))
+    with pytest.raises(ValueError, match="off the timeframe grid"):
+        avbt.Markets([avbt.Market("BTC", [off])])
     assert {c.name for c in avbt.Cause.__members__.values()} >= {"PartialTakeProfit", "TrailingStop"}
     assert avbt.Side.Long != avbt.Side.Short
+
+
+def test_sharpe():
+    # 32 days of hourly equity: 16 days rising 10% a day, then 16 flat days.
+    # The 31 daily returns are 15 of 0.1 and 16 of 0: sqrt(15 * 30 / (31 * 16) * 365).
+    days = 100 * 1.1 ** np.minimum(np.arange(32), 15)
+    clock = 3600 * np.arange(32 * 24, dtype=np.int64)
+    r = avbt.Result(equity=np.repeat(days, 24), timeframe=avbt.Timeframe.Hour1, clock=clock)
+    assert avbt.sharpe(r) == pytest.approx(18.197505146266263)

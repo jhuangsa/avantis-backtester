@@ -12,6 +12,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <limits>
 #include <map>
 #include <optional>
 #include <variant>
@@ -82,12 +83,21 @@ avbt::Side side_named(const std::string& name) {
 }
 
 // One Python param value as an avbt::Value. bool is checked before int,
-// since a Python bool is an int.
+// since a Python bool is an int. numpy numbers count: a numpy bool is a
+// bool, any integer (numbers.Integral) an int, any other real a double. An
+// integer too big for an int becomes a double.
 avbt::Value to_value(const std::string& name, py::handle v) {
-    if (py::isinstance<py::bool_>(v)) return v.cast<bool>();
+    py::module_ numbers = py::module_::import("numbers");
+    bool numpy_bool = py::hasattr(v, "dtype") && py::str(v.attr("dtype").attr("kind")).cast<std::string>() == "b";
+    if (py::isinstance<py::bool_>(v) || numpy_bool) return py::reinterpret_borrow<py::object>(v).attr("__bool__")().cast<bool>();
     if (py::isinstance<avbt::Timeframe>(v)) return v.cast<avbt::Timeframe>();
-    if (py::isinstance<py::int_>(v)) return v.cast<int>();
-    if (py::isinstance<py::float_>(v)) return v.cast<double>();
+    if (py::isinstance(v, numbers.attr("Integral"))) {
+        py::int_ i(py::reinterpret_borrow<py::object>(v));
+        long long x = i.cast<long long>();
+        if (x >= std::numeric_limits<int>::min() && x <= std::numeric_limits<int>::max()) return static_cast<int>(x);
+        return py::float_(i).cast<double>();
+    }
+    if (py::isinstance(v, numbers.attr("Real"))) return py::float_(py::reinterpret_borrow<py::object>(v)).cast<double>();
     if (py::isinstance<py::str>(v)) return v.cast<std::string>();
     if (py::isinstance<py::dict>(v)) return v.cast<std::map<std::string, avbt::Timeframe>>();
     throw std::invalid_argument("param " + name + " has a type avbt cannot take");
@@ -313,9 +323,9 @@ PYBIND11_MODULE(avbt_cpp, m) {
 
     py::class_<avbt::Position>(m, "Position")
         .def(py::init([](std::string instrument, avbt::Side side, double entry_price, double size,
-                             int64_t entry_time) {
+                             std::optional<int64_t> entry_time) {
                  avbt::Position p;
-                 p.entry_time = entry_time;
+                 p.entry_time = entry_time.value_or(avbt::unknown_time);
                  p.instrument = std::move(instrument);
                  p.side = side;
                  p.entry_price = entry_price;
@@ -323,12 +333,18 @@ PYBIND11_MODULE(avbt_cpp, m) {
                  return p;
              }),
              py::arg("instrument"), py::arg("side"), py::arg("entry_price") = 0.0, py::arg("size") = 0.0,
-             py::arg("entry_time") = 0)
+             py::arg("entry_time") = py::none())
         .def_readwrite("instrument", &avbt::Position::instrument)
         .def_readwrite("side", &avbt::Position::side)
         .def_readwrite("entry_price", &avbt::Position::entry_price)
         .def_readwrite("size", &avbt::Position::size)
-        .def_readwrite("entry_time", &avbt::Position::entry_time);
+        // None when the entry time is unknown.
+        .def_property("entry_time",
+                      [](const avbt::Position& p) -> std::optional<int64_t> {
+                          if (p.entry_time == avbt::unknown_time) return std::nullopt;
+                          return p.entry_time;
+                      },
+                      [](avbt::Position& p, std::optional<int64_t> t) { p.entry_time = t.value_or(avbt::unknown_time); });
 
     py::class_<avbt::Report>(m, "Report")
         .def(py::init<>())
@@ -391,6 +407,12 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("cause", &avbt::Trade::cause);
 
     py::class_<avbt::Result>(m, "Result")
+        .def(py::init([](const InArray& equity, avbt::Timeframe timeframe, const py::array_t<int64_t>& clock) {
+                 return avbt::Result{.equity = std::vector<double>(equity.data(), equity.data() + equity.size()),
+                                     .timeframe = timeframe,
+                                     .clock = std::vector<int64_t>(clock.data(), clock.data() + clock.size())};
+             }),
+             py::arg("equity"), py::arg("timeframe"), py::arg("clock"))
         .def_readonly("trades", &avbt::Result::trades)
         .def_property_readonly("equity", [](const avbt::Result& r) { return to_numpy(std::vector(r.equity)); })
         .def_readonly("ending_balance", &avbt::Result::ending_balance)
@@ -418,6 +440,7 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.def("run", &run, py::arg("name"), py::arg("params") = py::dict(), py::arg("markets"), py::arg("costs"),
           py::arg("settings") = avbt::PortfolioSettings{});
     m.attr("version") = avbt::version;
+    m.def("sharpe", &avbt::sharpe, py::arg("result"));
     m.def("optimize_state_trend", &optimize_state_trend, py::arg("markets"), py::arg("costs"),
           py::arg("settings"), py::arg("start"), py::arg("knobs"), py::arg("rounds"));
 

@@ -3,6 +3,7 @@
 
 #include "avbt/strategies.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -187,6 +188,84 @@ void test_combined_one_instrument_takes_turns() {
     check_trade("turns", r, 0, 2, 5, 110, Cause::Order);
 }
 
+Position held(const std::string& instrument, Side side, int64_t entry_time = unknown_time) {
+    Position p;
+    p.instrument = instrument;
+    p.side = side;
+    p.entry_time = entry_time;
+    return p;
+}
+
+bool has(const std::vector<Order>& orders, Order::Kind kind, const std::string& instrument) {
+    return std::any_of(orders.begin(), orders.end(),
+                       [&](const Order& o) { return o.kind == kind && o.instrument == instrument; });
+}
+
+void test_other_instruments_are_ignored() {
+    // A ZORA position is not CampaignShort's: it still opens AVNT on the
+    // bar-1 rise, and sends no close for a market it does not hold.
+    CampaignShort s;
+    s.params.lag = 1;
+    Markets m = Markets::make({{"AVNT", {flat_bars({100, 110, 110})}}});
+    s.prepare(m);
+    auto orders = s.decide(2 * 3600, Report{}, {held("ZORA", Side::Short, 0)});
+    check_true("opens own market", orders.size() == 1 && has(orders, Order::Kind::Open, "AVNT"));
+}
+
+void test_restart_entry_time() {
+    // Bars from -3h. With no entry time there is no time exit; an entry
+    // time of 0 is real: the signal bar is the one closed at 0, bar 2, so
+    // the 2-bar time exit fires at bar 5.
+    Markets m = Markets::make({{"AVNT", {flat_bars({100, 100, 100, 100, 100, 100}, -3)}}});
+    CampaignShort unknown;
+    unknown.params.time_exit = 2;
+    unknown.prepare(m);
+    check_true("unknown entry time keeps",
+               unknown.decide(3 * 3600, Report{}, {held("AVNT", Side::Short)}).empty());
+    CampaignShort known = CampaignShort{};
+    known.params.time_exit = 2;
+    known.prepare(m);
+    check_true("entry time 0 times out",
+               has(known.decide(3 * 3600, Report{}, {held("AVNT", Side::Short, 0)}), Order::Kind::Close, "AVNT"));
+}
+
+void test_combined_restart_finds_owner() {
+    // A fresh Combined given an AVNT position: CampaignShort trades AVNT, so
+    // it owns the position and closes it at its time exit; SpikeShort never sees it.
+    Markets m = Markets::make({{"AVNT", {flat_bars({100, 100, 100, 100, 100})}},
+                               {"DYM", {flat_bars({100, 100, 100, 100, 100})}}});
+    Combined<CampaignShort, SpikeShort> both;
+    both.a.params.time_exit = 2;
+    both.prepare(m);
+    auto orders = both.decide(5 * 3600, Report{}, {held("AVNT", Side::Short, 3600)});
+    check_true("restart closes", has(orders, Order::Kind::Close, "AVNT"));
+    check_true("restart no second open", !has(orders, Order::Kind::Open, "AVNT"));
+    check_true("restart owner is A", both.owner.at("AVNT") == 0);
+}
+
+void test_state_trend_holds_before_average() {
+    // 30 rising hourly bars, fewer than the 50 the average needs, all labelled
+    // uptrend. With no average there is no evidence, so the long is kept.
+    int hours = 30;
+    std::vector<double> closes;
+    for (int i = 0; i < hours * 60; ++i) closes.push_back(100 + i * 0.01);
+    Bars minute = flat_bars(closes);
+    minute.timeframe = Timeframe::Min1;
+    for (int i = 0; i < hours * 60; ++i) minute.ts[i] = i * 60;
+    std::vector<double> hourly;
+    for (int h = 0; h < hours; ++h) hourly.push_back(closes[h * 60 + 59]);
+    Bars hour = flat_bars(hourly);
+    std::size_t n = closes.size();
+    Markets m = Markets::make({Market{"BTC", {minute, hour},
+                                      States{0, std::vector(n, MarketState::TrendingUp),
+                                             std::vector(n, TrendState::Uptrend),
+                                             std::vector(n, VolatilityState::Normal)}}});
+    StateTrend s;
+    s.prepare(m);
+    auto orders = s.decide(hours * 3600, Report{}, {held("BTC", Side::Long, 0)});
+    check_true("no close before the average", orders.empty());
+}
+
 }
 
 int main() {
@@ -198,6 +277,10 @@ int main() {
     test_entry_on_level_bar_fills_next_open();
     test_combined_matches_each_alone();
     test_combined_one_instrument_takes_turns();
+    test_other_instruments_are_ignored();
+    test_restart_entry_time();
+    test_combined_restart_finds_owner();
+    test_state_trend_holds_before_average();
     if (failures == 0) std::printf("all strategy checks passed\n");
     return failures == 0 ? 0 : 1;
 }

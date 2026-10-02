@@ -118,8 +118,10 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         if (!stop_hit) {
             p.mark_price = q.close;
             if (p.trail > 0.0) {
-                p.stop_price = is_long ? std::max(p.stop_price, q.high - p.trail)
+                double moved = is_long ? std::max(p.stop_price, q.high - p.trail)
                                        : std::min(p.stop_price, q.low + p.trail);
+                if (moved != p.stop_price) p.trailed = true;
+                p.stop_price = moved;
             }
             continue;
         }
@@ -130,7 +132,7 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         bool liquidated = is_long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
         out.push_back(*close(p.instrument, liquidated ? p.liquidation_price : fill, 1.0,
                              liquidated ? Cause::Liquidation
-                             : p.trail > 0.0 ? Cause::TrailingStop : Cause::Stop));
+                             : p.trailed ? Cause::TrailingStop : Cause::Stop));
     }
 
     double floor = settings_.starting_balance * (1.0 - settings_.hard_stop);

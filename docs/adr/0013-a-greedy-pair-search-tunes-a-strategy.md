@@ -9,7 +9,7 @@ The rules:
 - Any higher Sharpe wins, however small the gain. NaN, from equity that never moves, never wins.
 - Every run counts, however few trades it has.
 - Only the signal timeframe is a knob. The base timeframe, and with it the clock, the fills, and the stops, stays fixed.
-- Sharpe samples equity hourly and annualizes over 24 · 365 hours, as `examples/state_trend.py` did.
+- Sharpe samples equity at each UTC midnight and annualizes over 365 days, so bars of every length give the same scale. Equity at or below 0 at any step scores −∞, so a wiped-out run ranks worst.
 
 Consequences:
 

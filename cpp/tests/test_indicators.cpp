@@ -199,6 +199,11 @@ void test_pct_change_lag_two() {
                  {NaN, NaN, 0.5, -0.5});
 }
 
+// A zero start has no percent change, not an infinite one.
+void test_pct_change_from_zero() {
+    check_series("pct_change from 0", avbt::pct_change({0, 5, 10}, 1), {NaN, NaN, 1.0});
+}
+
 void test_pct_change_lag_longer_than_series() {
     check_series("pct_change lag > size", avbt::pct_change({1, 2}, 24),
                  {NaN, NaN});
@@ -540,6 +545,7 @@ int main() {
 
     test_pct_change_lag_one();
     test_pct_change_lag_two();
+    test_pct_change_from_zero();
     test_pct_change_lag_longer_than_series();
     test_pct_change_empty();
     test_pct_change_rejects_bad_lag(0);

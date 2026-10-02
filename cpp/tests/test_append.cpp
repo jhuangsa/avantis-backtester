@@ -36,6 +36,8 @@ int main() {
     CHECK(ms.bar_at("BTC", 2) == 2);
 
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{120, 1, 1, 1, 1, 1}); }));
+    // A base bar one minute late would leave a missing bar.
+    CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{240, 1, 1, 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min5, Bar{300, 1, 1, 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("ETH", Timeframe::Min1, Bar{180, 1, 1, 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{180, 1, 1, 1, 1, 1, 5.0}); }));
@@ -46,6 +48,23 @@ int main() {
     CHECK(ms.states("BTC")->market.size() == 2);
     CHECK(throws([&] { ms.append_states("BTC", 180, State{}); }));
     CHECK(throws([&] { ms.append_states("BTC", 150, State{}); }));
+
+    // Base bars off their timeframe grid would let one market's clock step skip ahead; issue 8.
+    Bars off = h;
+    off.ts = {1800};
+    CHECK(throws([&] { Markets::make({Market{"ETH", {off}}}); }));
+    Bars m1 = h;
+    m1.timeframe = Timeframe::Month1;
+    m1.ts = {86400};
+    CHECK(throws([&] { Markets::make({Market{"ETH", {m1}}}); }));
+    Bars late = h;
+    late.ts = {7200};
+    Markets two = Markets::make({Market{"BTC", {h}}, Market{"ETH", {late}}});
+    CHECK(two.clock().size() == 2);
+    m1.ts = {0};
+    Markets months = Markets::make({Market{"BTC", {m1}}});
+    CHECK(throws([&] { months.append("BTC", Timeframe::Month1, Bar{86400, 1, 1, 1, 1, 60}); }));
+    months.append("BTC", Timeframe::Month1, Bar{2678400, 1, 1, 1, 1, 60});
 
     if (failures == 0) std::printf("test_append: all passed\n");
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -38,7 +38,8 @@ public:
     // a name, or a market has no timeframes, has a timeframe twice or out of
     // order, has a base timeframe that differs from the first market's, or
     // has a Bars that is empty, has columns of different lengths, or has
-    // timestamps that do not rise, or has states whose three columns differ
+    // timestamps that do not rise, or has a base bar missing (two base bars
+    // more than one bar apart; not checked on Month1), or has states whose three columns differ
     // in length or whose start is not a whole minute. The message names the market.
     static Markets make(std::vector<Market> markets);
 
@@ -65,7 +66,7 @@ public:
     // base() stay valid. Throws std::invalid_argument, naming the market,
     // when the market or timeframe does not exist, ts is not later than
     // that timeframe's last bar, volume is given when the column is empty or
-    // missing when it is not, or a base bar's ts is not on the clock yet and
+    // missing when it is not, a base bar is not one bar after the last, or a base bar's ts is not on the clock yet and
     // earlier than its end (that would shift the clock's steps).
     void append(const std::string& instrument, Timeframe tf, const Bar& bar);
     // Adds one minute's labels at ts. With no states yet, they start at ts.

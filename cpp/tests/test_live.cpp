@@ -174,7 +174,7 @@ int main() {
     spike.params.spike = 0.01;
     replay("SpikeShort", spike, veranta);
     replay("GoldTrendLong", GoldTrendLong{}, veranta);
-    replay("Combined", Combined<CampaignShort, SpikeShort>{campaign, spike, {}}, veranta);
+    replay("Combined", Combined<CampaignShort, SpikeShort>{campaign, spike, {}, {}}, veranta);
 
     // StateTrend on two markets, 1-minute and 1-hour bars, over 5 days.
     int m = 5 * 24 * 60;

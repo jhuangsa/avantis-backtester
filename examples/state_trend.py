@@ -49,9 +49,7 @@ def market(pair_id: int):
 def report(r, label: str) -> None:
     """Print one run's balance, Sharpe, and trades per instrument."""
     trades = pd.DataFrame(trade_rows(r))
-    # Sharpe from hourly equity returns, 24 * 365 hours a year.
-    returns = pd.Series(r.equity[::60]).pct_change().dropna()
-    sharpe = returns.mean() / returns.std() * (24 * 365) ** 0.5 if returns.std() > 0 else float("nan")
+    sharpe = avbt_cpp.sharpe(r)
     print(f"StateTrend {label}, {START} to {END}, base timeframe {avbt_cpp.timeframe_name(r.timeframe)}")
     print(f"ending balance {r.ending_balance:.2f} from 10000.00, Sharpe {sharpe:.2f}")
     if trades.empty:

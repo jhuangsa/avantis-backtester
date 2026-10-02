@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cpp" / "build"))
 avbt = pytest.importorskip("avbt_cpp")
 
-START = 1_700_000_400  # a whole hour, UTC
+START = 1_699_999_200  # a whole hour, UTC
 N = 3000
 
 
@@ -62,6 +62,8 @@ def test_append_refuses_out_of_order_ts():
 def test_position_and_order_kinds():
     p = avbt.Position("BTC", avbt.Side.Short)
     assert p.instrument == "BTC" and p.side == avbt.Side.Short
+    assert p.entry_time is None  # unknown, not 0
+    assert avbt.Position("BTC", avbt.Side.Short, entry_time=0).entry_time == 0
     assert avbt.Order().kind == avbt.Order.Kind.Open
 
 

@@ -84,6 +84,8 @@ import avbt_cpp as avbt
 | `Costs(open_fee, close_fee, hold_long=None, hold_short=None)` | Fees as fractions of the position's value, charged at the open and at the close. `hold_long` and `hold_short` give the cost of holding through each base bar, also as a fraction (positive pays, negative receives). Every market needs one. |
 | `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30, scale_risk_with_leverage=False)` | The account. `risk_per_trade` is the fraction of the balance lost if a stop is hit. `hard_stop`: once equity falls this fraction below the starting balance, every position closes and trading stops for good. |
 
+Prices must have no NaN. The engine does not check, and one NaN gives wrong levels, a dead ATR, or a NaN position. Pass minute candles through `clean_candles` in `examples/candles.py` before you resample them.
+
 ### 2. Run a backtest
 
 ```python

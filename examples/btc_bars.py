@@ -2,6 +2,7 @@
 
 The minutes come from ClickHouse, table market_data.avantis_candles_1m, pair 1.
 Two sources overlap. On a shared timestamp pyth_lazer wins over benchmarks.
+Broken candles are made flat by clean_candles and count as missing.
 Empty buckets are filled with the previous close and minutes_with_data = 0.
 The raw CSV is cached at data/candles/btc_1m.csv.
 
@@ -18,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from candles import clean_candles
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "btc_1m.csv"
@@ -81,8 +84,10 @@ def fetch_minutes(refresh: bool = False) -> pd.DataFrame:
 
 
 def dedupe(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per ts. pyth_lazer beats benchmarks; within a source, first wins."""
-    rank = np.where(df["source"] == "pyth_lazer", 0, 1)
+    """One row per ts. A row with all four prices beats one with a NaN; then
+    pyth_lazer beats benchmarks; within a source, first wins."""
+    broken = df[["open", "high", "low", "close"]].isna().any(axis=1).to_numpy()
+    rank = 2 * broken + np.where(df["source"] == "pyth_lazer", 0, 1)
     out = (
         df.assign(_rank=rank, _pos=np.arange(len(df)))
         .sort_values(["ts", "_rank", "_pos"], kind="stable")
@@ -97,13 +102,17 @@ def resample(minutes_df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Bucket minutes into UTC bars, left-labelled, and fill empty buckets forward."""
     idx = pd.to_datetime(minutes_df["ts"], unit="s", utc=True)
     s = minutes_df.set_index(idx)
+    if "filled" in s:
+        s = s.assign(real=s["close"].where(~s["filled"].astype(bool)))
+    else:
+        s = s.assign(real=s["close"])
     r = s.resample(rule, label="left", closed="left")
     bars = pd.DataFrame({
         "open": r["open"].first(),
         "high": r["high"].max(),
         "low": r["low"].min(),
         "close": r["close"].last(),
-        "minutes_with_data": r["close"].count().astype("int32"),
+        "minutes_with_data": r["real"].count().astype("int32"),
     })
     real = bars["minutes_with_data"] > 0
     bars = bars.loc[real.idxmax(): real[::-1].idxmax()]
@@ -121,14 +130,15 @@ def resample(minutes_df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
 def load_bars(rule: str, refresh: bool = False) -> tuple[pd.DataFrame, int]:
     """Fetch, dedupe, and resample. Returns the bars and the bar size in seconds."""
-    bars = resample(dedupe(fetch_minutes(refresh)), rule)
+    minutes = clean_candles(dedupe(fetch_minutes(refresh)))[0]
+    bars = resample(minutes, rule)
     bar_size_seconds = int(pd.Timedelta(pd.tseries.frequencies.to_offset(rule)).total_seconds())
     return bars, bar_size_seconds
 
 
 if __name__ == "__main__":
     raw = fetch_minutes()
-    clean = dedupe(raw)
+    clean = clean_candles(dedupe(raw))[0]
     print(f"raw rows: {len(raw)}")
     print(f"deduped rows: {len(clean)}")
     for rule in ("1h", "1D"):
