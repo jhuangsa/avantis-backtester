@@ -7,7 +7,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cpp" / "build"))
+# The build for this Python: build-py313 for 3.13, else build.
+_cpp = Path(__file__).resolve().parents[1] / "cpp"
+sys.path.insert(0, str(_cpp / f"build-py{sys.version_info.major}{sys.version_info.minor}"))
+sys.path.insert(1, str(_cpp / "build"))
 avbt = pytest.importorskip("avbt_cpp")
 
 START = 1_699_999_200  # a whole hour, UTC
@@ -112,6 +115,14 @@ def test_errors(setup):
     off = avbt.Bars(avbt.Timeframe.Hour1, np.array([START + 1800]), one, one, one, one, np.full(1, 60, dtype=np.int32))
     with pytest.raises(ValueError, match="off the timeframe grid"):
         avbt.Markets([avbt.Market("BTC", [off])])
+    two, m60 = np.ones(2), np.full(2, 60, dtype=np.int32)
+    back = avbt.Bars(avbt.Timeframe.Hour1, np.array([START + 3600, START]), two, two, two, two, m60)
+    with pytest.raises(ValueError, match="timestamps must rise"):
+        avbt.Markets([avbt.Market("BTC", [back])])
+    nan = np.array([1.0, np.nan])
+    hole = avbt.Bars(avbt.Timeframe.Hour1, START + 3600 * np.arange(2), two, two, two, nan, m60)
+    with pytest.raises(ValueError, match="NaN"):
+        avbt.Markets([avbt.Market("BTC", [hole])])
     assert {c.name for c in avbt.Cause.__members__.values()} >= {"PartialTakeProfit", "TrailingStop"}
     assert avbt.Side.Long != avbt.Side.Short
 
@@ -165,6 +176,28 @@ def test_optimize_progress(setup):
     s = avbt.optimize("state_trend", {}, knobs, markets, costs, avbt.PortfolioSettings(), 5, progress)
     assert [c[:2] for c in calls] == [(1, 5), (2, 5)]
     assert calls[-1][2] == s["best"] and s["runs"][-1]["round"] <= 2
+
+
+def test_optimize_progress_none_goes_on(setup):
+    markets, costs = setup
+    calls = []
+    knobs = {**KNOBS, "breakout": [30, 15]}
+    avbt.optimize("state_trend", {}, knobs, markets, costs, avbt.PortfolioSettings(), 3,
+                  lambda r, *_: calls.append(r))
+    assert calls[:2] == [1, 2]
+
+
+def test_optimize_bad_rounds(setup):
+    markets, costs = setup
+    with pytest.raises(ValueError, match="rounds"):
+        avbt.optimize("state_trend", {}, KNOBS, markets, costs, avbt.PortfolioSettings(), 0)
+
+
+def test_optimize_bad_state_delay(setup):
+    markets, costs = setup
+    bad = avbt.PortfolioSettings(state_delay=30)
+    with pytest.raises(ValueError, match="^state_delay"):
+        avbt.optimize("state_trend", {}, KNOBS, markets, costs, bad, 1)
 
 
 def test_optimize_progress_raises(setup):

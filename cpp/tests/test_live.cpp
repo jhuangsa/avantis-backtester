@@ -191,6 +191,10 @@ int main() {
     Result base = replay("StateTrend", trend, both);
     // Labels read 7 minutes back: live must match, and the trades must move.
     Result late7 = replay("StateTrend delay 420", trend, both, PortfolioSettings{.state_delay = 420});
+    if (base.trades.empty() || late7.trades.empty()) {
+        std::printf("FAIL StateTrend delay 420: no trades to compare\n");
+        return 1;
+    }
     bool moved = base.trades.size() != late7.trades.size() ||
                  base.trades[0].entry_time != late7.trades[0].entry_time;
     if (!moved) {
@@ -202,6 +206,10 @@ int main() {
     pair.a = trend;
     pair.b = trend;
     Result pair7 = replay("Combined delay 420", pair, both, PortfolioSettings{.state_delay = 420});
+    if (pair7.trades.empty()) {
+        std::printf("FAIL Combined delay 420: no trades\n");
+        return 1;
+    }
     if (pair7.trades.size() != late7.trades.size() ||
         pair7.trades[0].entry_time != late7.trades[0].entry_time) {
         ++failures;

@@ -169,6 +169,13 @@ void test_search() {
     check_value("progress calls", seen.size(), 2);
     check_value("progress args", seen[0] == 110 && seen[1] == 210, 1);
     check_value("stopped after round 2", cut.runs.back().round, 2);
+    bool threw = false;
+    try {
+        search({}, knobs, 0, score);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check_value("zero rounds throws", threw, 1);
 }
 
 }  // namespace

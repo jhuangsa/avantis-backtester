@@ -150,7 +150,8 @@ struct PyLive {
     }
     std::vector<avbt::Order> decide(int64_t now, const std::vector<avbt::Position>& positions,
                                     const std::optional<avbt::Report>& report) {
-        py::gil_scoped_release release;
+        // Keeps the GIL: update reads markets, which another Python thread
+        // may append to. One bar per call, so the hold is short.
         live.update(markets);
         return live.decide(now, report.value_or(avbt::Report{}), positions);
     }
@@ -163,7 +164,8 @@ py::dict to_dict(const avbt::Params& ps) {
 }
 
 // avbt::optimize. knobs is {name: [values]}. The search runs without the
-// GIL; progress(round, rounds, sharpe, best) takes it, and an exception it
+// GIL; progress(round, rounds, sharpe, best) takes it. A falsy return other
+// than None stops the search; None (no return) goes on. An exception it
 // raises stops the search and reaches the caller.
 py::dict optimize(const std::string& name, const py::dict& start, const py::dict& knobs,
                   const avbt::Markets& markets, const avbt::MarketCosts& costs,
@@ -180,7 +182,8 @@ py::dict optimize(const std::string& name, const py::dict& start, const py::dict
     if (!progress.is_none()) {
         call = [&](int r, int total, double sharpe, const avbt::Params& best) {
             py::gil_scoped_acquire gil;
-            return progress(r, total, sharpe, to_dict(best)).cast<bool>();
+            py::object out = progress(r, total, sharpe, to_dict(best));
+            return out.is_none() || py::bool_(out);
         };
     }
     avbt::Search s;

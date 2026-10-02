@@ -1,6 +1,7 @@
 #include "avbt/markets.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 #include <stdexcept>
 
@@ -24,7 +25,13 @@ bool on_grid(Timeframe tf, int64_t ts) {
     return u.tm_mday == 1 && u.tm_hour == 0 && u.tm_min == 0 && u.tm_sec == 0;
 }
 
-// Throws when the bars are empty, their columns differ in length, or their timestamps do not rise.
+// True when any of open, high, low, close is NaN.
+bool has_nan(double o, double h, double l, double c) {
+    return std::isnan(o) || std::isnan(h) || std::isnan(l) || std::isnan(c);
+}
+
+// Throws when the bars are empty, their columns differ in length, their
+// timestamps do not rise, or a price is NaN.
 void check_bars(const std::string& instrument, const Bars& b) {
     std::string where = instrument + ", " + name(b.timeframe) + ": ";
     std::size_t n = b.ts.size();
@@ -36,6 +43,11 @@ void check_bars(const std::string& instrument, const Bars& b) {
     }
     for (std::size_t i = 1; i < n; ++i) {
         if (b.ts[i] <= b.ts[i - 1]) throw std::invalid_argument(where + "timestamps must rise");
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        if (has_nan(b.open[i], b.high[i], b.low[i], b.close[i])) {
+            throw std::invalid_argument(where + "price is NaN at ts " + std::to_string(b.ts[i]));
+        }
     }
 }
 
@@ -136,6 +148,9 @@ void Markets::append(const std::string& instrument, Timeframe tf, const Bar& bar
     std::string where = instrument + ", " + name(tf) + ": ";
     if (!b->ts.empty() && bar.ts <= b->ts.back()) {
         throw std::invalid_argument(where + "appended ts must be later than the last bar");
+    }
+    if (has_nan(bar.open, bar.high, bar.low, bar.close)) {
+        throw std::invalid_argument(where + "appended price is NaN");
     }
     if (bar.volume.has_value() != !b->volume.empty()) {
         throw std::invalid_argument(where + "volume must be given exactly when the bars have volume");

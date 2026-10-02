@@ -101,6 +101,7 @@ inline Search search(const Params& start, const std::vector<Knob>& knobs, int ro
         for (int b = a + 1; b < static_cast<int>(knobs.size()); ++b) pairs.push_back({a, b});
     }
     if (pairs.empty()) throw std::invalid_argument("optimize needs at least two knobs");
+    if (rounds < 1) throw std::invalid_argument("rounds must be at least 1, got " + std::to_string(rounds));
 
     auto params_of = [&](const std::vector<int>& choice) {
         Params p = start;
@@ -150,6 +151,8 @@ inline Search optimize(const std::string& name, const Params& start, const std::
                        const Markets& markets, const MarketCosts& costs, PortfolioSettings settings,
                        int rounds, const Progress& progress = {}) {
     const StrategyInfo& info = strategy(name);
+    struct NoLabels {} none;
+    use_settings(none, settings);  // a bad state_delay is named as such, not as a knob
     for (const Knob& k : knobs) {
         for (const Value& v : k.values) {
             try {
