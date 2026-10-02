@@ -197,6 +197,16 @@ int main() {
         ++failures;
         std::printf("FAIL StateTrend delay 420: same trades as delay 60\n");
     }
+    // A combined strategy hands the delay to both halves.
+    Combined<StateTrend, StateTrend> pair;
+    pair.a = trend;
+    pair.b = trend;
+    Result pair7 = replay("Combined delay 420", pair, both, PortfolioSettings{.state_delay = 420});
+    if (pair7.trades.size() != late7.trades.size() ||
+        pair7.trades[0].entry_time != late7.trades[0].entry_time) {
+        ++failures;
+        std::printf("FAIL Combined delay 420: trades differ from StateTrend delay 420\n");
+    }
 
     if (failures == 0) std::printf("test_live: all checks passed\n");
     return failures == 0 ? 0 : 1;

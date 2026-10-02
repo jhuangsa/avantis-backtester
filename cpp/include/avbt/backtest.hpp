@@ -88,6 +88,7 @@ void use_settings(S& s, const PortfolioSettings& p) {
                                     std::to_string(p.state_delay));
     }
     if constexpr (requires { s.state_delay; }) s.state_delay = p.state_delay;
+    if constexpr (requires { s.a; s.b; }) use_settings(s.a, p), use_settings(s.b, p);
 }
 
 template <class S>

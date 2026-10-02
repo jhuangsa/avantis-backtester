@@ -153,7 +153,7 @@ inline Search optimize(const std::string& name, const Params& start, const std::
     for (const Knob& k : knobs) {
         for (const Value& v : k.values) {
             try {
-                info.live({{k.name, v}});
+                info.live({{k.name, v}}, settings);
             } catch (const std::invalid_argument& e) {
                 throw std::invalid_argument("knob " + k.name + ": " + e.what());
             }
