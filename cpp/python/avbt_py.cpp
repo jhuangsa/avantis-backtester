@@ -134,12 +134,14 @@ avbt::Result run(const std::string& name, const py::dict& params, const avbt::Ma
 struct PyLive {
     avbt::Live live;
     const avbt::Markets& markets;
-    PyLive(const std::string& name, const py::dict& params, const avbt::Markets& m) : markets(m) {
+    PyLive(const std::string& name, const py::dict& params, const avbt::Markets& m,
+           const avbt::PortfolioSettings& settings)
+        : markets(m) {
         avbt::Params ps;
         for (auto [k, v] : params) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
         std::string known;
         for (const avbt::StrategyInfo& s : avbt::strategies()) {
-            if (s.name == name) live = s.live(ps);
+            if (s.name == name) live = s.live(ps, settings);
             known += (known.empty() ? "" : ", ") + s.name;
         }
         if (!live.decide) throw std::invalid_argument("no strategy " + name + "; known: " + known);
@@ -240,16 +242,18 @@ PYBIND11_MODULE(avbt_cpp, m) {
 
     py::class_<avbt::PortfolioSettings>(m, "PortfolioSettings")
         .def(py::init([](double starting_balance, double risk_per_trade, double hard_stop,
-                         bool scale_risk_with_leverage) {
+                         bool scale_risk_with_leverage, int64_t state_delay) {
                  return avbt::PortfolioSettings{starting_balance, risk_per_trade, hard_stop,
-                                                scale_risk_with_leverage};
+                                                scale_risk_with_leverage, state_delay};
              }),
              py::arg("starting_balance") = 10000.0, py::arg("risk_per_trade") = 0.01,
-             py::arg("hard_stop") = 0.30, py::arg("scale_risk_with_leverage") = false)
+             py::arg("hard_stop") = 0.30, py::arg("scale_risk_with_leverage") = false,
+             py::arg("state_delay") = 60)
         .def_readwrite("starting_balance", &avbt::PortfolioSettings::starting_balance)
         .def_readwrite("risk_per_trade", &avbt::PortfolioSettings::risk_per_trade)
         .def_readwrite("hard_stop", &avbt::PortfolioSettings::hard_stop)
-        .def_readwrite("scale_risk_with_leverage", &avbt::PortfolioSettings::scale_risk_with_leverage);
+        .def_readwrite("scale_risk_with_leverage", &avbt::PortfolioSettings::scale_risk_with_leverage)
+        .def_readwrite("state_delay", &avbt::PortfolioSettings::state_delay);
 
     py::class_<avbt::StateTrend::Params>(m, "StateTrendParams")
         .def(py::init<>())
@@ -432,8 +436,9 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("timeframes", &avbt::StrategyInfo::timeframes);
 
     py::class_<PyLive>(m, "Live")
-        .def(py::init<const std::string&, const py::dict&, const avbt::Markets&>(), py::arg("name"),
-             py::arg("params"), py::arg("markets"), py::keep_alive<1, 4>())
+        .def(py::init<const std::string&, const py::dict&, const avbt::Markets&, const avbt::PortfolioSettings&>(),
+             py::arg("name"), py::arg("params"), py::arg("markets"),
+             py::arg("settings") = avbt::PortfolioSettings{}, py::keep_alive<1, 4>())
         .def("decide", &PyLive::decide, py::arg("now"), py::arg("positions"), py::arg("report") = py::none());
 
     m.def("strategies", &avbt::strategies, py::return_value_policy::reference);

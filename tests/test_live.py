@@ -90,3 +90,13 @@ def test_restart_with_entry_time_makes_the_same_time_exit():
     closes = [now for now in range(entry + 60, exit_ + 60, 60)
               if restarted.decide(now, held)]
     assert closes == [exit_]
+
+
+def test_state_delay_defaults_to_60_and_must_be_whole_minutes():
+    assert avbt.PortfolioSettings().state_delay == 60
+    for bad in (30, 90):
+        settings = avbt.PortfolioSettings(state_delay=bad)
+        with pytest.raises(ValueError):
+            avbt.Live("state_trend", PARAMS, markets(100), settings)
+        with pytest.raises(ValueError):
+            avbt.run("state_trend", PARAMS, markets(100), {"BTC": avbt.Costs(0.0, 0.0)}, settings)
