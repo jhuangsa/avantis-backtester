@@ -843,15 +843,18 @@ These example scripts use the module:
 
 ## Live: one bar at a time
 
-A live caller runs the same strategy code as a backtest. Build `Markets` from history and `prepare` the strategy (in Python, build `Live(name, params, markets)`). Then, each time a bar closes:
+A live caller runs the same strategy code as a backtest. In order:
 
-1. Append the closed bars with `Markets::append`, and the new state labels with `Markets::append_states`.
-2. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
-3. Send the orders it returns to the exchange.
+1. Build `Markets` from the history, and build the strategy once: `Live(name, params, markets, settings)` in Python, or `prepare` in C++. This warms up every indicator on the history.
+2. Each time a bar closes, append the closed bars with `markets.append(...)` and the new state labels with `markets.append_states(...)`.
+3. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
+4. Send the orders it returns to the exchange.
+
+`decide` does not take the full history on each call. Indicators update one bar at a time ([ADR 0017](../docs/adr/0017-indicators-update-one-bar-at-a-time.md)), so passing all bars every call would recompute everything and slow down as the history grows. Stops and take profits stay the caller's (see Stops live below).
 
 `positions` are the caller's open positions, with at least `instrument` and `side`. `report` is optional: Python's `decide(now, positions, report=None)` passes an empty `Report` when it is left out, and no strategy reads it today.
 
-**State labels arrive late.** A label reaches the caller about 7 minutes after its minute. Append each label when it arrives. `decide` reads only labels already appended, so it acts on the labels it has, as a trader would. A backtest has every label on time; the label-delay setting (a separate issue) is what makes a backtest see labels as late as live does.
+**State labels arrive late.** A label reaches the caller about 7 minutes after its minute. Append each label when it arrives. `decide` reads only labels already appended, so it acts on the labels it has, as a trader would. Set `settings.state_delay` (seconds, a whole number of minutes, at least 60) to match how late live labels arrive: 420 for 7 minutes. Then a backtest reads each label as late as live does. The default is 60.
 
 **Restart.** A fresh `Live` rebuilds every indicator from the history, but not the bar on which a strategy opened a position it now holds. Give each open position its `entry_time` (UTC second of the entry fill), as in `Position("ZORA", Side.Short, entry_time=...)`. A strategy with a time exit counts the bars from there, so its time exit lands on the same bar as without the restart. Without `entry_time` (it is `None`), the strategy cannot count the bars, so the position gets no time exit; rule exits, stops, and take profits still apply. A strategy reads only positions on its own instrument, so a caller may pass all of the account's positions.
 
