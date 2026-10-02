@@ -3,6 +3,6 @@
 namespace avbt {
 
 // The engine version. C++ and Python both read this one constant.
-inline constexpr const char* version = "0.2.0";
+inline constexpr const char* version = "0.3.0";
 
 }

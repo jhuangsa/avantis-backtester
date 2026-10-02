@@ -107,7 +107,7 @@ A `Result` has:
 | `timeframe` | The timeframe of the clock. |
 | `version` | The engine version that made the result. |
 
-`optimize_state_trend(markets, costs, settings, start, knobs, rounds)` tunes `state_trend` by a greedy search over pairs of settings.
+`optimize(name, start, knobs, markets, costs, settings, rounds, progress=None)` tunes any strategy by a greedy search over pairs of params; `summary(result)` gives its Sharpe, total return, max drawdown, and trade count.
 
 The indicators are also callable on their own: `sma`, `pct_change`, `prior_max`, `prior_min`, `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier`.
 

@@ -2,6 +2,7 @@
 // matches the struct run directly, and bad names and params throw.
 // Returns 0 when every check passes.
 
+#include "avbt/optimize.hpp"
 #include "avbt/run.hpp"
 
 #include <cmath>
@@ -126,6 +127,16 @@ bool throws(const std::string& name, const Params& p) {
     return false;
 }
 
+bool throws_optimize(const std::vector<Knob>& knobs) {
+    Markets m = veranta();
+    try {
+        optimize("rally_short", {}, knobs, m, costs_for(m), {}, 1);
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+    return false;
+}
+
 void test_bad_input_throws() {
     check_true("unknown strategy", throws("no_such", {}));
     check_true("unknown param", throws("rally_short", {{"nope", 1}}));
@@ -135,9 +146,24 @@ void test_bad_input_throws() {
     check_true("valid param runs", !throws("rally_short", {{"stop", 0.1}}));
 }
 
+// Every strategy in the table tunes by name, combined ones by prefixed knobs.
+void test_every_strategy_tunes() {
+    for (const StrategyInfo& info : strategies()) {
+        Markets m = info.name == "state_trend" ? trend() : veranta();
+        std::string pre = info.params[0].name.starts_with("a.") ? "a." : "";
+        std::vector<Knob> knobs = {{pre + "leverage", {1.0, 2.0}}, {pre + "stop", {0.1, 0.05}}};
+        if (info.name == "state_trend") knobs[1] = {"reward", {2.0, 3.0}};
+        Search s = optimize(info.name, {}, knobs, m, costs_for(m), {}, 1);
+        check_true(info.name + " tunes", s.runs.size() == 4 && s.best.size() == 2);
+    }
+    check_true("bad knob", throws_optimize({{"stop", {0.1, 2.0}}, {"lag", {1}}}));
+    check_true("unknown knob", throws_optimize({{"nope", {1}}, {"lag", {1}}}));
+}
+
 }  // namespace
 
 int main() {
+    test_every_strategy_tunes();
     test_by_name_matches_direct();
     test_bad_input_throws();
     if (failures == 0) std::printf("all run tests passed\n");

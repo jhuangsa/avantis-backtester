@@ -14,6 +14,7 @@ each tuned trade on its market's price, average, and trend label.
 """
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
@@ -31,19 +32,27 @@ TF = avbt_cpp.Timeframe
 START, SPLIT, END = "2026-06-01", "2026-08-01", "2026-09-01"
 PAIRS = {"BTC": 1, "ETH": 0}
 SIGNALS = {TF.Min5: "5min", TF.Min15: "15min", TF.Hour1: "1h", TF.Hour4: "4h"}
-# The first value of each knob is where the search starts.
-KNOBS = [
-    ("average", [50, 20, 100]),
-    ("breakout", [30, 15, 60]),
-    ("atr_stops", [2.0, 1.5, 3.0]),
-    ("flip", [False, True]),
-    ("min_stop", [0.0, 0.01, 0.02]),
-    ("reward", [2.0, 1.0, 3.0]),
-    ("trail_atrs", [0.0, 2.0, 3.0]),
-    ("take_fraction", [1.0, 0.5]),
-    ("BTC signal", [TF.Hour1, TF.Min5, TF.Min15, TF.Hour4]),
-    ("ETH signal", [TF.Hour1, TF.Min5, TF.Min15, TF.Hour4]),
-]
+TFS = [TF.Hour1, TF.Min5, TF.Min15, TF.Hour4]
+# The first value of each knob is where the search starts. signal is one
+# knob: every pair of BTC and ETH signal timeframes.
+KNOBS = {
+    "average": [50, 20, 100],
+    "breakout": [30, 15, 60],
+    "atr_stops": [2.0, 1.5, 3.0],
+    "flip": [False, True],
+    "min_stop": [0.0, 0.01, 0.02],
+    "reward": [2.0, 1.0, 3.0],
+    "trail_atrs": [0.0, 2.0, 3.0],
+    "take_fraction": [1.0, 0.5],
+    "signal": [{"BTC": b, "ETH": e} for b in TFS for e in TFS],
+}
+
+
+def label(v) -> str:
+    """A knob value as text; a signal map as BTC/ETH timeframe names."""
+    if isinstance(v, dict):
+        return "/".join(avbt_cpp.timeframe_name(tf) for tf in v.values())
+    return str(v)
 
 
 def market(pair_id: int, start: str, end: str):
@@ -90,9 +99,9 @@ def rounds(s) -> pd.DataFrame:
     The pairs come in the order optimize uses; a combination already run is
     not in the round's runs, and could not beat the best anyway.
     """
-    names = [name for name, _ in KNOBS]
+    names = list(KNOBS)
     pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
-    runs = pd.DataFrame(s["runs"])
+    runs = pd.DataFrame([{**r["params"], "round": r["round"], "sharpe": r["sharpe"]} for r in s["runs"]])
     best = runs.iloc[0]
     rows = []
     for r in range(1, runs["round"].max() + 1):
@@ -102,11 +111,11 @@ def rounds(s) -> pd.DataFrame:
         before = best
         if top > best.sharpe:
             best = here.loc[here.sharpe.idxmax()]
-        changed = [f"{k}: {before[k]} → {best[k]}" for k in names if before[k] != best[k]]
+        changed = [f"{k}: {label(before[k])} → {label(best[k])}" for k in names if before[k] != best[k]]
         rows.append({"round": r, "pair": f"{a} × {b}", "new runs": len(here),
                      "best Sharpe": best.sharpe, "gain": best.sharpe - before.sharpe,
                      "changed": ", ".join(changed) or "no change"})
-    assert all(best[k] == v for k, v in s["choice"].items()), "replay disagrees with optimize"
+    assert all(best[k] == s["best"][k] for k in names), "replay disagrees with optimize"
     return pd.DataFrame(rows)
 
 
@@ -119,12 +128,13 @@ if __name__ == "__main__":
     train = {name: market(pid, START, SPLIT) for name, pid in PAIRS.items()}
     frames, states = {k: v[0] for k, v in train.items()}, {k: v[1] for k, v in train.items()}
     markets = avbt_cpp.Markets([avbt_cpp.Market(k, frames[k], states[k]) for k in frames])
-    s = avbt_cpp.optimize_state_trend(markets, {k: FEES for k in frames}, settings, default, KNOBS, rounds=90)
-    tuned = s["best"]
-    print(f"searched {START} to {SPLIT}, base timeframe {s['timeframe']}, {len(s['runs'])} runs")
-    print("best:", ", ".join(f"{k}={v}" for k, v in s["choice"].items()))
-
+    s = avbt_cpp.optimize("state_trend", {}, KNOBS, markets, {k: FEES for k in frames}, settings, rounds=90)
     fields = [k for k in dir(default) if not k.startswith("_")]
+    tuned = SimpleNamespace(**{**{k: getattr(default, k) for k in fields}, **s["best"]})
+    base = avbt_cpp.timeframe_name(s["timeframe"])
+    print(f"searched {START} to {SPLIT}, base timeframe {base}, {len(s['runs'])} runs")
+    print("best:", ", ".join(f"{k}={label(v)}" for k, v in s["best"].items()))
+
     runs = {label: run("state_trend", frames, {k: getattr(p, k) for k in fields}, states, settings)
             for label, p in [("before", default), ("after", tuned)]}
     rows = ["Account equity, before and after tuning"]
@@ -213,7 +223,7 @@ background:#fff;color:#222;line-height:1.5}} td,th{{padding:4px 12px;text-align:
 table.rounds{{border-collapse:collapse;font-size:14px}} table.rounds td{{border-top:1px solid #eee}}
 tr.gain td{{background:#eaf6ea;font-weight:600}}</style></head><body>
 <h1>StateTrend on BTC and ETH, {START} to {SPLIT}</h1>
-<p>The optimizer searched these two months ({len(s['runs'])} backtests, base timeframe {s['timeframe']})
+<p>The optimizer searched these two months ({len(s['runs'])} backtests, base timeframe {base})
 for the parameters with the highest Sharpe. This page shows only the searched period, so the "after"
 line is fitted to it.</p>
 <h2>What the strategy does</h2>
@@ -254,7 +264,7 @@ next pair of knobs, in a fixed order, and backtests every combination of their v
 knobs at the best so far. If any combination beats the best Sharpe, it becomes the best. With
 {len(KNOBS)} knobs there are {len(KNOBS) * (len(KNOBS) - 1) // 2} pairs, so the {len(table)} rounds go
 through them twice. "New runs" leaves out combinations already run, which are not run again.</p>
-<p>Knobs: {"; ".join(f"<b>{n}</b> " + ", ".join(avbt_cpp.timeframe_name(v) if isinstance(v, TF) else str(v) for v in vals) for n, vals in KNOBS)}.</p>
+<p>Knobs: {"; ".join(f"<b>{n}</b> " + ", ".join(label(v) for v in vals) for n, vals in KNOBS.items())}.</p>
 {climb.to_html(full_html=False, include_plotlyjs=False)}
 <table class=rounds><tr><th>Round</th><th>Pair tried</th><th>New runs</th><th>What changed</th>
 <th>Best Sharpe</th><th>Gain</th></tr>{round_rows}</table>
