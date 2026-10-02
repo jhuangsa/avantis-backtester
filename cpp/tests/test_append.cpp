@@ -78,6 +78,16 @@ int main() {
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{60, 1, 1, 1, 1, 1}); }));
     CHECK(base->ts.size() == 3);
 
+    // Volume: its column must match the bars; append gives one exactly when it exists.
+    Bars v = b;
+    v.volume = {5};
+    CHECK(throws([&] { Markets::make({Market{"ETH", {v}}}); }));
+    v.volume = {5, 6};
+    Markets vol = Markets::make({Market{"ETH", {v}}});
+    CHECK(throws([&] { vol.append("ETH", Timeframe::Min1, Bar{120, 1, 1, 1, 1, 1}); }));
+    vol.append("ETH", Timeframe::Min1, Bar{120, 1, 1, 1, 1, 1, 7.0});
+    CHECK(vol.base("ETH").volume.size() == 3 && vol.base("ETH").volume.back() == 7.0);
+
     if (failures == 0) std::printf("test_append: all passed\n");
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

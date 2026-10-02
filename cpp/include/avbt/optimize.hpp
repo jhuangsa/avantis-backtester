@@ -201,6 +201,9 @@ inline std::vector<FoldResult> walk_forward(const std::string& name, const Param
                                             PortfolioSettings settings, int rounds,
                                             const FoldProgress& progress = {}) {
     if (folds.empty()) throw std::invalid_argument("walk_forward needs at least one fold");
+    for (const Fold& fold : folds) {
+        if (!fold.train || !fold.test) throw std::invalid_argument("each fold needs train and test Markets");
+    }
     std::vector<FoldResult> out;
     for (int f = 0; f < static_cast<int>(folds.size()); ++f) {
         const Fold& fold = folds[f];

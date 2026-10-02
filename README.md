@@ -139,11 +139,19 @@ More detail: [cpp/README.md](cpp/README.md) and [ADR 0017](docs/adr/0017-indicat
 
 ## Versions
 
-The version has three numbers, such as 0.4.0. The engine and every result carry it (`version`).
+The version has three numbers, such as 0.4.1. The engine and every result carry it (`version`).
 
 - Renaming or removing anything, or changing what a result means, raises the middle number: 0.2 to 0.3.
 - Adding something new raises the last number: 0.2.0 to 0.2.1.
 - Names stay stable within a version.
+
+Version 0.4.1:
+
+- The five Veranta strategies have a `side` param, the string `"long"` or `"short"`. `strategies()` lists it, and `run` and `optimize` set it. Any other value raises `ValueError`.
+- `Costs()` costs nothing: `open_fee` and `close_fee` default to 0.
+- `Bars` has a `volume` property, `None` when no volume was given. A volume of the wrong length raises `ValueError`.
+- `walk_forward` raises `ValueError` when a fold has no train or test `Markets`.
+- The Python package version in `pyproject.toml` now equals the engine version.
 
 Version 0.4.0:
 

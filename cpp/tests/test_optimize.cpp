@@ -223,6 +223,15 @@ void test_walk_forward() {
         threw = true;
     }
     check_value("no folds throws", threw, 1);
+    for (Fold bad : {Fold{nullptr, flat_costs(a), &b, flat_costs(b)}, Fold{&a, flat_costs(a), nullptr, flat_costs(b)}}) {
+        threw = false;
+        try {
+            walk_forward("state_trend", {}, knobs, {folds[0], bad}, {}, 2);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        check_value("null fold throws", threw, 1);
+    }
 }
 
 }  // namespace
