@@ -728,7 +728,7 @@ The table. It has eight entries:
 
 | Name | Strategy |
 |---|---|
-| `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | The five Veranta strategies. |
+| `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | The five Veranta strategies. Each has a `side` param, a string: `"long"` or `"short"`. Any other value throws. |
 | `state_trend` | `StateTrend`. |
 | `campaign_and_spike`, `late_day_and_rally` | `Combined` pairs. Their params start with `a.` or `b.`: `a.lag` is the first strategy's `lag`. |
 
@@ -791,7 +791,7 @@ Each run builds a fresh strategy, so `prepare` starts clean.
 
 ### `walk_forward(name, start, knobs, folds, settings, rounds, progress = {})`
 
-A `Fold` holds a train `Markets` and its `MarketCosts`, and a test `Markets` and its `MarketCosts`; the caller cuts them. Per fold, `walk_forward` calls `optimize` on train, then runs the winner on train and on test. It returns one `FoldResult` per fold: `best`, the `train` and `test` `Summary`, and `overfit`, train Sharpe minus test Sharpe. `FoldProgress` is called with the fold's index and then `Progress`'s arguments; returning false stops that fold's search only. No folds throws.
+A `Fold` holds a train `Markets` and its `MarketCosts`, and a test `Markets` and its `MarketCosts`; the caller cuts them. Per fold, `walk_forward` calls `optimize` on train, then runs the winner on train and on test. It returns one `FoldResult` per fold: `best`, the `train` and `test` `Summary`, and `overfit`, train Sharpe minus test Sharpe. `FoldProgress` is called with the fold's index and then `Progress`'s arguments; returning false stops that fold's search only. No folds throws, and so does a fold whose train or test `Markets` is null (Python: `None`).
 
 `sharpe` throws `std::invalid_argument` when `equity` and `clock` differ in length.
 
@@ -816,12 +816,12 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 |---|---|
 | `Timeframe` | The enum, with the same twelve values (`Timeframe.Hour1`). |
 | `timeframe_name(tf)`, `timeframe_seconds(tf)` | `name` and `seconds` for a `Timeframe`. |
-| `Bars(timeframe, ts, open, high, low, close, minutes_with_data)` | Builds bars. `len(bars)` is the number of bars; `bars.timeframe` reads the timeframe back; `bars.ts`, `open`, `high`, `low`, `close` return copies of the columns as numpy arrays. |
+| `Bars(timeframe, ts, open, high, low, close, minutes_with_data, volume=None)` | Builds bars. `len(bars)` is the number of bars; `bars.timeframe` reads the timeframe back; `bars.ts`, `open`, `high`, `low`, `close` return copies of the columns as numpy arrays. `bars.volume` does the same, or is `None` when no volume was given. A column of the wrong length, `volume` included, raises `ValueError`. |
 | `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30, scale_risk_with_leverage=False, state_delay=60)` | The settings. |
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
-| `Costs(open_fee, close_fee, hold_long, hold_short)` | One market's costs. The two holding lists are numpy arrays with one value per base bar, or empty. |
+| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None)` | One market's costs. `Costs()` is zero cost. The two holding lists are numpy arrays with one value per base bar, or empty. |
 | `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
 | `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; numpy numbers and booleans work as values, and an integer too big for a C++ `int` is taken as a float; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
 | `Result`, `Trade` | The result and its trades, with the fields in the tables above, as attributes: `result.trades`, `trade.entry_time`. |
@@ -893,9 +893,20 @@ Each test program builds its own small price series by hand, runs the code, and 
 
 **`test_rolling.cpp`**: each rolling indicator, updated bar by bar, equals its full-series function bit for bit (NaN equals NaN), across NaN gaps and windows longer than the series.
 
-**`test_append.cpp`**: `Markets::append` and `append_states` grow the bars, a reference taken before an append stays valid, an out-of-order `ts`, a missing market or timeframe, a missing base bar, and a states gap are refused, and a base bar past the clock's end extends the clock.
+**`test_append.cpp`**: `Markets::append` and `append_states` grow the bars, a reference taken before an append stays valid, an out-of-order `ts`, a missing market or timeframe, a missing base bar, and a states gap are refused, and a base bar past the clock's end extends the clock. A volume column must match the bars: `make` refuses a wrong length, `append` refuses a bar with no volume when the market has one, and an appended volume is stored.
 
-**`test_live.cpp`**: records a backtest with `on_step`, then replays it as a live caller would: start from the first bar, `prepare`, and for each step append the bars and states, `update`, and `decide` with the recorded positions. The orders must be equal at every step, with no tolerance. It runs the five Veranta strategies, `StateTrend` on two markets with 1-minute and 1-hour bars, and a `Combined`. A strategy that looks ahead gives different orders and fails.
+**`test_live.cpp`**: records a backtest with `on_step`, then replays it as a live caller would: start from the first bar, `prepare`, and for each step append the bars and states, `update`, and `decide` with the recorded positions. The orders must be equal at every step, with no tolerance. It runs the five Veranta strategies, `StateTrend` on two markets with 1-minute and 1-hour bars, and a `Combined`. A strategy that looks ahead gives different orders and fails. It also checks that `avbt::decide` and `avbt::run`, called by table name, give the same orders and result.
+
+**`test_run.cpp`**: the strategy table, called by name.
+
+| Test | What it checks |
+|---|---|
+| `test_every_strategy_tunes` | every table strategy tunes by name, combined ones with `a.` and `b.` knobs; a bad or unknown knob throws |
+| `test_by_name_matches_direct` | `run` by name gives the same result as building the strategy directly |
+| `test_bad_input_throws` | an unknown strategy, an unknown param, a value out of range, a wrong type, and an unknown combined param throw; a valid param runs |
+| `test_side_param` | each Veranta strategy has a `side` param (a combined pair has `a.side` and `b.side`); `"long"` makes long trades; the default stays short for `rally_short`; a bad value or a non-string throws |
+| `test_state_delay` | `state_delay` of 30, 90, 0, or 61 throws; 60 and 420 run |
+| `test_deterministic` | the same inputs give the same trades, equity, and `optimize` search, bit for bit |
 
 **`test_portfolio.cpp`**:
 
@@ -948,7 +959,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_state_trend_opens_long` | a long opens at the next open, closes when the market label turns, and a `Shock` blocks it |
 | `test_state_trend_signal` | `signal` set to `Hour1` matches the default, `Min1` changes the result, and a missing timeframe throws |
 
-**`test_optimize.cpp`**: `sharpe` counts days with no bars as 0% returns, is −∞ after equity touches 0 during a day, NaN with fewer than 30 daily returns or on flat equity, and is the same on 1-minute and 1-hour bars; on a toy strategy whose best is known, `search` finds it, runs each combination once, stops after a pass with no gain, runs one pair in one round, gives the same runs for the same inputs, and stops when `progress` returns false.
+**`test_optimize.cpp`**: `sharpe` counts days with no bars as 0% returns, is −∞ after equity touches 0 during a day, NaN with fewer than 30 daily returns or on flat equity, and is the same on 1-minute and 1-hour bars; on a toy strategy whose best is known, `search` finds it, runs each combination once, stops after a pass with no gain, runs one pair in one round, gives the same runs for the same inputs, and stops when `progress` returns false. `walk_forward` is checked for its rows, the folds seen by `progress`, no folds throwing, and a fold with a null train or test `Markets` throwing (`test_walk_forward`).
 
 **`test_strategies.cpp`**: one hand-built series per strategy, so that the entry fires on a known bar and the exit happens for a known cause. It also checks that a strategy entering on the bar a level closed its trade fills at the next open, that `Combined` on two markets makes the same trades as each strategy alone, and that `Combined` on one market takes turns. Restart checks: a strategy ignores a position on another instrument, a position with no entry time gets no time exit while an entry time of 0 does, a fresh `Combined` gives a held position to the strategy that trades it, and `StateTrend` keeps a position while its average has no value.
 

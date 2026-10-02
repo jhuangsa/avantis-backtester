@@ -2,6 +2,7 @@
 
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -253,7 +254,7 @@ def test_param_type():
 
 def test_old_optimize_gone_and_version():
     assert not hasattr(avbt, "optimize_state_trend")
-    assert avbt.version == "0.4.0"
+    assert avbt.version == "0.4.1"
 
 
 def test_walk_forward(setup):
@@ -283,3 +284,157 @@ def test_bad_settings_raise(setup, bad):
     markets, costs = setup
     with pytest.raises(ValueError, match=next(iter(bad))):
         avbt.run("state_trend", {}, markets, costs, avbt.PortfolioSettings(**bad))
+
+
+def test_costs_default_to_no_fees(setup):
+    markets, _ = setup
+    c = avbt.Costs()
+    assert (c.open_fee, c.close_fee) == (0.0, 0.0)
+    free = {n: c for n in markets.instruments}
+    r = avbt.run("spike_short", {"spike": 0.0}, markets, free)
+    assert r.trades and all(t.fees == 0 for t in r.trades)
+
+
+def test_bars_volume():
+    ts, one, m60 = START + 3600 * np.arange(3), np.ones(3), np.full(3, 60, dtype=np.int32)
+    v = np.array([1.0, 2.0, 3.0])
+    assert np.array_equal(avbt.Bars(avbt.Timeframe.Hour1, ts, one, one, one, one, m60, volume=v).volume, v)
+    assert avbt.Bars(avbt.Timeframe.Hour1, ts, one, one, one, one, m60).volume is None
+    with pytest.raises(ValueError):
+        avbt.Bars(avbt.Timeframe.Hour1, ts, one, one, one, one, m60, volume=np.ones(2))
+
+
+def test_side_param(setup):
+    markets, costs = setup
+    table = {s.name: {p.name: p for p in s.params} for s in avbt.strategies()}
+    assert table["spike_short"]["side"].type == "str"
+    assert table["spike_short"]["side"].default == "short"
+    assert table["gold_trend_long"]["side"].default == "long"
+    for side, want in (("long", avbt.Side.Long), ("short", avbt.Side.Short)):
+        r = avbt.run("spike_short", {"spike": 0.0, "side": side}, markets, costs)
+        assert r.trades and {t.side for t in r.trades} == {want}
+    with pytest.raises(ValueError, match="side"):
+        avbt.run("spike_short", {"side": "up"}, markets, costs)
+
+
+def test_walk_forward_none_fold_raises(setup):
+    markets, costs = setup
+    for fold in [(None, costs, markets, costs), (markets, costs, None, costs)]:
+        with pytest.raises(ValueError, match="fold"):
+            avbt.walk_forward("state_trend", {}, KNOBS, [fold], avbt.PortfolioSettings(), 1)
+
+
+SPIKE = {"spike": [0.0, 0.002, 0.004], "stop": [0.08, 0.02, 0.04], "take_profit": [0.06, 0.01]}
+
+
+def test_same_inputs_same_outputs(setup):
+    markets, costs = setup
+    params = {"spike": 0.0}
+    a, b = (avbt.run("spike_short", params, markets, costs) for _ in range(2))
+    assert a.trades and np.array_equal(a.equity, b.equity)
+    fields = ("instrument", "entry_bar", "exit_bar", "side", "entry_price", "exit_price", "size", "result")
+    assert [[getattr(t, f) for f in fields] for t in a.trades] == \
+        [[getattr(t, f) for f in fields] for t in b.trades]
+    s = avbt.PortfolioSettings()
+    np.testing.assert_equal(avbt.optimize("spike_short", {}, SPIKE, markets, costs, s, 2),
+                            avbt.optimize("spike_short", {}, SPIKE, markets, costs, s, 2))
+    folds = [(markets, costs, markets, costs)] * 2
+    np.testing.assert_equal(avbt.walk_forward("spike_short", {}, SPIKE, folds, s, 2),
+                            avbt.walk_forward("spike_short", {}, SPIKE, folds, s, 2))
+
+
+def ticks_during(call):
+    # Ticks a second thread makes in the middle half of call(); none if call keeps the GIL.
+    ticks = []
+    done = threading.Event()
+
+    def count():
+        while not done.is_set():
+            ticks.append(time.perf_counter())
+
+    t = threading.Thread(target=count)
+    t.start()
+    start = time.perf_counter()
+    call()
+    end = time.perf_counter()
+    done.set()
+    t.join()
+    quarter = (end - start) / 4
+    return sum(start + quarter < x < end - quarter for x in ticks)
+
+
+def test_run_releases_gil():
+    big = avbt.Markets([market("BTC", 1, 600_000)])
+    assert ticks_during(lambda: avbt.run("state_trend", {}, big, {"BTC": avbt.Costs()})) > 1000
+
+
+def test_walk_forward_releases_gil(setup):
+    markets, costs = setup
+    ticks = []
+    done = threading.Event()
+
+    def count():
+        while not done.is_set():
+            ticks.append(1)
+
+    t = threading.Thread(target=count)
+    t.start()
+    seen = []
+    knobs = {"average": [50, 20, 100, 10], "reward": [2.0, 3.0, 1.0, 4.0]}
+    avbt.walk_forward("state_trend", {}, knobs, [(markets, costs, markets, costs)],
+                      avbt.PortfolioSettings(), 1, lambda *_: seen.append(len(ticks)) or True)
+    done.set()
+    t.join()
+    # The thread counted while the 16 backtests ran, before the one progress call.
+    assert seen[0] > 1000
+
+
+def test_walk_forward_progress_false_stops_one_fold(setup):
+    markets, costs = setup
+    calls = []
+
+    def progress(fold, round, rounds, sharpe, best):
+        calls.append((fold, round))
+        return fold != 0
+
+    folds = [(markets, costs, markets, costs)] * 2
+    rows = avbt.walk_forward("spike_short", {}, SPIKE, folds, avbt.PortfolioSettings(), 3, progress)
+    assert len(rows) == 2
+    assert calls == [(0, 1), (1, 1), (1, 2), (1, 3)]
+
+
+def test_walk_forward_progress_raises(setup):
+    markets, costs = setup
+
+    def progress(*_):
+        raise KeyError("stop here")
+
+    with pytest.raises(KeyError, match="stop here"):
+        avbt.walk_forward("state_trend", {}, KNOBS, [(markets, costs, markets, costs)],
+                          avbt.PortfolioSettings(), 3, progress)
+
+
+def two_knobs(strategy):
+    # The first two int or float params with a finite default, each with a second value in range.
+    knobs = {}
+    for p in strategy.params:
+        if p.type not in ("int", "float") or np.isnan(p.default):
+            continue
+        if p.type == "int":
+            other = p.default + 1 if p.default + 1 <= p.max else p.default - 1
+        else:
+            other = p.default / 2
+        knobs[p.name] = [p.default, other]
+        if len(knobs) == 2:
+            return knobs
+    raise AssertionError(f"{strategy.name} has fewer than two numeric params")
+
+
+@pytest.mark.parametrize("strategy", avbt.strategies(), ids=lambda s: s.name)
+def test_optimize_every_strategy(setup, strategy):
+    markets, costs = setup
+    knobs = two_knobs(strategy)
+    s = avbt.optimize(strategy.name, {}, knobs, markets, costs, avbt.PortfolioSettings(), 1)
+    assert set(knobs) <= set(s["best"]) and len(s["runs"]) == 4
+    for k, values in knobs.items():
+        assert s["best"][k] in values

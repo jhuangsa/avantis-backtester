@@ -64,7 +64,8 @@ avbt::Bars make_bars(avbt::Timeframe timeframe,
     if (volume) bars.volume = to_vector(*volume);
     const std::size_t n = bars.ts.size();
     if (bars.open.size() != n || bars.high.size() != n || bars.low.size() != n ||
-        bars.close.size() != n || bars.minutes_with_data.size() != n) {
+        bars.close.size() != n || bars.minutes_with_data.size() != n ||
+        (volume && bars.volume.size() != n)) {
         throw std::invalid_argument("every Bars column must be the same size");
     }
     return bars;
@@ -282,6 +283,10 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_property_readonly("high", [](const avbt::Bars& b) { return to_numpy(std::vector(b.high)); })
         .def_property_readonly("low", [](const avbt::Bars& b) { return to_numpy(std::vector(b.low)); })
         .def_property_readonly("close", [](const avbt::Bars& b) { return to_numpy(std::vector(b.close)); })
+        .def_property_readonly("volume", [](const avbt::Bars& b) -> py::object {
+            if (b.volume.empty()) return py::none();
+            return to_numpy(std::vector(b.volume));
+        })
         .def("__len__", [](const avbt::Bars& b) { return b.ts.size(); });
 
     py::class_<avbt::PortfolioSettings>(m, "PortfolioSettings")
@@ -431,7 +436,7 @@ PYBIND11_MODULE(avbt_cpp, m) {
                  return avbt::Costs{open_fee, close_fee, hold_long ? to_vector(*hold_long) : std::vector<double>{},
                                     hold_short ? to_vector(*hold_short) : std::vector<double>{}};
              }),
-             py::arg("open_fee"), py::arg("close_fee"), py::arg("hold_long") = py::none(),
+             py::arg("open_fee") = 0.0, py::arg("close_fee") = 0.0, py::arg("hold_long") = py::none(),
              py::arg("hold_short") = py::none())
         .def_readonly("open_fee", &avbt::Costs::open_fee)
         .def_readonly("close_fee", &avbt::Costs::close_fee)

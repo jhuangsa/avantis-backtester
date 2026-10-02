@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -160,12 +161,77 @@ void test_every_strategy_tunes() {
     check_true("unknown knob", throws_optimize({{"nope", {1}}, {"lag", {1}}}));
 }
 
+// Every Veranta strategy has a str param side; it sets the trades' side.
+void test_side_param() {
+    for (const StrategyInfo& info : strategies()) {
+        if (info.name == "state_trend") continue;
+        int n = 0;
+        for (const Param& p : info.params) n += p.name == "side" || p.name == "a.side" || p.name == "b.side";
+        check_true(info.name + " has side", n == (info.name.find("_and_") != std::string::npos ? 2 : 1));
+    }
+    Markets v = veranta();
+    Result r = run("rally_short", {{"side", std::string("long")}}, v, costs_for(v), PortfolioSettings{});
+    bool all_long = !r.trades.empty();
+    for (const Trade& t : r.trades) all_long = all_long && t.side == Side::Long;
+    check_true("side long makes long trades", all_long);
+    Result d = run("rally_short", {}, v, costs_for(v), PortfolioSettings{});
+    check_true("rally_short is short by default", !d.trades.empty() && d.trades[0].side == Side::Short);
+    check_true("bad side", throws("rally_short", {{"side", std::string("up")}}));
+    check_true("side not a str", throws("rally_short", {{"side", 1}}));
+    check_true("combined bad side", throws("campaign_and_spike", {{"b.side", std::string("x")}}));
+}
+
+// state_delay must be whole minutes, at least 60.
+void test_state_delay() {
+    Markets t = trend();
+    for (int delay : {30, 90, 0, 61}) {
+        bool threw = false;
+        try {
+            run("state_trend", {}, t, costs_for(t), PortfolioSettings{.state_delay = delay});
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        check_true("state_delay " + std::to_string(delay) + " throws", threw);
+    }
+    for (int delay : {60, 420}) {
+        bool ok = true;
+        try {
+            run("state_trend", {}, t, costs_for(t), PortfolioSettings{.state_delay = delay});
+        } catch (const std::invalid_argument&) {
+            ok = false;
+        }
+        check_true("state_delay " + std::to_string(delay) + " runs", ok);
+    }
+}
+
+// The same inputs give the same trades, equity, and search.
+void test_deterministic() {
+    Markets v = veranta();
+    Result a = run("late_day_and_rally", {}, v, costs_for(v), PortfolioSettings{});
+    Result b = run("late_day_and_rally", {}, v, costs_for(v), PortfolioSettings{});
+    check_true("run twice: same trades", same(a, b) && !a.trades.empty());
+    check_true("run twice: same equity", a.equity == b.equity);
+    std::vector<Knob> knobs = {{"lag", {1, 2, 3}}, {"rise", {0.01, 0.02}}, {"stop", {0.05, 0.1}}};
+    Search x = optimize("rally_short", {}, knobs, v, costs_for(v), {}, 4);
+    Search y = optimize("rally_short", {}, knobs, v, costs_for(v), {}, 4);
+    bool eq = x.best == y.best && std::memcmp(&x.sharpe, &y.sharpe, sizeof x.sharpe) == 0 &&
+              x.runs.size() == y.runs.size();
+    for (std::size_t i = 0; eq && i < x.runs.size(); ++i) {
+        eq = x.runs[i].round == y.runs[i].round && x.runs[i].params == y.runs[i].params &&
+             std::memcmp(&x.runs[i].sharpe, &y.runs[i].sharpe, sizeof x.runs[i].sharpe) == 0;
+    }
+    check_true("optimize twice: same search", eq);
+}
+
 }  // namespace
 
 int main() {
     test_every_strategy_tunes();
     test_by_name_matches_direct();
     test_bad_input_throws();
+    test_side_param();
+    test_state_delay();
+    test_deterministic();
     if (failures == 0) std::printf("all run tests passed\n");
     return failures == 0 ? 0 : 1;
 }

@@ -87,6 +87,17 @@ Field<P> field(std::string name, T P::*member, double min = -std::numeric_limits
     return {p, [=](P& params, const Value& v) { params.*member = as<T>(name, v, p); }};
 }
 
+// side as a str param: "long" or "short".
+template <class P>
+Field<P> side_field() {
+    Param p{"side", Value(std::string(P{}.side == Side::Long ? "long" : "short"))};
+    return {p, [=](P& params, const Value& v) {
+                std::string s = as<std::string>("side", v, p);
+                if (s != "long" && s != "short") throw std::invalid_argument("param side must be long or short, got " + s);
+                params.side = s == "long" ? Side::Long : Side::Short;
+            }};
+}
+
 // Fills a Params struct from `given`; a missing param keeps its default.
 template <class P>
 P build(const std::string& strategy, const std::vector<Field<P>>& fields, const Params& given) {
@@ -162,6 +173,7 @@ constexpr double inf = std::numeric_limits<double>::infinity();
 template <class P>
 std::vector<Field<P>> common(std::vector<Field<P>> own) {
     own.push_back(field("instrument", &P::instrument));
+    own.push_back(side_field<P>());
     own.push_back(field("take_profit", &P::take_profit, 0.0, inf));
     own.push_back(field("stop", &P::stop, 0.0, 1.0));
     own.push_back(field("time_exit", &P::time_exit, 0, inf));

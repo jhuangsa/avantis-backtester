@@ -33,7 +33,8 @@ def markets(n):
 
 
 def key(order):
-    return (order.kind, order.instrument, order.side, order.stop_distance, order.leverage)
+    return (order.kind, order.instrument, order.side, order.stop_distance, order.leverage,
+            order.take_profit_distance, order.trail_distance, order.take_profit_fraction)
 
 
 PARAMS = {"signal": {"BTC": avbt.Timeframe.Min1}, "average": 20, "breakout": 10}
@@ -143,3 +144,36 @@ def test_decide_matches_live_with_no_state_kept():
     assert seen > 0
     with pytest.raises(ValueError, match="no strategy"):
         avbt.decide("nope", {}, grown, [], now)
+
+
+@pytest.mark.parametrize("params", [PARAMS, {**PARAMS, "trail_atrs": 1.0, "take_fraction": 0.5}])
+def test_live_replay_matches_run(params):
+    # Feed Live the bars as run saw them, with run's open positions; an order at
+    # step t fills at the open of bar t + 1, so it matches a trade's entry or exit.
+    ts, o, h, l, c = columns(1)
+    r = avbt.run("state_trend", params, markets(N), {"BTC": avbt.Costs()})
+    assert r.trades
+    entries = {t.entry_bar - 1 for t in r.trades}
+    exits = {t.exit_bar - 1 for t in r.trades if t.cause == avbt.Cause.Order}
+    grown = markets(1)
+    live = avbt.Live("state_trend", params, grown)
+    opens, closes = set(), set()
+    for t in range(N):
+        if t:
+            grown.append_states("BTC", int(ts[t]), avbt.State(6, 1, 2))
+            grown.append("BTC", avbt.Timeframe.Min1, avbt.Bar(int(ts[t]), o[t], h[t], l[t], c[t], 1))
+        held = {(x.side, x.entry_price, int(x.entry_time)): x.size
+                for x in r.trades if x.entry_bar <= t < x.exit_bar}
+        positions = [avbt.Position("BTC", side, price, size, entry_time=when)
+                     for (side, price, when), size in held.items()]
+        for x in live.decide(int(ts[t]) + 60, positions):
+            assert x.instrument == "BTC"
+            if x.kind == avbt.Order.Kind.Open:
+                assert not held
+                # An open at one of the last two steps fills too late to close as a trade.
+                if t < N - 2:
+                    assert x.side == next(y.side for y in r.trades if y.entry_bar == t + 1)
+                    opens.add(t)
+            else:
+                closes.add(t)
+    assert opens and opens == entries and closes == exits

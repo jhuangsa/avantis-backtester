@@ -3,7 +3,7 @@
 // decide with the positions the backtest had. The orders must be equal at
 // every step. Bars arrive only once closed, so a strategy that looks ahead
 // gives different orders. decide_once, which keeps no state, must give
-// the same orders too. Returns 0 when every check passes.
+// the same orders too, and so must decide and run by table name. Returns 0 when every check passes.
 
 #include "avbt/run.hpp"
 #include "avbt/strategies.hpp"
@@ -86,7 +86,7 @@ struct Step {
 
 template <class S>
 Result replay(const std::string& name, const S& fresh, const std::vector<Market>& full,
-              PortfolioSettings settings = {}) {
+              PortfolioSettings settings = {}, const std::string& table = "", const Params& params = {}) {
     Markets all = Markets::make(full);
     MarketCosts costs;
     for (const Market& m : full) costs[m.instrument] = Costs{.open_fee = 0.0001, .close_fee = 0.0001};
@@ -144,6 +144,11 @@ Result replay(const std::string& name, const S& fresh, const std::vector<Market>
             std::vector<Order> once = decide_once(live_of(fresh, settings), live, steps[t].positions, now);
             ok = once.size() == want.size();
             for (size_t i = 0; ok && i < once.size(); ++i) ok = same(once[i], want[i]);
+            if (ok && !table.empty()) {
+                std::vector<Order> named = avbt::decide(table, params, live, steps[t].positions, now, settings);
+                ok = named.size() == want.size();
+                for (size_t i = 0; ok && i < named.size(); ++i) ok = same(named[i], want[i]);
+            }
         }
         if (!ok) {
             ++failures;
@@ -151,6 +156,17 @@ Result replay(const std::string& name, const S& fresh, const std::vector<Market>
             return r;
         }
         orders += static_cast<int>(want.size());
+    }
+    if (!table.empty()) {
+        Result named = avbt::run(table, params, all, costs, settings);
+        bool ok = named.trades.size() == r.trades.size() && named.equity == r.equity;
+        for (size_t i = 0; ok && i < r.trades.size(); ++i) {
+            ok = named.trades[i].entry_time == r.trades[i].entry_time && same(named.trades[i].result, r.trades[i].result);
+        }
+        if (!ok) {
+            ++failures;
+            std::printf("FAIL %s: run by name differs from the struct\n", name.c_str());
+        }
     }
     if (r.trades.empty() || orders == 0) {
         ++failures;
@@ -175,7 +191,7 @@ int main() {
     replay("LateDayShort", late, veranta);
     RallyShort rally;
     rally.params.rise = 0.02;
-    replay("RallyShort", rally, veranta);
+    replay("RallyShort", rally, veranta, {}, "rally_short", {{"rise", 0.02}});
     CampaignShort campaign;
     campaign.params.rise = 0.03;
     campaign.params.take_profit = 0.03;
@@ -185,7 +201,8 @@ int main() {
     spike.params.spike = 0.01;
     replay("SpikeShort", spike, veranta);
     replay("GoldTrendLong", GoldTrendLong{}, veranta);
-    replay("Combined", Combined<CampaignShort, SpikeShort>{campaign, spike, {}, {}}, veranta);
+    replay("Combined", Combined<CampaignShort, SpikeShort>{campaign, spike, {}, {}}, veranta, {}, "campaign_and_spike",
+           {{"a.rise", 0.03}, {"a.take_profit", 0.03}, {"a.stop", 0.03}, {"b.spike", 0.01}});
 
     // StateTrend on two markets, 1-minute and 1-hour bars, over 5 days.
     int m = 5 * 24 * 60;
@@ -198,7 +215,8 @@ int main() {
     trend.params.breakout = 10;
     Result base = replay("StateTrend", trend, both);
     // Labels read 7 minutes back: live must match, and the trades must move.
-    Result late7 = replay("StateTrend delay 420", trend, both, PortfolioSettings{.state_delay = 420});
+    Result late7 = replay("StateTrend delay 420", trend, both, PortfolioSettings{.state_delay = 420}, "state_trend",
+                          {{"average", 5}, {"atr_period", 5}, {"breakout", 10}});
     if (base.trades.empty() || late7.trades.empty()) {
         std::printf("FAIL StateTrend delay 420: no trades to compare\n");
         return 1;
