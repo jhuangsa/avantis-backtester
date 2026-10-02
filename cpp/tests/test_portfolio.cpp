@@ -161,6 +161,27 @@ void test_stop_wins_over_take_profit() {
     check_value("both levels balance", p.report().balance, 9900.0);
 }
 
+// A bar that opens at 112, past the 110 take profit, then falls to 94, past the
+// 95 stop: the open came first, so it takes profit at 112, 20 * 12 = +240.
+void test_open_past_take_profit_beats_stop() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, 110.0);
+    auto closed = p.check({Quote{"BTC", 112.0, 112.0, 94.0, 100.0}});
+    check_true("open past take cause", closed.size() == 1 && closed[0].cause == Cause::TakeProfit);
+    check_value("open past take fill", closed.at(0).exit_price, 112.0);
+    check_value("open past take balance", p.report().balance, 10240.0);
+}
+
+// The short side: opens at 88, past the 90 take profit, then rises to 106.
+void test_short_open_past_take_profit_beats_stop() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Short, 100.0, 105.0, 10.0, 90.0);
+    auto closed = p.check({Quote{"BTC", 88.0, 106.0, 88.0, 100.0}});
+    check_true("short open past take cause", closed.size() == 1 && closed[0].cause == Cause::TakeProfit);
+    check_value("short open past take fill", closed.at(0).exit_price, 88.0);
+    check_value("short open past take balance", p.report().balance, 10240.0);
+}
+
 void test_take_profit_wrong_side() {
     Portfolio p(PortfolioSettings{});
     check_true("skip long take profit below entry",
@@ -262,6 +283,8 @@ int main() {
     test_take_profit_fills_at_level();
     test_take_profit_gap_fills_at_open();
     test_stop_wins_over_take_profit();
+    test_open_past_take_profit_beats_stop();
+    test_short_open_past_take_profit_beats_stop();
     test_take_profit_wrong_side();
     test_fees();
     test_trailing_stop();

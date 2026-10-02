@@ -106,8 +106,10 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         // The best price the bar reached for the position. NaN compares false.
         double best = is_long ? q.high : q.low;
         bool take_hit = is_long ? best >= p.take_profit_price : best <= p.take_profit_price;
-        if (!stop_hit && take_hit) {
-            bool past = is_long ? q.open > p.take_profit_price : q.open < p.take_profit_price;
+        // A bar that opens past the take profit took it first, even if it later
+        // reaches the stop (ADR 0003).
+        bool past = is_long ? q.open > p.take_profit_price : q.open < p.take_profit_price;
+        if (take_hit && (!stop_hit || past)) {
             double fraction = p.take_profit_fraction;
             out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price,
                                  fraction, fraction < 1.0 ? Cause::PartialTakeProfit : Cause::TakeProfit));
