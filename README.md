@@ -30,6 +30,12 @@ python3 -m pytest
 
 The Python tests do not read anything in `data/`.
 
+On a machine with little memory, run only the C++ API tests:
+
+```bash
+python3 -m pytest tests/test_avbt_cpp_api.py tests/test_live.py
+```
+
 ## The C++ backtester
 
 The full guide, covering every file, type, function, and test, is [cpp/README.md](cpp/README.md).
@@ -56,6 +62,18 @@ cmake -S cpp -B cpp/build -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir)
 
 ```bash
 cmake --build cpp/build
+```
+
+The tests load the module from `cpp/build-pyXY` (for Python X.Y) if it exists, else from `cpp/build`. It works only with the Python that built it. Rebuild it after each pull; an old module makes the version test fail. To check which version Python loads:
+
+```bash
+python3 -c "import sys; sys.path.insert(0, 'cpp/build'); import avbt_cpp; print(avbt_cpp.version)"
+```
+
+To use less memory, build only the module, one file at a time:
+
+```bash
+cmake --build cpp/build --target avbt_cpp -j1
 ```
 
 Then run the five Veranta strategies and chart them:
