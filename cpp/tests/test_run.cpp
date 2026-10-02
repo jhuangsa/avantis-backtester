@@ -96,6 +96,12 @@ Result direct(const Markets& m) {
     return backtest(s, m, costs_for(m), PortfolioSettings{});
 }
 
+// Library strategies have their own tests, tests/test_library.cpp.
+bool in_library(const std::string& name) {
+    for (const StrategyInfo& s : library()) if (s.name == name) return true;
+    return false;
+}
+
 void test_by_name_matches_direct() {
     Markets v = veranta(), t = trend();
     std::map<std::string, std::function<Result()>> direct_runs = {
@@ -108,8 +114,9 @@ void test_by_name_matches_direct() {
         {"campaign_and_spike", [&] { return direct<Combined<CampaignShort, SpikeShort>>(v); }},
         {"late_day_and_rally", [&] { return direct<Combined<LateDayShort, RallyShort>>(v); }},
     };
-    check_true("eight strategies", strategies().size() == 8);
+    check_true("eight strategies and the library", strategies().size() == 8 + library().size());
     for (const StrategyInfo& info : strategies()) {
+        if (in_library(info.name)) continue;
         const Markets& m = info.name == "state_trend" ? t : v;
         Result by_name = run(info.name, {}, m, costs_for(m), PortfolioSettings{});
         check_true(info.name + " in table", direct_runs.count(info.name) == 1);
@@ -150,6 +157,7 @@ void test_bad_input_throws() {
 // Every strategy in the table tunes by name, combined ones by prefixed knobs.
 void test_every_strategy_tunes() {
     for (const StrategyInfo& info : strategies()) {
+        if (in_library(info.name)) continue;
         Markets m = info.name == "state_trend" ? trend() : veranta();
         std::string pre = info.params[0].name.starts_with("a.") ? "a." : "";
         std::vector<Knob> knobs = {{pre + "leverage", {1.0, 2.0}}, {pre + "stop", {0.1, 0.05}}};
@@ -164,7 +172,7 @@ void test_every_strategy_tunes() {
 // Every Veranta strategy has a str param side; it sets the trades' side.
 void test_side_param() {
     for (const StrategyInfo& info : strategies()) {
-        if (info.name == "state_trend") continue;
+        if (info.name == "state_trend" || in_library(info.name)) continue;
         int n = 0;
         for (const Param& p : info.params) n += p.name == "side" || p.name == "a.side" || p.name == "b.side";
         check_true(info.name + " has side", n == (info.name.find("_and_") != std::string::npos ? 2 : 1));

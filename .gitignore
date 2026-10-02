@@ -10,9 +10,20 @@ Wonyotti Trading History/*.csv
 
 # Private database notes. Do not commit.
 docs/database.md
+docs/internal-wallet-addresses.md
+
+# Private wallet analysis. Do not commit.
+docs/wallet-findings.md
+docs/wallets_2024.html
 
 # CMake output. Regenerate with cmake -S cpp -B cpp/build.
 cpp/build/
 
 # Downloaded market candles, reused between runs. Local only; never commit.
 data/candles/
+
+# Strategy score tables, private
+docs/strategy_results.md
+
+# Strategy scores, local only
+examples/sharpe_hunt/results/*.json
