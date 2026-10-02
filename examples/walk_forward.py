@@ -15,6 +15,7 @@ repository root:
 Each window needs at least 31 days, for 30 daily returns in the Sharpe.
 With three cached months the test windows of the default folds overlap.
 It prints one line per search round and one table row per fold.
+The folds are cut here; avbt_cpp.walk_forward tunes and scores each one.
 """
 
 import argparse
@@ -83,8 +84,8 @@ def window(data, costs, lo: int, hi: int):
     return avbt_cpp.Markets(markets), out
 
 
-def progress(r, total, sharpe, best):
-    print(f"  round {r}/{total}: best Sharpe {sharpe:.2f}")
+def progress(fold, r, total, sharpe, best):
+    print(f"  fold {fold + 1} round {r}/{total}: best Sharpe {sharpe:.2f}")
     return True  # False would stop the search
 
 
@@ -106,41 +107,30 @@ def main():
     data = load()
     # Full-span Costs; window() slices their holding costs per window.
     costs = {k: FEES for k in data}
-    rows = []
+    # The folds are cut here; the engine runs them.
+    folds, names = [], []
     lo, end = ts(START), ts(END)
+    day = lambda t: pd.Timestamp(t, unit="s").strftime("%m-%d")
     while lo + (a.train + a.test) * DAY <= end:
         mid, hi = lo + a.train * DAY, lo + (a.train + a.test) * DAY
-        day = lambda t: pd.Timestamp(t, unit="s").strftime("%m-%d")
-        fold = f"{day(lo)}..{day(mid)} | {day(mid)}..{day(hi)}"
-        print(f"fold {len(rows) + 1}: train | test = {fold}")
-        train_m, train_c = window(data, costs, lo, mid)
-        test_m, test_c = window(data, costs, mid, hi)
-        s = avbt_cpp.optimize("state_trend", {}, KNOBS, train_m, train_c,
-                              settings, a.rounds, progress=progress)
-        train = avbt_cpp.summary(
-            avbt_cpp.run("state_trend", s["best"], train_m, train_c, settings))
-        test = avbt_cpp.summary(
-            avbt_cpp.run("state_trend", s["best"], test_m, test_c, settings))
-        rows.append({"fold": fold, "train": train, "test": test,
-                     "best": s["best"]})
+        names.append(f"{day(lo)}..{day(mid)} | {day(mid)}..{day(hi)}")
+        folds.append((*window(data, costs, lo, mid), *window(data, costs, mid, hi)))
         lo += a.step * DAY
-
-    if not rows:
+    if not folds:
         sys.exit("the cached span is shorter than one train plus test window")
+    rows = avbt_cpp.walk_forward("state_trend", {}, KNOBS, folds, settings,
+                                 a.rounds, progress=progress)
+
     print()
-    print(f"{'train | test':26} {'tr Sh':>6} {'te Sh':>6} {'te/tr':>6}"
+    # overfit is train Sharpe minus test Sharpe: near 0, the winner did as
+    # well on unseen days as on the days it was tuned on; large, the search
+    # fit noise in the training window.
+    print(f"{'train | test':26} {'tr Sh':>6} {'te Sh':>6} {'overfit':>7}"
           f" {'te ret':>7} {'te DD':>6} {'trades':>6}")
-    for r in rows:
+    for name, r in zip(names, rows):
         tr, te = r["train"], r["test"]
-        # Test Sharpe over train Sharpe. Near 1: the winner did as well on
-        # unseen days as on the days it was tuned on. Far below 1, or
-        # negative: the search fit noise in the training window, so the
-        # train Sharpe overstates what the strategy can do. With a train
-        # Sharpe of 0 or less the ratio means nothing, so it shows nan.
-        ok = tr["sharpe"] > 0
-        ratio = te["sharpe"] / tr["sharpe"] if ok else float("nan")
-        print(f"{r['fold']:26} {tr['sharpe']:6.2f} {te['sharpe']:6.2f}"
-              f" {ratio:6.2f} {te['total_return']:7.2%}"
+        print(f"{name:26} {tr['sharpe']:6.2f} {te['sharpe']:6.2f}"
+              f" {r['overfit']:7.2f} {te['total_return']:7.2%}"
               f" {te['max_drawdown']:6.2%} {te['trades']:6d}")
     for i, r in enumerate(rows, 1):
         print(f"fold {i} best:", r["best"])

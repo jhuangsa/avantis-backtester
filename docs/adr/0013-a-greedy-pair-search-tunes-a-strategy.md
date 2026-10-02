@@ -14,4 +14,4 @@ The rules:
 Consequences:
 
 - The answer depends on the starting values and the pair order. A greedy search can stop at a local best.
-- A high Sharpe from a few trades can win by chance, and nothing guards against it. Check the winner on bars the search did not see; the caller chooses both slices.
+- A high Sharpe from a few trades can win by chance, and nothing guards against it. Check the winner on bars the search did not see; the caller chooses both slices. `walk_forward` does this per fold, on folds the caller cuts, and reports train Sharpe minus test Sharpe as `overfit`.

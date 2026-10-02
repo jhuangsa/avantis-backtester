@@ -109,6 +109,8 @@ A `Result` has:
 
 `optimize(name, start, knobs, markets, costs, settings, rounds, progress=None)` tunes any strategy by a greedy search over pairs of params; `summary(result)` gives its Sharpe, total return, max drawdown, and trade count.
 
+`walk_forward(name, start, knobs, folds, settings, rounds, progress=None)` runs a walk-forward. You cut the windows: each fold is `(train_markets, train_costs, test_markets, test_costs)`. Per fold it tunes on train, then runs the winner on train and on test. It returns one dict per fold: `best`, `train` and `test` (each a `summary`), and `overfit`, train Sharpe minus test Sharpe. `progress(fold, round, rounds, sharpe, best)` is called after each round. See `examples/walk_forward.py`.
+
 The indicators are also callable on their own: `sma`, `pct_change`, `prior_max`, `prior_min`, `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier`.
 
 ### 3. Trade live
@@ -131,15 +133,23 @@ Each `Order` has `kind` (`Order.Kind.Open` or `Close`), `instrument`, `side` (`S
 
 After a restart, build `Live` again on the history, and give each open position its `entry_time`, so time exits still close at the right bar.
 
+`decide(name, params, markets, positions, now, settings=None)` is the same in one call, with no object kept: it warms up on `markets` (the bars so far) every time, then returns the orders at `now`. Call it at every base bar close; it gives the orders `run` gives at that step. It is slower than `Live`, since it reads the whole history each call.
+
 More detail: [cpp/README.md](cpp/README.md) and [ADR 0017](docs/adr/0017-indicators-update-one-bar-at-a-time.md).
 
 ## Versions
 
-The version has three numbers, such as 0.3.0. The engine and every result carry it (`version`).
+The version has three numbers, such as 0.4.0. The engine and every result carry it (`version`).
 
 - Renaming or removing anything, or changing what a result means, raises the middle number: 0.2 to 0.3.
 - Adding something new raises the last number: 0.2.0 to 0.2.1.
 - Names stay stable within a version.
+
+Version 0.4.0:
+
+- Added `decide` and `walk_forward`.
+- `PortfolioSettings` is checked: `starting_balance` above 0, `risk_per_trade` and `hard_stop` in (0, 1]. A bad value raises `ValueError`.
+- `sharpe` and `Result(...)` raise `ValueError` when `equity` and `clock` differ in length.
 
 Version 0.3.0:
 

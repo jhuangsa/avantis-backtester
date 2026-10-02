@@ -13,11 +13,13 @@
 #include <pybind11/stl.h>
 
 #include <limits>
+#include <functional>
 #include <map>
 #include <optional>
 #include <variant>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace py = pybind11;
@@ -122,10 +124,15 @@ std::vector<E> to_codes(const py::array_t<uint8_t, py::array::c_style | py::arra
     return out;
 }
 
+avbt::Params params_of(const py::dict& d) {
+    avbt::Params ps;
+    for (auto [k, v] : d) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+    return ps;
+}
+
 avbt::Result run(const std::string& name, const py::dict& params, const avbt::Markets& markets,
                  const avbt::MarketCosts& costs, const avbt::PortfolioSettings& settings) {
-    avbt::Params ps;
-    for (auto [k, v] : params) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+    avbt::Params ps = params_of(params);
     py::gil_scoped_release release;
     return avbt::run(name, ps, markets, costs, settings);
 }
@@ -137,8 +144,7 @@ struct PyLive {
     PyLive(const std::string& name, const py::dict& params, const avbt::Markets& m,
            const avbt::PortfolioSettings& settings)
         : markets(m) {
-        avbt::Params ps;
-        for (auto [k, v] : params) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+        avbt::Params ps = params_of(params);
         std::string known;
         for (const avbt::StrategyInfo& s : avbt::strategies()) {
             if (s.name == name) live = s.live(ps, settings);
@@ -163,33 +169,50 @@ py::dict to_dict(const avbt::Params& ps) {
     return d;
 }
 
-// avbt::optimize. knobs is {name: [values]}. The search runs without the
-// GIL; progress(round, rounds, sharpe, best) takes it. A falsy return other
-// than None stops the search; None (no return) goes on. An exception it
-// raises stops the search and reaches the caller.
-py::dict optimize(const std::string& name, const py::dict& start, const py::dict& knobs,
-                  const avbt::Markets& markets, const avbt::MarketCosts& costs,
-                  const avbt::PortfolioSettings& settings, int rounds, const py::object& progress) {
-    avbt::Params ps;
-    for (auto [k, v] : start) ps[k.cast<std::string>()] = to_value(k.cast<std::string>(), v);
+std::vector<avbt::Knob> knobs_of(const py::dict& knobs) {
     std::vector<avbt::Knob> list;
     for (auto [k, values] : knobs) {
         avbt::Knob knob{k.cast<std::string>()};
         for (py::handle v : values) knob.values.push_back(to_value(knob.name, v));
         list.push_back(std::move(knob));
     }
-    avbt::Progress call;
-    if (!progress.is_none()) {
-        call = [&](int r, int total, double sharpe, const avbt::Params& best) {
-            py::gil_scoped_acquire gil;
-            py::object out = progress(r, total, sharpe, to_dict(best));
-            return out.is_none() || py::bool_(out);
-        };
-    }
+    return list;
+}
+
+template <class T>
+T arg_of(T x) { return x; }
+py::dict arg_of(const avbt::Params& p) { return to_dict(p); }
+
+// A Python callback, called with the GIL taken; Params become dicts. A
+// falsy return other than None stops the search; None (no return) goes on.
+// An exception it raises stops the search and reaches the caller.
+template <class... A>
+std::function<bool(A...)> callback(const py::object& f) {
+    if (f.is_none()) return {};
+    return [&f](A... args) {
+        py::gil_scoped_acquire gil;
+        py::object out = f(arg_of(args)...);
+        return out.is_none() || py::bool_(out);
+    };
+}
+
+py::dict summary_dict(const avbt::Summary& s) {
+    return py::dict(py::arg("sharpe") = s.sharpe, py::arg("total_return") = s.total_return,
+                    py::arg("max_drawdown") = s.max_drawdown, py::arg("trades") = s.trades);
+}
+
+// avbt::optimize. knobs is {name: [values]}. The search runs without the
+// GIL; progress(round, rounds, sharpe, best) takes it.
+py::dict optimize(const std::string& name, const py::dict& start, const py::dict& knobs,
+                  const avbt::Markets& markets, const avbt::MarketCosts& costs,
+                  const avbt::PortfolioSettings& settings, int rounds, const py::object& progress) {
+    avbt::Params ps = params_of(start);
+    std::vector<avbt::Knob> list = knobs_of(knobs);
+    avbt::Progress each = callback<int, int, double, const avbt::Params&>(progress);
     avbt::Search s;
     {
         py::gil_scoped_release release;
-        s = avbt::optimize(name, ps, list, markets, costs, settings, rounds, call);
+        s = avbt::optimize(name, ps, list, markets, costs, settings, rounds, each);
     }
     py::list runs;
     for (const avbt::Run& r : s.runs) {
@@ -198,6 +221,33 @@ py::dict optimize(const std::string& name, const py::dict& start, const py::dict
     }
     return py::dict(py::arg("best") = to_dict(s.best), py::arg("sharpe") = s.sharpe,
                     py::arg("runs") = runs, py::arg("timeframe") = s.timeframe);
+}
+
+// avbt::walk_forward. Each fold is (train_markets, train_costs, test_markets,
+// test_costs); progress(fold, round, rounds, sharpe, best) as in optimize.
+py::list walk_forward(const std::string& name, const py::dict& start, const py::dict& knobs,
+                      const py::list& folds, const avbt::PortfolioSettings& settings, int rounds,
+                      const py::object& progress) {
+    avbt::Params ps = params_of(start);
+    std::vector<avbt::Knob> list = knobs_of(knobs);
+    std::vector<avbt::Fold> fs;
+    for (py::handle f : folds) {
+        auto [train, train_costs, test, test_costs] =
+            f.cast<std::tuple<const avbt::Markets*, avbt::MarketCosts, const avbt::Markets*, avbt::MarketCosts>>();
+        fs.push_back({train, train_costs, test, test_costs});
+    }
+    avbt::FoldProgress each = callback<int, int, int, double, const avbt::Params&>(progress);
+    std::vector<avbt::FoldResult> out;
+    {
+        py::gil_scoped_release release;
+        out = avbt::walk_forward(name, ps, list, fs, settings, rounds, each);
+    }
+    py::list rows;
+    for (const avbt::FoldResult& r : out) {
+        rows.append(py::dict(py::arg("best") = to_dict(r.best), py::arg("train") = summary_dict(r.train),
+                             py::arg("test") = summary_dict(r.test), py::arg("overfit") = r.overfit));
+    }
+    return rows;
 }
 
 }  // namespace
@@ -406,6 +456,7 @@ PYBIND11_MODULE(avbt_cpp, m) {
 
     py::class_<avbt::Result>(m, "Result")
         .def(py::init([](const InArray& equity, avbt::Timeframe timeframe, const py::array_t<int64_t>& clock) {
+                 if (equity.size() != clock.size()) throw std::invalid_argument("equity and clock differ in length");
                  return avbt::Result{.equity = std::vector<double>(equity.data(), equity.data() + equity.size()),
                                      .timeframe = timeframe,
                                      .clock = std::vector<int64_t>(clock.data(), clock.data() + clock.size())};
@@ -446,11 +497,16 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.def("sharpe", &avbt::sharpe, py::arg("result"));
     m.def("optimize", &optimize, py::arg("name"), py::arg("start"), py::arg("knobs"), py::arg("markets"),
           py::arg("costs"), py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none());
-    m.def("summary", [](const avbt::Result& r) {
-        avbt::Summary s = avbt::summary(r);
-        return py::dict(py::arg("sharpe") = s.sharpe, py::arg("total_return") = s.total_return,
-                        py::arg("max_drawdown") = s.max_drawdown, py::arg("trades") = s.trades);
-    }, py::arg("result"));
+    m.def("summary", [](const avbt::Result& r) { return summary_dict(avbt::summary(r)); }, py::arg("result"));
+    m.def("walk_forward", &walk_forward, py::arg("name"), py::arg("start"), py::arg("knobs"), py::arg("folds"),
+          py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none());
+    // Keeps the GIL: it reads markets, which another Python thread may append to.
+    m.def("decide", [](const std::string& name, const py::dict& params, const avbt::Markets& markets,
+                       const std::vector<avbt::Position>& positions, int64_t now,
+                       const avbt::PortfolioSettings& settings) {
+        return avbt::decide(name, params_of(params), markets, positions, now, settings);
+    }, py::arg("name"), py::arg("params"), py::arg("markets"), py::arg("positions"), py::arg("now"),
+          py::arg("settings") = avbt::PortfolioSettings{});
 
     m.def("sma", [](const InArray& s, int period) {
         return to_numpy(avbt::sma(to_vector(s), period));

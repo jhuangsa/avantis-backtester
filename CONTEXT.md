@@ -163,5 +163,9 @@ One training window and the test window right after it.
 _Avoid_: split, sample
 
 **Walk-forward**:
-Tuning on each fold's training window, then scoring the winner on that fold's test window. The caller builds the folds.
+Tuning on each fold's training window, then scoring the winner on that fold's test window. The caller builds the folds; `walk_forward` runs them.
 _Avoid_: out-of-sample run, cross-validation
+
+**Overfit**:
+A fold's train Sharpe minus its test Sharpe. Near 0, the winner held up on days the search never saw.
+_Avoid_: degradation, efficiency
