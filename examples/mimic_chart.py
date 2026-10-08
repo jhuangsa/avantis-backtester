@@ -23,7 +23,10 @@ import mimic as M  # noqa: E402
 
 def curves(saved):
     """Both equity curves as returns on a 4-hour grid, and the mimic's trades."""
-    _, eq, _ = M.wallet_curve(M.CACHE / f"wallet_{saved['address']}.json")
+    hl = saved.get("venue") == "hyperliquid"
+    M.use_venue(saved.get("venue", "avantis"))
+    wallet = f"wallet_hl_{saved['address'].lower()}" if hl else f"wallet_{saved['address']}"
+    _, eq, _ = M.wallet_curve(M.CACHE / f"{wallet}.json", saved["start"] if hl else None)
     symbols = list(saved["markets"])
     markets = M.load_markets(symbols, saved["start"], saved["end"])
     costs = {s: M.avbt_cpp.Costs(M.FEE, M.FEE) for s in symbols}
@@ -42,7 +45,8 @@ def main():
     path = Path(sys.argv[1])
     saved = json.loads(path.read_text())
     data = {**curves(saved), "saved": saved}
-    out = HERE / f"mimic_{saved['address'][2:8].lower()}.html"
+    tag = "hl_" if saved.get("venue") == "hyperliquid" else ""
+    out = HERE / f"mimic_{tag}{saved['address'][2:8].lower()}.html"
     out.write_text(PAGE.replace("/*DATA*/null", json.dumps(data)))
     print(f"wrote {out}")
 

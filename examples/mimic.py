@@ -14,6 +14,10 @@ markets, dates, costs and settings, and the scores. To rerun it:
 
     python3 examples/mimic.py --replay data/candles/mimic_<address>.json
 
+A Hyperliquid wallet (1-hour and 4-hour bars, the last 200 days):
+
+    python3 examples/mimic.py --venue hyperliquid 0x5e13d5cedbddd7237f659947ce64bec1294e2607
+
 Needs pycryptodome for the address checksum.
 """
 
@@ -112,9 +116,131 @@ def bars(pid, start, end):
     return [hd.to_bars(tf, pd.DataFrame({c: z[f"{hd.RULES[tf]}_{c}"] for c in hd.BAR_COLS})) for tf in TFS]
 
 
-def wallet_curve(path):
-    """The wallet's $10,000 equity steps and its own scores, from veranta_top5."""
+HL = "https://api.hyperliquid.xyz/info"
+HL_DAYS = 200  # Hyperliquid serves the last 5000 candles: about 208 days of 1-hour bars
+HL_LEVERAGE = 5  # fills don't carry leverage; margin is taken as notional / 5
+
+
+def hl_post(body):
+    """One info call, waiting and retrying when rate limited."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(HL, json.dumps(body).encode(), {"content-type": "application/json"})
+    for wait in (5, 10, 20, 40, 80, 0):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or not wait:
+                raise
+            time.sleep(wait)
+
+
+def hl_download(address):
+    """A Hyperliquid wallet's perp closes, in the veranta_top5 record form.
+
+    Each run of a position from flat back to flat is one order. A close's
+    collateral is the notional it held before the close over HL_LEVERAGE, and
+    its gross is Hyperliquid's closedPnl. The API keeps the last 10,000 fills.
+    """
+    path = CACHE / f"wallet_hl_{address.lower()}.json"
+    if path.exists():
+        return path
+    fills, since = [], 0
+    while True:
+        page = hl_post({"type": "userFillsByTime", "user": address.lower(), "startTime": since})
+        fills += page
+        if len(page) < 2000:
+            break
+        since = page[-1]["time"] + 1
+        time.sleep(1)
+    pos = {}  # coin: [size, avg price, first price, opened, order number]
+    rows, n = [], 0
+    for f in sorted({f["tid"]: f for f in fills}.values(), key=lambda f: f["time"]):
+        if f["coin"].startswith("@") or not ("Long" in f["dir"] or "Short" in f["dir"]):
+            continue  # spot
+        c, px, t = f["coin"], float(f["px"]), f["time"] // 1000
+        size = float(f["sz"]) * (1 if f["side"] == "B" else -1)
+        p = pos.get(c)
+        if p is None or abs(p[0]) < 1e-12:
+            n += 1
+            pos[c] = [size, px, px, t, n]
+            continue
+        if p[0] * size > 0:  # add
+            p[1] = (p[0] * p[1] + size * px) / (p[0] + size)
+            p[0] += size
+            continue
+        held = abs(p[0]) * p[1] / HL_LEVERAGE
+        rows.append({"time": pd.Timestamp(t, unit="s").isoformat() + "Z", "gross": f["closedPnl"],
+                     "symbol": c, "index": p[4], "buy": p[0] > 0, "leverage": HL_LEVERAGE, "openPrice": p[2],
+                     "collateral": held, "positionSize": held, "openedAt": p[3]})
+        left = p[0] + size
+        if abs(left) < 1e-9 * max(abs(size), 1):
+            del pos[c]
+        elif left * p[0] < 0:  # flipped
+            n += 1
+            pos[c] = [left, px, px, t, n]
+        else:
+            p[0] = left
+    if not rows:
+        raise SystemExit(f"{address} has no closed Hyperliquid perp trades")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"address": address, "venue": "hyperliquid", "count": len(rows), "trades": rows}))
+    return path
+
+
+def hl_bars(coin, start, end):
+    """1-hour and 4-hour Hyperliquid bars of one coin, cached as npz."""
+    path = CACHE / f"mimic_hl_{coin.replace(':', '_')}_{start}_{end}.npz"
+    if not path.exists():
+        lo, hi = (int(pd.Timestamp(x, tz="UTC").timestamp()) for x in (start, end))
+        out = {}
+        for tf in TFS:
+            rule, step = hd.RULES[tf], {"1h": 3600, "4h": 14400}[hd.RULES[tf]]
+            got = hl_post({"type": "candleSnapshot", "req": {"coin": coin, "interval": rule,
+                           "startTime": lo * 1000, "endTime": hi * 1000}})
+            if not got:
+                return None
+            df = pd.DataFrame({"ts": [g["t"] // 1000 for g in got], "open": [float(g["o"]) for g in got],
+                               "high": [float(g["h"]) for g in got], "low": [float(g["l"]) for g in got],
+                               "close": [float(g["c"]) for g in got]}).drop_duplicates("ts").set_index("ts")
+            full = np.arange(df.index[0], hi, step, dtype="int64")
+            df = df.reindex(full)
+            df["minutes_with_data"] = np.where(df.close.isna(), 0, step // 60).astype("int32")
+            df["close"] = df.close.ffill()
+            for k in ("open", "high", "low"):
+                df[k] = df[k].fillna(df.close)
+            df = df.reset_index(names="ts")
+            out.update({f"{rule}_{c}": df[c].to_numpy() for c in hd.BAR_COLS})
+            time.sleep(1)
+        np.savez_compressed(path, **out)
+    z = np.load(path)
+    return [hd.to_bars(tf, pd.DataFrame({c: z[f"{hd.RULES[tf]}_{c}"] for c in hd.BAR_COLS})) for tf in TFS]
+
+
+VENUE = "avantis"
+
+
+def use_venue(venue):
+    """Hyperliquid has 1-hour and 4-hour bars only, so the timeframe knob shrinks."""
+    global VENUE, TFS, TF_NAMES
+    VENUE = venue
+    if venue == "hyperliquid":
+        TFS = (TF.Hour1, TF.Hour4)
+        TF_NAMES = {avbt_cpp.timeframe_name(t): t for t in TFS}
+        KNOBS["timeframe"] = list(TF_NAMES)
+
+
+def wallet_curve(path, since=None):
+    """The wallet's $10,000 equity steps and its own scores, from veranta_top5.
+
+    since: a date; closes before it are left out.
+    """
     rows = vt._closes(path)
+    if since:
+        lo = pd.Timestamp(since, tz="UTC")
+        rows = [r for r in rows if r["close"] >= lo]
     book = vt._book({"id": "", "address": "", "blurb": "", "color": ""}, rows)
     eq = pd.Series([v for _, v in book["equity"]], index=[t for t, _ in book["equity"]])
     eq = eq.groupby(level=0).last()
@@ -125,10 +251,10 @@ def wallet_curve(path):
 
 def load_markets(symbols, start, end):
     """Markets for the symbols with candles; drops the rest from symbols."""
-    ids = {v: k for k, v in vt._symbols().items()}
+    ids = {} if VENUE == "hyperliquid" else {v: k for k, v in vt._symbols().items()}
     markets = []
     for s in symbols:
-        b = bars(ids[s], start, end)
+        b = hl_bars(s, start, end) if VENUE == "hyperliquid" else bars(ids[s], start, end)
         if b is None or not len(b[0].ts):
             print(f"  {s}: no candles, left out")
             continue
@@ -223,11 +349,16 @@ def report(out):
 
 
 def setup(address, top):
-    path = download(address)
-    rows, eq, wallet = wallet_curve(path)
+    since = None
+    if VENUE == "hyperliquid":
+        path = hl_download(address)
+        since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=HL_DAYS)).strftime("%Y-%m-%d")
+    else:
+        path = download(address)
+    rows, eq, wallet = wallet_curve(path, since)
     counts = pd.Series([r["symbol"] for r in rows]).value_counts()
     symbols = list(counts.index[:top])
-    start = pd.Timestamp(eq.index[0], unit="s").strftime("%Y-%m-%d")
+    start = max(pd.Timestamp(eq.index[0], unit="s").strftime("%Y-%m-%d"), since or "")
     end = (pd.Timestamp(eq.index[-1], unit="s") + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     print(f"{len(rows)} closes, {start} to {end}; {counts.iloc[:top].sum()} of them in {', '.join(symbols)}")
     return eq, wallet, symbols, start, end
@@ -240,11 +371,13 @@ def main():
     ap.add_argument("--top", type=int, default=8, help="markets to use, busiest first")
     ap.add_argument("--passes", type=int, default=6, help="most passes per start")
     ap.add_argument("--restarts", type=int, default=4, help="random starts after the first")
+    ap.add_argument("--venue", choices=["avantis", "hyperliquid"], default="avantis")
     ap.add_argument("--workers", type=int, help="backtest threads; default one per core")
     args = ap.parse_args()
 
     if args.replay:
         saved = json.loads(Path(args.replay).read_text())
+        use_venue(saved.get("venue", "avantis"))
         markets = load_markets(saved["markets"], saved["start"], saved["end"])
         costs = {s: avbt_cpp.Costs(FEE, FEE) for s in saved["markets"]}
         now = scores(backtest(saved["params"], markets, costs))
@@ -255,6 +388,7 @@ def main():
 
     if not args.address:
         ap.error("give a wallet address or --replay")
+    use_venue(args.venue)
     address = checksum(args.address)
     eq, wallet, symbols, start, end = setup(address, args.top)
     markets = load_markets(symbols, start, end)
@@ -268,11 +402,11 @@ def main():
     first = {**START, "side": -1 if wallet["short_share"] > 0.5 else 1}
     best, best_mse = fit(markets, costs, target, grid, first, args.restarts, args.passes,
                          workers=args.workers)
-    out = {"address": address, "avbt_version": avbt_cpp.version, "strategy": "mimic", "params": best,
+    out = {"address": address, "venue": VENUE, "avbt_version": avbt_cpp.version, "strategy": "mimic", "params": best,
            "markets": symbols, "start": start, "end": end, "costs": {"open_fee": FEE, "close_fee": FEE},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": best["risk"], "hard_stop": 1.0},
            "mse": best_mse, "wallet": wallet, "mimic": scores(backtest(best, markets, costs))}
-    path = CACHE / f"mimic_{address}.json"
+    path = CACHE / f"mimic_{'hl_' if VENUE == 'hyperliquid' else ''}{address}.json"
     path.write_text(json.dumps(out, indent=1))
     report(out)
     print(f"\n{time.time() - t0:.0f} s; saved {path}")
