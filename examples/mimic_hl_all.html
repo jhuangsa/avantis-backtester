@@ -24,7 +24,8 @@ th{color:var(--ink2);font-weight:500}td:first-child,th:first-child{text-align:le
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
 .card{background:var(--panel);border-radius:10px;padding:12px 14px}
 .card h3{font-size:14px;margin:0;font-family:ui-monospace,monospace}
-.card .m{color:var(--ink3);font-size:12px;margin-bottom:6px;overflow-wrap:anywhere}
+.card .m{color:var(--ink3);font-size:12px;margin-bottom:2px;overflow-wrap:anywhere}
+.card .legend{font-size:12px;margin:0 0 4px}
 .card .s{display:grid;grid-template-columns:auto 1fr 1fr;gap:0 10px;font-size:12px;
 font-variant-numeric:tabular-nums;margin-top:6px}
 .card .s span:nth-child(3n+1){color:var(--ink3)}
@@ -67,8 +68,10 @@ return `<svg viewBox="0 0 ${W} ${H}"><line x1="${L}" x2="${W-4}" y1="${y(0)}" y2
 <path d="${path(r.mimic)}" fill="none" stroke="var(--s2)" stroke-width="1.6"/></svg>`}
 document.getElementById("cards").innerHTML=D.map(r=>{const w=r.wallet_stats,m=r.mimic_stats;
 return `<div class="card" id="w${r.address}"><h3>${short(r.address)}</h3>
-<div class="m">${r.markets.join(", ")} · ${r.params.timeframe}</div>${chart(r)}
-<div class="s"><span></span><span>Wallet</span><span>Mimic</span>
+<div class="m">${r.markets.join(", ")} · ${r.params.timeframe}</div>
+<div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
+<span><i style="background:var(--s2)"></i>Mimic</span></div>${chart(r)}
+<div class="s"><span></span><span style="color:var(--s1)">Wallet</span><span style="color:var(--s2)">Mimic</span>
 <span>Return</span><span${cls(w.return)}>${pct(w.return)}</span><span${cls(m.return)}>${pct(m.return)}</span>
 <span>Sharpe</span><span>${w.sharpe.toFixed(2)}</span><span>${m.sharpe.toFixed(2)}</span>
 <span>Max DD</span><span>${(w.max_drawdown*100).toFixed(0)}%</span><span>${(m.max_drawdown*100).toFixed(0)}%</span>
