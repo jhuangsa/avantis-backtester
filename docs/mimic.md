@@ -10,7 +10,7 @@ From the repository root:
 python3 examples/mimic.py 0xFFB7eF358cEe48DaFE15B63A625DFF9eA4E2268F
 ```
 
-It takes about 5 minutes on a laptop. To check a saved result:
+It takes about 3 minutes on an 8-core laptop. To check a saved result:
 
 ```bash
 python3 examples/mimic.py --replay data/candles/mimic_<address>.json
@@ -71,7 +71,7 @@ There are 24 settings, far too many combinations to try them all. So the tool tu
 
 This kind of search can get stuck on a good answer that isn't the best one. So the tool runs it again from 4 random starting points (8 for the example below) and keeps the best result. The first start uses the wallet's usual side, long or short.
 
-Backtests run in parallel, and the tool never repeats a backtest it has already run. A setting that belongs to a filter that is off changes nothing, so those tries are skipped.
+All the starting points run at the same time and share one set of backtest threads, one per CPU core, so every core stays busy until the end. The tool never repeats a backtest it has already run. A setting that belongs to a filter that is off changes nothing, so those tries are skipped.
 
 The fit uses the whole history on purpose. There is no separate test period, so the result describes the past and does not predict the future.
 

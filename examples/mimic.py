@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -170,10 +171,12 @@ def effective(p):
     return tuple(sorted(out.items()))
 
 
-def fit(markets, costs, target, grid, start, restarts=4, passes=6, tol=0.01, workers=8, seed=0):
-    """Two knobs at a time, every pair per pass, until a pass gains less than tol.
+def fit(markets, costs, target, grid, first, restarts=4, passes=6, tol=0.01, workers=None, seed=0):
+    """Climbs from `first` and from `restarts` random starts, all at once; keeps the best.
 
-    Runs from `start`, then from `restarts` random starts; keeps the best.
+    Each start climbs two knobs at a time, every pair per pass, until a pass
+    gains less than tol. All starts share one pool of backtest threads (the
+    C++ run frees Python's lock) and one record of the runs done so far.
     """
     seen = {}
 
@@ -185,27 +188,26 @@ def fit(markets, costs, target, grid, start, restarts=4, passes=6, tol=0.01, wor
             seen[key] = float(np.mean((on_grid(eq, grid) - target) ** 2))
         return seen[key]
 
+    def climb(i, best):
+        best_mse = mse(best)
+        for n in range(1, passes + 1):
+            before = best_mse
+            for a, b in itertools.combinations(KNOBS, 2):
+                tries = [{**best, a: x, b: y} for x in KNOBS[a] for y in KNOBS[b]]
+                for p, m in zip(tries, runs.map(mse, tries)):
+                    if m < best_mse - 1e-12:
+                        best, best_mse = p, m
+            print(f"start {i}, pass {n}: mse {best_mse:.5f}, {len(seen)} backtests", flush=True)
+            if before - best_mse < tol * before:
+                break
+        return best, best_mse
+
     rng = np.random.default_rng(seed)
-    starts = [start] + [{k: v[rng.integers(len(v))] for k, v in KNOBS.items()} for _ in range(restarts)]
-    pairs = list(itertools.combinations(KNOBS, 2))
-    winner, winner_mse = None, np.inf
-    with ThreadPoolExecutor(workers) as pool:
-        for i, best in enumerate(starts):
-            best = {k: v.item() if hasattr(v, "item") else v for k, v in best.items()}
-            best_mse = mse(best)
-            for n in range(1, passes + 1):
-                before = best_mse
-                for a, b in pairs:
-                    tries = [{**best, a: x, b: y} for x in KNOBS[a] for y in KNOBS[b]]
-                    for p, m in zip(tries, pool.map(mse, tries)):
-                        if m < best_mse - 1e-12:
-                            best, best_mse = p, m
-                print(f"start {i}, pass {n}: mse {best_mse:.5f}, {len(seen)} backtests")
-                if before - best_mse < tol * before:
-                    break
-            if best_mse < winner_mse:
-                winner, winner_mse = best, best_mse
-    return winner, winner_mse
+    starts = [first] + [{k: v[rng.integers(len(v))] for k, v in KNOBS.items()} for _ in range(restarts)]
+    starts = [{k: v.item() if hasattr(v, "item") else v for k, v in p.items()} for p in starts]
+    with ThreadPoolExecutor(workers or os.cpu_count()) as runs, ThreadPoolExecutor(len(starts)) as climbs:
+        done = list(climbs.map(climb, range(len(starts)), starts))
+    return min(done, key=lambda x: x[1])
 
 
 def report(out):
@@ -238,6 +240,7 @@ def main():
     ap.add_argument("--top", type=int, default=8, help="markets to use, busiest first")
     ap.add_argument("--passes", type=int, default=6, help="most passes per start")
     ap.add_argument("--restarts", type=int, default=4, help="random starts after the first")
+    ap.add_argument("--workers", type=int, help="backtest threads; default one per core")
     args = ap.parse_args()
 
     if args.replay:
@@ -263,7 +266,8 @@ def main():
     t0 = time.time()
     # Start on the wallet's usual side: with no filter on, both sides pass and it never opens.
     first = {**START, "side": -1 if wallet["short_share"] > 0.5 else 1}
-    best, best_mse = fit(markets, costs, target, grid, first, args.restarts, args.passes)
+    best, best_mse = fit(markets, costs, target, grid, first, args.restarts, args.passes,
+                         workers=args.workers)
     out = {"address": address, "avbt_version": avbt_cpp.version, "strategy": "mimic", "params": best,
            "markets": symbols, "start": start, "end": end, "costs": {"open_fee": FEE, "close_fee": FEE},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": best["risk"], "hard_stop": 1.0},
