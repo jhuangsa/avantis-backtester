@@ -11,6 +11,7 @@
 #include "avbt/library/dip_buyer.hpp"
 #include "avbt/library/failed_breakout_fade.hpp"
 #include "avbt/library/false_break_1h.hpp"
+#include "avbt/library/mimic.hpp"
 #include "avbt/library/range_basket.hpp"
 #include "avbt/library/range_seller.hpp"
 #include "avbt/library/rsi_snap.hpp"
@@ -26,6 +27,7 @@ inline std::vector<StrategyInfo> library() {
         detail::dip_buyer_info(),
         detail::failed_breakout_fade_info(),
         detail::false_break_1h_info(),
+        detail::mimic_info(),
         detail::range_basket_info(),
         detail::range_seller_info(),
         detail::rsi_snap_info(),

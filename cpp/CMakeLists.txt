@@ -114,6 +114,10 @@ add_executable(test_rsi_snap tests/test_rsi_snap.cpp)
 target_link_libraries(test_rsi_snap PRIVATE avbt)
 target_compile_options(test_rsi_snap PRIVATE -Wall -Wextra)
 target_compile_definitions(test_rsi_snap PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
+add_executable(test_mimic tests/test_mimic.cpp)
+target_link_libraries(test_mimic PRIVATE avbt)
+target_compile_options(test_mimic PRIVATE -Wall -Wextra)
+target_compile_definitions(test_mimic PRIVATE _LIBCPP_ENABLE_ASSERTIONS=1)
 
 # Python module avbt_cpp, built only when pybind11 is found.
 # Point CMake at it with -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir).
@@ -145,3 +149,4 @@ add_test(NAME test_weekend_basket COMMAND test_weekend_basket)
 add_test(NAME test_weekend_breakout_fade COMMAND test_weekend_breakout_fade)
 add_test(NAME test_false_break_1h COMMAND test_false_break_1h)
 add_test(NAME test_rsi_snap COMMAND test_rsi_snap)
+add_test(NAME test_mimic COMMAND test_mimic)
