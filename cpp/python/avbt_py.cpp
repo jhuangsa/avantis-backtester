@@ -202,33 +202,42 @@ py::dict summary_dict(const avbt::Summary& s) {
                     py::arg("max_drawdown") = s.max_drawdown, py::arg("trades") = s.trades);
 }
 
+// None means no limit: the search maximizes Sharpe.
+avbt::Goal goal_of(std::optional<double> max_drawdown, double min_gain) {
+    return {.max_drawdown = max_drawdown.value_or(std::nan("")), .min_gain = min_gain};
+}
+
 // avbt::optimize. knobs is {name: [values]}. The search runs without the
-// GIL; progress(round, rounds, sharpe, best) takes it.
+// GIL; progress(round, rounds, score, best) takes it.
 py::dict optimize(const std::string& name, const py::dict& start, const py::dict& knobs,
                   const avbt::Markets& markets, const avbt::MarketCosts& costs,
-                  const avbt::PortfolioSettings& settings, int rounds, const py::object& progress) {
+                  const avbt::PortfolioSettings& settings, int rounds, const py::object& progress,
+                  std::optional<double> max_drawdown, double min_gain) {
     avbt::Params ps = params_of(start);
     std::vector<avbt::Knob> list = knobs_of(knobs);
     avbt::Progress each = callback<int, int, double, const avbt::Params&>(progress);
     avbt::Search s;
     {
         py::gil_scoped_release release;
-        s = avbt::optimize(name, ps, list, markets, costs, settings, rounds, each);
+        avbt::Goal goal = goal_of(max_drawdown, min_gain);
+        s = avbt::optimize(name, ps, list, markets, costs, settings, rounds, each, goal);
     }
     py::list runs;
     for (const avbt::Run& r : s.runs) {
-        runs.append(py::dict(py::arg("round") = r.round, py::arg("params") = to_dict(r.params),
-                             py::arg("sharpe") = r.sharpe));
+        py::dict d = summary_dict(r.summary);
+        d["round"] = r.round, d["params"] = to_dict(r.params), d["score"] = r.score;
+        runs.append(d);
     }
-    return py::dict(py::arg("best") = to_dict(s.best), py::arg("sharpe") = s.sharpe,
-                    py::arg("runs") = runs, py::arg("timeframe") = s.timeframe);
+    py::dict out = summary_dict(s.summary);
+    out["best"] = to_dict(s.best), out["score"] = s.score, out["runs"] = runs, out["timeframe"] = s.timeframe;
+    return out;
 }
 
 // avbt::walk_forward. Each fold is (train_markets, train_costs, test_markets,
 // test_costs); progress(fold, round, rounds, sharpe, best) as in optimize.
 py::list walk_forward(const std::string& name, const py::dict& start, const py::dict& knobs,
                       const py::list& folds, const avbt::PortfolioSettings& settings, int rounds,
-                      const py::object& progress) {
+                      const py::object& progress, std::optional<double> max_drawdown, double min_gain) {
     avbt::Params ps = params_of(start);
     std::vector<avbt::Knob> list = knobs_of(knobs);
     std::vector<avbt::Fold> fs;
@@ -241,7 +250,7 @@ py::list walk_forward(const std::string& name, const py::dict& start, const py::
     std::vector<avbt::FoldResult> out;
     {
         py::gil_scoped_release release;
-        out = avbt::walk_forward(name, ps, list, fs, settings, rounds, each);
+        out = avbt::walk_forward(name, ps, list, fs, settings, rounds, each, goal_of(max_drawdown, min_gain));
     }
     py::list rows;
     for (const avbt::FoldResult& r : out) {
@@ -501,10 +510,12 @@ PYBIND11_MODULE(avbt_cpp, m) {
     m.attr("version") = avbt::version;
     m.def("sharpe", &avbt::sharpe, py::arg("result"));
     m.def("optimize", &optimize, py::arg("name"), py::arg("start"), py::arg("knobs"), py::arg("markets"),
-          py::arg("costs"), py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none());
+          py::arg("costs"), py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none(),
+          py::arg("max_drawdown") = py::none(), py::arg("min_gain") = 0.0);
     m.def("summary", [](const avbt::Result& r) { return summary_dict(avbt::summary(r)); }, py::arg("result"));
     m.def("walk_forward", &walk_forward, py::arg("name"), py::arg("start"), py::arg("knobs"), py::arg("folds"),
-          py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none());
+          py::arg("settings"), py::arg("rounds"), py::arg("progress") = py::none(),
+          py::arg("max_drawdown") = py::none(), py::arg("min_gain") = 0.0);
     // Keeps the GIL: it reads markets, which another Python thread may append to.
     m.def("decide", [](const std::string& name, const py::dict& params, const avbt::Markets& markets,
                        const std::vector<avbt::Position>& positions, int64_t now,

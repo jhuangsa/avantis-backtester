@@ -222,11 +222,11 @@ void test_deterministic() {
     std::vector<Knob> knobs = {{"lag", {1, 2, 3}}, {"rise", {0.01, 0.02}}, {"stop", {0.05, 0.1}}};
     Search x = optimize("rally_short", {}, knobs, v, costs_for(v), {}, 4);
     Search y = optimize("rally_short", {}, knobs, v, costs_for(v), {}, 4);
-    bool eq = x.best == y.best && std::memcmp(&x.sharpe, &y.sharpe, sizeof x.sharpe) == 0 &&
+    bool eq = x.best == y.best && std::memcmp(&x.score, &y.score, sizeof x.score) == 0 &&
               x.runs.size() == y.runs.size();
     for (std::size_t i = 0; eq && i < x.runs.size(); ++i) {
         eq = x.runs[i].round == y.runs[i].round && x.runs[i].params == y.runs[i].params &&
-             std::memcmp(&x.runs[i].sharpe, &y.runs[i].sharpe, sizeof x.runs[i].sharpe) == 0;
+             std::memcmp(&x.runs[i].score, &y.runs[i].score, sizeof x.runs[i].score) == 0;
     }
     check_true("optimize twice: same search", eq);
 }

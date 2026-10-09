@@ -771,17 +771,21 @@ One parameter the search may change. `choices[i]` is a function that writes one 
 
 ### `struct Knob`, `struct Run`, `struct Search`, `Progress`
 
-A `Knob` is a param name and the `Value`s it may take, as `run` takes them; a combined strategy's names start with `a.` or `b.`. A `Run` is one backtest: its `round`, its `params`, and its `sharpe`. `Search` holds the `best` params, their `sharpe`, the base `timeframe`, and every `Run`. `Progress` is called after each round with (round, rounds, best Sharpe, best params); returning false stops the search after that round.
+A `Knob` is a param name and the `Value`s it may take, as `run` takes them; a combined strategy's names start with `a.` or `b.`. A `Run` is one backtest: its `round`, its `params`, its `Summary`, and its `score`. `Search` holds the `best` params, their `score` and `summary`, the base `timeframe`, and every `Run`. `Progress` is called after each round with (round, rounds, best score, best params); returning false stops the search after that round.
 
-### `Search optimize(name, start, knobs, markets, costs, settings, rounds, progress = {})`
+### `struct Goal`, `score(summary, goal)`
 
-Tunes the table strategy `name`. It first checks every knob value (name, type, range) and throws `std::invalid_argument` naming the bad knob. It then calls `search`, which scores each run by `sharpe`:
+What the search maximizes. With `max_drawdown` NaN (the default), Sharpe. With a limit (a positive fraction: 0.1 is a 10% fall), total return over runs whose max drawdown is at most the limit; a run over it scores NaN and never wins. `min_gain`: a full pass whose gains are all at or below it stops the search. When no run meets the limit, `score` is NaN and `best` is the start. ADR 0018.
+
+### `Search optimize(name, start, knobs, markets, costs, settings, rounds, progress = {}, goal = {})`
+
+Tunes the table strategy `name`. It first checks every knob value (name, type, range) and throws `std::invalid_argument` naming the bad knob. It then calls `search`, which scores each run's `summary` under `goal`:
 
 1. Every knob starts at its first value. That is round 0.
 2. The pairs of knobs are listed in a fixed order: (0,1), (0,2), …, (1,2), ….
-3. Round `r` takes the next pair and runs every combination of its two knobs, the other knobs at the best so far. Any higher Sharpe becomes the best. NaN never does.
+3. Round `r` takes the next pair and runs every combination of its two knobs, the other knobs at the best so far. Any higher score becomes the best. NaN never does.
 4. A combination already run is not run again.
-5. The search stops after `rounds` rounds, or sooner, when a full pass over the pairs brings no gain, or when `progress` returns false.
+5. The search stops after `rounds` rounds, or sooner, when a full pass over the pairs brings no gain above `goal.min_gain`, or when `progress` returns false.
 
 ### `Summary summary(result)`
 
@@ -789,9 +793,9 @@ Sharpe, total return (ending equity / starting equity − 1), max drawdown (the 
 
 Each run builds a fresh strategy, so `prepare` starts clean.
 
-### `walk_forward(name, start, knobs, folds, settings, rounds, progress = {})`
+### `walk_forward(name, start, knobs, folds, settings, rounds, progress = {}, goal = {})`
 
-A `Fold` holds a train `Markets` and its `MarketCosts`, and a test `Markets` and its `MarketCosts`; the caller cuts them. Per fold, `walk_forward` calls `optimize` on train, then runs the winner on train and on test. It returns one `FoldResult` per fold: `best`, the `train` and `test` `Summary`, and `overfit`, train Sharpe minus test Sharpe. `FoldProgress` is called with the fold's index and then `Progress`'s arguments; returning false stops that fold's search only. No folds throws, and so does a fold whose train or test `Markets` is null (Python: `None`).
+A `Fold` holds a train `Markets` and its `MarketCosts`, and a test `Markets` and its `MarketCosts`; the caller cuts them. Per fold, `walk_forward` calls `optimize` on train with `goal`, then runs the winner on train and on test. It returns one `FoldResult` per fold: `best`, the `train` and `test` `Summary`, and `overfit`, train Sharpe minus test Sharpe. `FoldProgress` is called with the fold's index and then `Progress`'s arguments; returning false stops that fold's search only. No folds throws, and so does a fold whose train or test `Markets` is null (Python: `None`).
 
 `sharpe` throws `std::invalid_argument` when `equity` and `clock` differ in length.
 
@@ -828,9 +832,9 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `Side`, `Cause` | The two enums, now Python enums. `Cause` has `Stop`, `TrailingStop`, `PartialTakeProfit`, `TakeProfit`, `Liquidation`, `HardStop`, `Order`, and `EndOfData`. |
 | `version` | The engine version, the same constant C++ stamps on every `Result`. |
 | `sharpe` | `(result)`: `avbt::sharpe`. `Result(equity, timeframe, clock)` builds a result to score. |
-| `optimize` | `(name, start, knobs, markets, costs, settings, rounds, progress=None)`: `avbt::optimize`. `start` is a params dict; `knobs` is `{name: [values]}`. The search runs without the GIL; `progress(round, rounds, sharpe, best)` takes it, and an exception it raises stops the search and reaches the caller. Returns `{"best", "sharpe", "runs", "timeframe"}`; `best` passes to `run`, and each run is `{"round", "params", "sharpe"}`. |
+| `optimize` | `(name, start, knobs, markets, costs, settings, rounds, progress=None, max_drawdown=None, min_gain=0.0)`: `avbt::optimize`. `start` is a params dict; `knobs` is `{name: [values]}`; `max_drawdown` and `min_gain` make the `Goal` (None: maximize Sharpe). The search runs without the GIL; `progress(round, rounds, score, best)` takes it, and an exception it raises stops the search and reaches the caller. Returns `{"best", "score", "sharpe", "total_return", "max_drawdown", "trades", "runs", "timeframe"}`; `best` passes to `run`, and each run is `{"round", "params", "score", "sharpe", "total_return", "max_drawdown", "trades"}`. |
 | `summary` | `(result)`: `avbt::summary` as a dict `{"sharpe", "total_return", "max_drawdown", "trades"}`. |
-| `walk_forward` | `(name, start, knobs, folds, settings, rounds, progress=None)`: `avbt::walk_forward`. Each fold is `(train_markets, train_costs, test_markets, test_costs)`. Runs without the GIL; `progress(fold, round, rounds, sharpe, best)` takes it. Returns one dict per fold: `{"best", "train", "test", "overfit"}`, `train` and `test` as `summary` gives them. |
+| `walk_forward` | `(name, start, knobs, folds, settings, rounds, progress=None, max_drawdown=None, min_gain=0.0)`: `avbt::walk_forward`, with the goal as in `optimize`. Each fold is `(train_markets, train_costs, test_markets, test_costs)`. Runs without the GIL; `progress(fold, round, rounds, score, best)` takes it. Returns one dict per fold: `{"best", "train", "test", "overfit"}`, `train` and `test` as `summary` gives them. |
 | `Live`, `decide` | `Live(name, params, markets, settings)` then `live.decide(now, positions)`; or `decide(name, params, markets, positions, now, settings)` in one call, `avbt::decide`. Both keep the GIL. See Live below. |
 | `sma`, `pct_change`, `prior_max`, `prior_min` | Take a numpy array and a number; return a numpy array. |
 | `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier` | Take `Bars`; return a numpy array. Fields and sides are strings. |

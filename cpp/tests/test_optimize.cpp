@@ -138,12 +138,13 @@ void test_sharpe_same_on_minute_and_hour_bars() {
 void test_search() {
     std::vector<Knob> knobs = {knob("a", {0, 1, 2}), knob("b", {0, 1, 2, 3}), knob("c", {0, 1})};
     Markets m = rising();
-    auto score = [&](const Params& p) { return toy_sharpe(p, m); };
+    auto score = [&](const Params& p) { return Summary{.sharpe = toy_sharpe(p, m)}; };
     Search s = search({}, knobs, 10, score);
     check_value("best a", std::get<int>(s.best.at("a")), 2);
     check_value("best b", std::get<int>(s.best.at("b")), 3);
     check_value("best c stays first", std::get<int>(s.best.at("c")), 0);
-    check_value("positive sharpe", s.sharpe > 0, 1);
+    check_value("positive sharpe", s.score > 0, 1);
+    check_value("summary sharpe", s.summary.sharpe, s.score);
     // Start 1; pair (a,b) 11 new; (a,c) at b=3 and (b,c) at a=2 each 3 new,
     // the rest already run. Then a full pass with no gain ends the search.
     check_value("runs", s.runs.size(), 18);
@@ -157,7 +158,7 @@ void test_search() {
     check_value("same runs", again.runs.size(), s.runs.size());
     for (std::size_t i = 0; i < s.runs.size(); ++i) {
         check_value("same params", again.runs[i].params == s.runs[i].params, 1);
-        check_value("same sharpe", again.runs[i].sharpe, s.runs[i].sharpe);
+        check_value("same score", again.runs[i].score, s.runs[i].score);
     }
     // Progress sees each round; returning false stops after that round.
     std::vector<int> seen;
@@ -176,6 +177,38 @@ void test_search() {
         threw = true;
     }
     check_value("zero rounds throws", threw, 1);
+}
+
+// Return a + b, drawdown 0.1 a + 0.05: under a 20% limit only a = 0 and
+// a = 1 count, so the best is a = 1, b = 3.
+void test_search_drawdown_limit() {
+    std::vector<Knob> knobs = {knob("a", {0, 1, 2}), knob("b", {0, 1, 2, 3}), knob("c", {0, 1})};
+    auto fake = [](const Params& p) {
+        int a = std::get<int>(p.at("a")), b = std::get<int>(p.at("b"));
+        return Summary{.total_return = double(a + b), .max_drawdown = 0.1 * a + 0.05};
+    };
+    Search s = search({}, knobs, 10, fake, {}, Goal{.max_drawdown = 0.2});
+    check_value("limit a", std::get<int>(s.best.at("a")), 1);
+    check_value("limit b", std::get<int>(s.best.at("b")), 3);
+    check_value("limit score is return", s.score, 4);
+    check_value("limit drawdown", s.summary.max_drawdown, 0.15);
+    for (const Run& r : s.runs) check_value("over limit is NaN", std::isnan(r.score), r.summary.max_drawdown > 0.2);
+    // No run meets the limit: NaN, and best is the start.
+    Search none = search({}, knobs, 10, fake, {}, Goal{.max_drawdown = 0.01});
+    check_value("none feasible", std::isnan(none.score), 1);
+    check_value("none best is start", std::get<int>(none.best.at("a")), 0);
+    // A min_gain above every rise: round 1 still takes the best, but the
+    // search stops after one full pass, at round 3.
+    Search coarse = search({}, knobs, 10, fake, {}, Goal{.max_drawdown = 0.2, .min_gain = 100});
+    check_value("coarse best", coarse.score, 4);
+    check_value("coarse stops", coarse.runs.back().round, 3);
+    bool threw = false;
+    try {
+        search({}, knobs, 1, fake, {}, Goal{.max_drawdown = -0.1});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check_value("negative limit throws", threw, 1);
 }
 
 // A Result whose equity and clock differ in length throws, not crashes.
@@ -246,6 +279,7 @@ int main() {
     test_sharpe_flat_is_nan();
     test_sharpe_same_on_minute_and_hour_bars();
     test_search();
+    test_search_drawdown_limit();
     if (failures == 0) std::printf("all optimize checks passed\n");
     return failures == 0 ? 0 : 1;
 }

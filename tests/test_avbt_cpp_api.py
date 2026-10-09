@@ -1,5 +1,6 @@
 """The avbt_cpp Python API: markets, costs, run, and the strategy table."""
 
+import math
 import sys
 import threading
 import time
@@ -143,12 +144,24 @@ KNOBS = {"average": [50, 20], "reward": [2.0, 3.0]}
 def test_optimize_single(setup):
     markets, costs = setup
     s = avbt.optimize("state_trend", {"flip": True}, KNOBS, markets, costs, avbt.PortfolioSettings(), 2)
-    assert set(s) == {"best", "sharpe", "runs", "timeframe"}
+    assert set(s) == {"best", "score", "sharpe", "total_return", "max_drawdown", "trades", "runs", "timeframe"}
+    np.testing.assert_equal(s["score"], s["sharpe"])
     assert s["timeframe"] == avbt.Timeframe.Min1
     assert s["best"]["flip"] is True and s["best"]["average"] in (50, 20)
     first = s["runs"][0]
     assert first["round"] == 0 and first["params"] == {"flip": True, "average": 50, "reward": 2.0}
     avbt.run("state_trend", s["best"], markets, costs)
+
+
+def test_optimize_max_drawdown(setup):
+    markets, costs = setup
+    free = avbt.optimize("state_trend", {}, KNOBS, markets, costs, avbt.PortfolioSettings(), 4)
+    limit = min(r["max_drawdown"] for r in free["runs"])
+    s = avbt.optimize("state_trend", {}, KNOBS, markets, costs, avbt.PortfolioSettings(), 4, max_drawdown=limit)
+    ok = [r for r in s["runs"] if r["max_drawdown"] <= limit]
+    assert s["max_drawdown"] <= limit and s["score"] == s["total_return"]
+    assert s["score"] == max(r["total_return"] for r in ok)
+    assert all(math.isnan(r["score"]) for r in s["runs"] if r["max_drawdown"] > limit)
 
 
 def test_optimize_combined(setup):
