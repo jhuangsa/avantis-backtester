@@ -25,8 +25,10 @@ def curves(saved):
     """Both equity curves as returns on a 4-hour grid, and the mimic's trades."""
     hl = saved.get("venue") == "hyperliquid"
     M.use_venue(saved.get("venue", "avantis"))
-    wallet = f"wallet_hl_{saved['address'].lower()}" if hl else f"wallet_{saved['address']}"
-    _, eq, _ = M.wallet_curve(M.CACHE / f"{wallet}.json", saved["start"] if hl else None)
+    if hl:
+        eq = M.hl_curve(saved["address"], saved["start"], saved["end"])[0]
+    else:
+        _, eq, _ = M.wallet_curve(M.CACHE / f"wallet_{saved['address']}.json")
     symbols = list(saved["markets"])
     markets = M.load_markets(symbols, saved["start"], saved["end"])
     costs = {s: M.avbt_cpp.Costs(M.FEE, M.FEE) for s in symbols}
@@ -47,7 +49,10 @@ def main():
     data = {**curves(saved), "saved": saved}
     tag = "hl_" if saved.get("venue") == "hyperliquid" else ""
     out = HERE / f"mimic_{tag}{saved['address'][2:8].lower()}.html"
-    out.write_text(PAGE.replace("/*DATA*/null", json.dumps(data)))
+    page = PAGE.replace("/*DATA*/null", json.dumps(data))
+    if tag:  # a Hyperliquid wallet's curve is total PnL, realized plus unrealized
+        page = page.replace("<h2>Equity,", "<h2>Total PnL, realized plus unrealized,")
+    out.write_text(page)
     print(f"wrote {out}")
 
 

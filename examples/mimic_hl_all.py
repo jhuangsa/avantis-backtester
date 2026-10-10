@@ -68,7 +68,9 @@ svg{display:block;width:100%;height:auto}svg text{fill:var(--ink3);font-size:10p
 </style></head><body><main>
 <h1>Hyperliquid wallet mimics</h1>
 <p class="sub">19 wallets from OptimistFi, each fitted with the <code>mimic</code> strategy over its last 200 days.
-PnL is a return on a $10,000 account (wallet trades sized at an assumed 5x leverage).
+Wallet PnL is a return on its perp account value at the start, shown on a $10,000 account.
+Both curves are total PnL: realized plus unrealized, open positions valued at each hour's close.
+Wallet PnL includes the fees it paid and leaves out funding.
 Copy error is the root of the MSE between the two curves.</p>
 <div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
 <span><i style="background:var(--s2)"></i>Mimic</span></div>

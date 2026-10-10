@@ -14,7 +14,8 @@ markets, dates, costs and settings, and the scores. To rerun it:
 
     python3 examples/mimic.py --replay data/candles/mimic_<address>.json
 
-A Hyperliquid wallet (1-hour and 4-hour bars, the last 200 days):
+A Hyperliquid wallet (1-hour and 4-hour bars, the last 200 days). Its curve
+is total PnL, realized plus unrealized, from its fills and hourly closes:
 
     python3 examples/mimic.py --venue hyperliquid 0x5e13d5cedbddd7237f659947ce64bec1294e2607
 
@@ -118,7 +119,7 @@ def bars(pid, start, end):
 
 HL = "https://api.hyperliquid.xyz/info"
 HL_DAYS = 200  # Hyperliquid serves the last 5000 candles: about 208 days of 1-hour bars
-HL_LEVERAGE = 5  # fills don't carry leverage; margin is taken as notional / 5
+HL_MAX_LEVERAGE = 50  # an account holds at most 50 times its value in notional
 
 
 def hl_post(body):
@@ -137,16 +138,11 @@ def hl_post(body):
             time.sleep(wait)
 
 
-def hl_download(address):
-    """A Hyperliquid wallet's perp closes, in the veranta_top5 record form.
-
-    Each run of a position from flat back to flat is one order. A close's
-    collateral is the notional it held before the close over HL_LEVERAGE, and
-    its gross is Hyperliquid's closedPnl. The API keeps the last 10,000 fills.
-    """
-    path = CACHE / f"wallet_hl_{address.lower()}.json"
+def hl_fills(address):
+    """A Hyperliquid wallet's perp fills, oldest first, cached. The API keeps about the last 10,000."""
+    path = CACHE / f"wallet_hl_fills_{address.lower()}.json"
     if path.exists():
-        return path
+        return json.loads(path.read_text())
     fills, since = [], 0
     while True:
         page = hl_post({"type": "userFillsByTime", "user": address.lower(), "startTime": since})
@@ -155,39 +151,98 @@ def hl_download(address):
             break
         since = page[-1]["time"] + 1
         time.sleep(1)
-    pos = {}  # coin: [size, avg price, first price, opened, order number]
-    rows, n = [], 0
-    for f in sorted({f["tid"]: f for f in fills}.values(), key=lambda f: f["time"]):
-        if f["coin"].startswith("@") or not ("Long" in f["dir"] or "Short" in f["dir"]):
-            continue  # spot
-        c, px, t = f["coin"], float(f["px"]), f["time"] // 1000
-        size = float(f["sz"]) * (1 if f["side"] == "B" else -1)
-        p = pos.get(c)
-        if p is None or abs(p[0]) < 1e-12:
-            n += 1
-            pos[c] = [size, px, px, t, n]
-            continue
-        if p[0] * size > 0:  # add
-            p[1] = (p[0] * p[1] + size * px) / (p[0] + size)
-            p[0] += size
-            continue
-        held = abs(p[0]) * p[1] / HL_LEVERAGE
-        rows.append({"time": pd.Timestamp(t, unit="s").isoformat() + "Z", "gross": f["closedPnl"],
-                     "symbol": c, "index": p[4], "buy": p[0] > 0, "leverage": HL_LEVERAGE, "openPrice": p[2],
-                     "collateral": held, "positionSize": held, "openedAt": p[3]})
-        left = p[0] + size
-        if abs(left) < 1e-9 * max(abs(size), 1):
-            del pos[c]
-        elif left * p[0] < 0:  # flipped
-            n += 1
-            pos[c] = [left, px, px, t, n]
-        else:
-            p[0] = left
-    if not rows:
-        raise SystemExit(f"{address} has no closed Hyperliquid perp trades")
+    keep = ("coin", "px", "sz", "side", "time", "startPosition", "fee")
+    perp = [{k: f[k] for k in keep} for f in {f["tid"]: f for f in fills}.values()
+            if not f["coin"].startswith("@") and ("Long" in f["dir"] or "Short" in f["dir"])]
+    if not perp:
+        raise SystemExit(f"{address} has no Hyperliquid perp fills")
+    perp.sort(key=lambda f: f["time"])
     CACHE.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"address": address, "venue": "hyperliquid", "count": len(rows), "trades": rows}))
-    return path
+    path.write_text(json.dumps(perp))
+    return perp
+
+
+def hl_curve(address, since, end=None):
+    """The wallet's hourly $10,000 equity on total PnL, its scores, its fills per coin, start and end.
+
+    Total PnL is realized plus unrealized: each fill pays its price and fee in
+    cash, and each open position is worth its size times the hour's close,
+    less the positions held at the start. A few fills are missing from the
+    API; the position they move is still right, from each fill's
+    startPosition, and is bought or sold at the next fill's price. Funding
+    is left out. The account is
+    the wallet's perp account value at the start, at least the peak open
+    notional over HL_MAX_LEVERAGE, scaled to $10,000. The curve starts at
+    `since`, or later when the fills start later.
+    """
+    fills = hl_fills(address)
+    first = pd.Timestamp(fills[0]["time"], unit="ms").floor("D").strftime("%Y-%m-%d")
+    start = max(since, first)
+    end = end or pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+    lo, hi = (int(pd.Timestamp(x, tz="UTC").timestamp()) for x in (start, end))
+    grid = np.arange(lo, hi, 3600, dtype="int64")
+    by_coin = {}
+    for f in fills:
+        by_coin.setdefault(f["coin"], []).append(f)
+    cash, value, gross = (np.zeros(len(grid)) for _ in range(3))
+    counts, closes = {}, []
+    for coin, fs in by_coin.items():
+        t = np.array([f["time"] // 1000 for f in fs])
+        size = np.array([float(f["sz"]) * (1 if f["side"] == "B" else -1) for f in fs])
+        px, fee = (np.array([float(f[k]) for f in fs]) for k in ("px", "fee"))
+        before = np.array([float(f["startPosition"]) for f in fs])
+        # A position change no fill explains trades at the next fill's price: no gain, no loss.
+        gap = before - np.concatenate([before[:1], (before + size)[:-1]])
+        k = np.searchsorted(t, grid, side="right")  # fills up to each hour
+        pos = np.where(k > 0, (before + size)[np.maximum(k - 1, 0)], before[0])
+        inside = (t > lo) & (t < hi)
+        if not inside.any() and not pos.any():
+            continue
+        counts[coin] = int(inside.sum())
+        closes += [b < 0 for b, s in zip(before[inside], size[inside]) if b * s < 0]
+        price = pd.Series(px, index=t).groupby(level=0).last()
+        price = price.reindex(price.index.union(grid)).ffill().bfill().loc[grid]
+        z = hl_npz(coin, start, end)
+        if z is not None:  # an hour's price is the close of the bar that ends on it
+            bar = pd.Series(z["1h_close"], index=z["1h_ts"] + 3600).reindex(grid)
+            price = bar.fillna(price)
+        price = price.to_numpy()
+        cash += np.concatenate([[0], np.cumsum(np.where(inside, -(size + gap) * px - fee, 0))])[k]
+        value += pos * price - pos[0] * price[0]
+        gross += np.abs(pos) * price
+    account = max(hl_account(address, lo), gross.max() / HL_MAX_LEVERAGE)
+    if account <= 0:
+        raise SystemExit(f"{address} holds nothing from {start} to {end}")
+    eq = pd.Series(vt.ACCOUNT + (cash + value) * vt.ACCOUNT / account, index=grid)
+    dead = (eq <= 0).cummax()  # a blown account stays at zero
+    eq[dead] = 0.0
+    day = eq.iloc[::24].to_numpy()
+    r = day[1:] / np.where(day[:-1] > 0, day[:-1], np.nan) - 1
+    r = r[~np.isnan(r)]
+    stats = {"sharpe": float(r.mean() / r.std(ddof=1) * np.sqrt(365)),
+             "max_drawdown": float((1 - eq / eq.cummax()).max()), "return": float(eq.iloc[-1] / vt.ACCOUNT - 1),
+             "trades": len(closes), "short_share": float(np.mean(closes)) if closes else 0.0,
+             "pnl": float(cash[-1] + value[-1]), "account": float(account)}
+    return eq, stats, pd.Series(counts).sort_values(ascending=False), start, end
+
+
+def hl_account(address, at):
+    """The wallet's perp account value at a unix time, from its history, cached.
+
+    The history has a point every few days; this takes the last one at or
+    before `at`, or the first one after it.
+    """
+    path = CACHE / f"wallet_hl_portfolio_{address.lower()}.json"
+    if not path.exists():
+        path.write_text(json.dumps(hl_post({"type": "portfolio", "user": address.lower()})))
+    history = dict(json.loads(path.read_text()))["perpAllTime"]["accountValueHistory"]
+    before = [float(v) for t, v in history if t // 1000 <= at]
+    return before[-1] if before else float(history[0][1])
+
+
+def hl_npz(coin, start, end):
+    """The cached npz of hl_bars, or None when the coin has no candles."""
+    return np.load(CACHE / f"mimic_hl_{coin.replace(':', '_')}_{start}_{end}.npz") if hl_bars(coin, start, end) else None
 
 
 def hl_bars(coin, start, end):
@@ -244,8 +299,10 @@ def wallet_curve(path, since=None):
     book = vt._book({"id": "", "address": "", "blurb": "", "color": ""}, rows)
     eq = pd.Series([v for _, v in book["equity"]], index=[t for t, _ in book["equity"]])
     eq = eq.groupby(level=0).last()
-    return rows, eq, {"sharpe": book["sharpe"], "max_drawdown": abs(book["max_dd"]),
-                      "return": book["end"] / vt.ACCOUNT - 1, "trades": len(rows),
+    dead = (eq <= 0).cummax()  # a blown account stays at zero
+    eq[dead] = 0.0
+    return rows, eq, {"sharpe": book["sharpe"], "max_drawdown": 1.0 if dead.any() else abs(book["max_dd"]),
+                      "return": eq.iloc[-1] / vt.ACCOUNT - 1, "trades": len(rows),
                       "short_share": float(np.mean([r["side"] == "short" for r in rows]))}
 
 
@@ -349,18 +406,17 @@ def report(out):
 
 
 def setup(address, top):
-    since = None
     if VENUE == "hyperliquid":
-        path = hl_download(address)
         since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=HL_DAYS)).strftime("%Y-%m-%d")
+        eq, wallet, counts, start, end = hl_curve(address, since)
+        print(f"total pnl ${wallet['pnl']:,.0f} on a ${wallet['account']:,.0f} account")
     else:
-        path = download(address)
-    rows, eq, wallet = wallet_curve(path, since)
-    counts = pd.Series([r["symbol"] for r in rows]).value_counts()
+        rows, eq, wallet = wallet_curve(download(address))
+        counts = pd.Series([r["symbol"] for r in rows]).value_counts()
+        start = pd.Timestamp(eq.index[0], unit="s").strftime("%Y-%m-%d")
+        end = (pd.Timestamp(eq.index[-1], unit="s") + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     symbols = list(counts.index[:top])
-    start = max(pd.Timestamp(eq.index[0], unit="s").strftime("%Y-%m-%d"), since or "")
-    end = (pd.Timestamp(eq.index[-1], unit="s") + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    print(f"{len(rows)} closes, {start} to {end}; {counts.iloc[:top].sum()} of them in {', '.join(symbols)}")
+    print(f"{counts.sum()} fills or closes, {start} to {end}; {counts.iloc[:top].sum()} of them in {', '.join(symbols)}")
     return eq, wallet, symbols, start, end
 
 
