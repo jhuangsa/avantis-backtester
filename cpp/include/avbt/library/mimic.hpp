@@ -18,9 +18,12 @@ namespace avbt {
 //   move:     s * move_dir * pct_change(close, move_lag) >= move_size.
 //   breakout: close above the prior break_period high is a long with
 //             break_dir +1, a short with -1; below the prior low, the reverse.
-//   hours:    the signal bar opens at a UTC hour in [hour_from, hour_to).
-// side: +1 longs only, -1 shorts only, 0 both; a bar where both pass is
-// skipped. Out at stop_atrs ATRs, take profit tp_atrs ATRs, or after hold bars.
+//   hours:    the signal bar opens at a UTC hour in [hour_from, hour_to),
+//             wrapping past midnight when hour_to <= hour_from; equal
+//             hours, or 0 to 24, is the whole day.
+// side: +1 longs only, -1 shorts only, 0 both. With side 0 a bar where both
+// pass is skipped, so with no directional filter on it never opens. Out at
+// stop_atrs ATRs, take profit tp_atrs ATRs (both > 0), or after hold bars.
 struct Mimic {
     struct Params {
         Timeframe timeframe = Timeframe::Hour1;
@@ -87,7 +90,8 @@ struct Mimic {
         }
         if (p.hours_on) {
             int h = static_cast<int>((l.bars->ts[t] / 3600) % 24);
-            if (h < p.hour_from || h >= p.hour_to) return false;
+            int length = p.hour_to > p.hour_from ? p.hour_to - p.hour_from : p.hour_to - p.hour_from + 24;
+            if (((h - p.hour_from) % 24 + 24) % 24 >= length) return false;
         }
         return true;
     }
@@ -132,6 +136,7 @@ static_assert(Strategy<Mimic>);
 namespace detail {
 inline StrategyInfo mimic_info() {
     using P = Mimic::Params;
+    constexpr double tiny = 1e-9;  // ranges are inclusive; these must be > 0
     return single<Mimic>("mimic", {
         field("timeframe", &P::timeframe), field("side", &P::side, -1, 1),
         field("rsi_on", &P::rsi_on), field("trend_on", &P::trend_on), field("move_on", &P::move_on),
@@ -142,8 +147,8 @@ inline StrategyInfo mimic_info() {
         field("move_dir", &P::move_dir, -1, 1), field("break_period", &P::break_period, 1, inf),
         field("break_dir", &P::break_dir, -1, 1), field("hour_from", &P::hour_from, 0, 23),
         field("hour_to", &P::hour_to, 1, 24), field("atr_period", &P::atr_period, 1, inf),
-        field("hold", &P::hold, 1, inf), field("stop_atrs", &P::stop_atrs, 0.0, inf),
-        field("tp_atrs", &P::tp_atrs, 0.0, inf), field("leverage", &P::leverage, 0.0, 100.0)},
+        field("hold", &P::hold, 1, inf), field("stop_atrs", &P::stop_atrs, tiny, inf),
+        field("tp_atrs", &P::tp_atrs, tiny, inf), field("leverage", &P::leverage, 0.0, 100.0)},
         {Timeframe::Min15, Timeframe::Hour1, Timeframe::Hour4});
 }
 }  // namespace detail

@@ -1,4 +1,8 @@
-"""All saved Hyperliquid mimic fits on one page: stats and both PnL curves.
+"""All saved Hyperliquid mimic fits on one page: stats and both deployed-capital curves.
+
+The table shows the scores on deployed capital first, on the account
+second, and flags a wallet whose account snapshots drift over 25% from
+the computed account.
 
 Run from the repository root, after examples/mimic.py --venue hyperliquid:
 
@@ -24,10 +28,10 @@ def main():
         saved = json.loads(path.read_text())
         c = C.curves(saved)
         rows.append({"address": saved["address"], "markets": saved["markets"], "start": saved["start"],
-                     "end": saved["end"], "mse": saved["mse"], "wallet_stats": saved["wallet"],
-                     "mimic_stats": saved["mimic"], "params": saved["params"],
+                     "end": saved["end"], "mse": saved["mse"], "wallet_stats": C.clean(C.M.score_sets(saved["wallet"])),
+                     "mimic_stats": C.clean(C.M.score_sets(saved["mimic"])), "params": saved["params"],
                      "t": c["t"], "wallet": c["wallet"], "mimic": c["mimic"]})
-    rows.sort(key=lambda r: -r["wallet_stats"]["return"])
+    rows.sort(key=lambda r: -(r["wallet_stats"]["deployed"]["return"] or 0))
     out = HERE / "mimic_hl_all.html"
     out.write_text(PAGE.replace("/*DATA*/null", json.dumps(rows)))
     print(f"wrote {out}, {len(rows)} wallets")
@@ -55,7 +59,8 @@ h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:36px 0 8px}
 table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
 td,th{text-align:right;padding:6px 8px;white-space:nowrap;border-bottom:1px solid var(--line)}
 th{color:var(--ink2);font-weight:500}td:first-child,th:first-child{text-align:left}
-.neg{color:var(--neg)}a{color:inherit}
+.neg{color:var(--neg)}a{color:inherit}.flag{color:var(--neg);font-weight:600}
+th.set{text-align:center;border-bottom:none;padding-bottom:0}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
 .card{background:var(--panel);border-radius:10px;padding:12px 14px}
 .card h3{font-size:14px;margin:0;font-family:ui-monospace,monospace}
@@ -67,11 +72,7 @@ font-variant-numeric:tabular-nums;margin-top:6px}
 svg{display:block;width:100%;height:auto}svg text{fill:var(--ink3);font-size:10px}
 </style></head><body><main>
 <h1>Hyperliquid wallet mimics</h1>
-<p class="sub">19 wallets from OptimistFi, each fitted with the <code>mimic</code> strategy over its last 200 days.
-Wallet PnL is a return on its perp account value at the start, shown on a $10,000 account.
-Both curves are total PnL: realized plus unrealized, open positions valued at each hour's close.
-Wallet PnL includes the fees it paid and leaves out funding.
-Copy error is the root of the MSE between the two curves.</p>
+<p class="sub" id="sub"></p>
 <div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
 <span><i style="background:var(--s2)"></i>Mimic</span></div>
 <h2>Stats</h2>
@@ -81,17 +82,27 @@ Copy error is the root of the MSE between the two curves.</p>
 </main>
 <script>
 const D=/*DATA*/null;
-const pct=(x,d=0)=>(x>0?"+":"")+(x*100).toFixed(d)+"%";
+document.getElementById("sub").textContent=`${D.length} wallets from OptimistFi, each fitted with the mimic strategy over its last 200 days. `+
+"Both curves are the return on deployed capital, each hour's PnL over the notional held the hour before or opened in it, compounded from $10,000: the curve the fit minimizes. "+
+"The account scores are a time-weighted return on the wallet's whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out, and the mimic's $10,000 account. "+
+"Both curves are total PnL, realized plus unrealized, open positions valued at each hour's close. "+
+"A flagged wallet's account snapshots drift over 25% from the computed account: its account scores are unreliable. "+
+"Both curves pay 0.05% of notional per round trip and leave out funding. "+
+"Copy error is the root of the MSE between the two curves.";
+const pct=(x,d=0)=>x==null?"–":(x>0?"+":"")+(x*100).toFixed(d)+"%";
+const fix=(x,d)=>x==null?"–":x.toFixed(d);
+const dd=x=>x==null?"–":(x*100).toFixed(0)+"%";
 const cls=x=>x<0?' class="neg"':"";
 const short=a=>a.slice(0,6)+"…"+a.slice(-4);
-let h="<tr><th>Wallet</th><th>Copy error</th><th>Wallet Sharpe</th><th>Mimic Sharpe</th><th>Wallet return</th>"+
-"<th>Mimic return</th><th>Wallet max DD</th><th>Mimic max DD</th><th>Wallet trades</th><th>Mimic trades</th></tr>";
-for(const r of D){const w=r.wallet_stats,m=r.mimic_stats;
-h+=`<tr><td><a href="#w${r.address}">${short(r.address)}</a></td><td>${(Math.sqrt(r.mse)*100).toFixed(1)}%</td>
-<td${cls(w.sharpe)}>${w.sharpe.toFixed(2)}</td><td${cls(m.sharpe)}>${m.sharpe.toFixed(2)}</td>
-<td${cls(w.return)}>${pct(w.return)}</td><td${cls(m.return)}>${pct(m.return)}</td>
-<td>${(w.max_drawdown*100).toFixed(0)}%</td><td>${(m.max_drawdown*100).toFixed(0)}%</td>
-<td>${w.trades}</td><td>${m.trades}</td></tr>`}
+const cols=s=>`<td${cls(s.sharpe)}>${fix(s.sharpe,2)}</td><td${cls(s.return)}>${pct(s.return)}</td><td>${dd(s.max_drawdown)}</td>`;
+const six="<th>Wallet Sharpe</th><th>Wallet return</th><th>Wallet max DD</th><th>Mimic Sharpe</th><th>Mimic return</th><th>Mimic max DD</th>";
+let h=`<tr><th></th><th></th><th class="set" colspan="6">On deployed capital</th><th class="set" colspan="6">On the account</th><th></th><th></th><th></th></tr>`+
+`<tr><th>Wallet</th><th>Copy error</th>${six}${six}<th>Wallet trades</th><th>Mimic trades</th><th>Account drift</th></tr>`;
+for(const r of D){const w=r.wallet_stats,m=r.mimic_stats,drift=w.account_drift;
+const flag=drift!=null&&drift>0.25;
+h+=`<tr><td><a href="#w${r.address}">${short(r.address)}</a>${flag?' <span class="flag" title="the account snapshots drift over 25% from the computed account">!</span>':""}</td>
+<td>${(Math.sqrt(r.mse)*100).toFixed(1)}%</td>${cols(w.deployed)}${cols(m.deployed)}${cols(w.account)}${cols(m.account)}
+<td>${w.trades}</td><td>${m.trades}</td><td${flag?' class="flag"':""}>${drift==null?"–":(drift*100).toFixed(0)+"%"}</td></tr>`}
 document.getElementById("stats").innerHTML=h;
 function chart(r){const W=320,H=150,L=34,B=16,T=6;
 const ys=r.wallet.concat(r.mimic),lo=Math.min(0,...ys),hi=Math.max(0,...ys),n=r.t.length-1;
@@ -109,9 +120,12 @@ return `<div class="card" id="w${r.address}"><h3>${short(r.address)}</h3>
 <div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
 <span><i style="background:var(--s2)"></i>Mimic</span></div>${chart(r)}
 <div class="s"><span></span><span style="color:var(--s1)">Wallet</span><span style="color:var(--s2)">Mimic</span>
-<span>Return</span><span${cls(w.return)}>${pct(w.return)}</span><span${cls(m.return)}>${pct(m.return)}</span>
-<span>Sharpe</span><span>${w.sharpe.toFixed(2)}</span><span>${m.sharpe.toFixed(2)}</span>
-<span>Max DD</span><span>${(w.max_drawdown*100).toFixed(0)}%</span><span>${(m.max_drawdown*100).toFixed(0)}%</span>
+<span>Return (deployed)</span><span${cls(w.deployed.return)}>${pct(w.deployed.return)}</span><span${cls(m.deployed.return)}>${pct(m.deployed.return)}</span>
+<span>Sharpe (deployed)</span><span>${fix(w.deployed.sharpe,2)}</span><span>${fix(m.deployed.sharpe,2)}</span>
+<span>Max DD (deployed)</span><span>${dd(w.deployed.max_drawdown)}</span><span>${dd(m.deployed.max_drawdown)}</span>
+<span>Return (account)</span><span${cls(w.account.return)}>${pct(w.account.return)}</span><span${cls(m.account.return)}>${pct(m.account.return)}</span>
+<span>Sharpe (account)</span><span>${fix(w.account.sharpe,2)}</span><span>${fix(m.account.sharpe,2)}</span>
+<span>Max DD (account)</span><span>${dd(w.account.max_drawdown)}</span><span>${dd(m.account.max_drawdown)}</span>
 <span>Trades</span><span>${w.trades}</span><span>${m.trades}</span></div></div>`}).join("");
 </script></body></html>
 """

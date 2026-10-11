@@ -77,6 +77,14 @@ def test_run_every_strategy(setup, name):
     assert len(r.equity) == len(r.clock) == 6000
     assert r.clock.dtype == np.int64
     assert isinstance(r.ending_balance, float)
+    # Positions still open at the end are marked in the last equity, not in trades.
+    for p in r.open_positions:
+        assert isinstance(p, avbt.Position) and p.instrument in markets.instruments
+        assert p.size > 0 and p.entry_time in r.clock
+    if r.open_positions:
+        assert r.equity[-1] != r.ending_balance
+    else:
+        assert r.equity[-1] == r.ending_balance
     for t in r.trades:
         assert t.instrument in markets.instruments
         assert t.entry_bar <= t.exit_bar and t.entry_time == r.clock[t.entry_bar]
@@ -267,7 +275,7 @@ def test_param_type():
 
 def test_old_optimize_gone_and_version():
     assert not hasattr(avbt, "optimize_state_trend")
-    assert avbt.version == "0.4.1"
+    assert avbt.version == "0.4.2"
 
 
 def test_walk_forward(setup):

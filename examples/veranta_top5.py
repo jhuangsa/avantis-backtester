@@ -232,9 +232,8 @@ def _book(wallet, rows):
         if equity > peak_equity:
             peak_equity = equity
         drop = equity - peak_equity
-        if drop < drawdown_dollars:
-            drawdown_dollars = drop
-            max_drawdown = drop / peak_equity
+        drawdown_dollars = min(drawdown_dollars, drop)
+        max_drawdown = min(max_drawdown, drop / peak_equity)
         drawdown.append((moment, equity / peak_equity - 1))
 
     day = merged[0][0].date()

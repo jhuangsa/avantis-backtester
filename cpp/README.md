@@ -583,6 +583,7 @@ What `backtest` returns.
 | `trades` | Every closed trade, in the order they closed. |
 | `equity` | Equity at the close of every clock step: one value per step. |
 | `ending_balance` | Balance after the last step. Positions still open are not in it. |
+| `open_positions` | The positions still open after the last step: not trades, marked in the last equity value only. |
 | `timeframe` | The base timeframe the run stepped on, so every result names its timeframe. |
 | `clock` | The UTC second at which each step opens. `entry_bar` and `exit_bar` index it. |
 | `version` | The engine version that made the result (`avbt::version`). |

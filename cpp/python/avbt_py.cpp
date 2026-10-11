@@ -437,7 +437,8 @@ PYBIND11_MODULE(avbt_cpp, m) {
             std::vector<std::string> out;
             for (const avbt::Market& mk : x.all()) out.push_back(mk.instrument);
             return out;
-        });
+        })
+        .def_property_readonly("markets", &avbt::Markets::all);
 
     py::class_<avbt::Costs>(m, "Costs")
         .def(py::init([](double open_fee, double close_fee, const std::optional<InArray>& hold_long,
@@ -479,6 +480,7 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("trades", &avbt::Result::trades)
         .def_property_readonly("equity", [](const avbt::Result& r) { return to_numpy(std::vector(r.equity)); })
         .def_readonly("ending_balance", &avbt::Result::ending_balance)
+        .def_readonly("open_positions", &avbt::Result::open_positions)
         .def_readonly("timeframe", &avbt::Result::timeframe)
         .def_property_readonly("clock", [](const avbt::Result& r) { return to_numpy(std::vector(r.clock)); })
         .def_readonly("version", &avbt::Result::version);

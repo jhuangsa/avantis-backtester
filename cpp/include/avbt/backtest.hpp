@@ -66,6 +66,9 @@ struct Result {
     std::vector<double> equity;
     // Realized money at the end; positions still open are not in it.
     double ending_balance = 0.0;
+    // Positions still open after the last step: not trades, marked in the
+    // last equity value only.
+    std::vector<Position> open_positions;
     // The base timeframe the run stepped on.
     Timeframe timeframe = Timeframe::Min1;
     // The UTC second at which each step opens; Markets::clock().
@@ -211,6 +214,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
         on_step(t, portfolio.positions(), waiting);
     }
     result.ending_balance = portfolio.report().balance;
+    result.open_positions = portfolio.positions();
     return result;
 }
 

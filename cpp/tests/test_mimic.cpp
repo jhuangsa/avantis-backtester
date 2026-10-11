@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 using namespace avbt;
@@ -78,5 +79,37 @@ int main() {
     // All filters off: it opens on every closed bar where it is flat.
     Result all = run("mimic", {{"side", -1}, {"hold", 1}}, m, costs, PortfolioSettings{});
     check("no filters trades often", all.trades.size() > r.trades.size());
+
+    // Hours wrap past midnight: 21 to 3 opens only on bars at 21..2 UTC.
+    Mimic w;
+    w.params.side = -1, w.params.hold = 1, w.params.hours_on = true;
+    w.params.hour_from = 21, w.params.hour_to = 3;
+    bool in_window = true;
+    int wrapped = 0;
+    backtest(w, m, costs, PortfolioSettings{},
+             [&](int t, const std::vector<Position>&, const std::vector<Order>& orders) {
+        for (const Order& o : orders) {
+            if (o.kind != Order::Kind::Open) continue;
+            int h = t % 24;
+            in_window = in_window && (h >= 21 || h < 3);
+            wrapped += h < 3;
+        }
+    });
+    check("wrapped hours open only inside the window", in_window);
+    check("wrapped hours open after midnight", wrapped > 0);
+    Params off{{"side", -1}, {"hold", 1}};
+    Params same{{"side", -1}, {"hold", 1}, {"hours_on", true}, {"hour_from", 5}, {"hour_to", 5}};
+    Params full{{"side", -1}, {"hold", 1}, {"hours_on", true}, {"hour_from", 0}, {"hour_to", 24}};
+    check("from == to is the whole day", run("mimic", same, m, costs, PortfolioSettings{}).trades.size() ==
+                                              run("mimic", off, m, costs, PortfolioSettings{}).trades.size());
+    check("0 to 24 is the whole day", run("mimic", full, m, costs, PortfolioSettings{}).trades.size() ==
+                                           run("mimic", off, m, costs, PortfolioSettings{}).trades.size());
+
+    auto rejected = [&](const char* name) {
+        try { run("mimic", {{name, 0.0}}, m, costs, PortfolioSettings{}); } catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    check("stop_atrs 0 is rejected", rejected("stop_atrs"));
+    check("tp_atrs 0 is rejected", rejected("tp_atrs"));
     return failures == 0 ? 0 : 1;
 }

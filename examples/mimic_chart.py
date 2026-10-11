@@ -1,4 +1,8 @@
-"""Chart a saved mimic fit: the wallet's and the mimic's equity and drawdown.
+"""Chart a saved mimic fit: the wallet's and the mimic's deployed-capital curves and drawdown.
+
+Both curves are the return on deployed capital (the curve the fit
+minimizes), marked to market each hour, paying 0.05% per round trip. The
+tiles show both score sets: on deployed capital, and on the account.
 
 Run from the repository root, after examples/mimic.py:
 
@@ -22,36 +26,41 @@ import mimic as M  # noqa: E402
 
 
 def curves(saved):
-    """Both equity curves as returns on a 4-hour grid, and the mimic's trades."""
+    """Both deployed-capital curves as returns on a 4-hour grid, and the mimic's trades."""
     hl = saved.get("venue") == "hyperliquid"
     M.use_venue(saved.get("venue", "avantis"))
     if hl:
         eq = M.hl_curve(saved["address"], saved["start"], saved["end"])[0]
     else:
-        _, eq, _ = M.wallet_curve(M.CACHE / f"wallet_{saved['address']}.json")
+        eq = M.avantis_curve(saved["address"])[0]
     symbols = list(saved["markets"])
     markets = M.load_markets(symbols, saved["start"], saved["end"])
-    costs = {s: M.avbt_cpp.Costs(M.FEE, M.FEE) for s in symbols}
-    r = M.backtest(saved["params"], markets, costs)
-    lo, hi = (pd.Timestamp(saved[k], tz="UTC").timestamp() for k in ("start", "end"))
-    grid = pd.Index(np.arange(lo, hi, 4 * 3600, dtype="int64"))
+    r = M.rerun(saved, markets)
+    hours = M.hour_grid(saved["start"], saved["end"])
+    grid = hours[::4]
     wallet = M.on_grid(eq, grid)
-    mimic = M.on_grid(pd.Series(r.equity, index=r.clock), grid)
+    mimic = M.on_grid(M.mimic_deployed(r, markets, hours), grid)
     trades = [{"m": t.instrument.split("/")[0], "side": t.side.name.lower(), "in": t.entry_time,
                "out": t.exit_time, "r": round(t.result / M.vt.ACCOUNT, 4)} for t in r.trades]
     return {"t": grid.tolist(), "wallet": np.round(wallet, 4).tolist(),
             "mimic": np.round(mimic, 4).tolist(), "trades": trades}
 
 
+def clean(x):
+    """NaN scores (an old file's missing set) as null, for the page."""
+    if isinstance(x, dict):
+        return {k: clean(v) for k, v in x.items()}
+    return None if isinstance(x, float) and np.isnan(x) else x
+
+
 def main():
     path = Path(sys.argv[1])
     saved = json.loads(path.read_text())
+    saved = {**saved, "wallet": clean(M.score_sets(saved["wallet"])), "mimic": clean(M.score_sets(saved["mimic"]))}
     data = {**curves(saved), "saved": saved}
     tag = "hl_" if saved.get("venue") == "hyperliquid" else ""
     out = HERE / f"mimic_{tag}{saved['address'][2:8].lower()}.html"
     page = PAGE.replace("/*DATA*/null", json.dumps(data))
-    if tag:  # a Hyperliquid wallet's curve is total PnL, realized plus unrealized
-        page = page.replace("<h2>Equity,", "<h2>Total PnL, realized plus unrealized,")
     out.write_text(page)
     print(f"wrote {out}")
 
@@ -73,6 +82,7 @@ main{max-width:1000px;margin:0 auto;padding:32px 16px 64px}
 h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:36px 0 8px}
 .sub{color:var(--ink2);margin:0 0 24px;overflow-wrap:anywhere}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tiles h3{grid-column:1/-1;font-size:14px;color:var(--ink2);margin:12px 0 0;font-weight:500}
 .tile{background:var(--panel);border-radius:10px;padding:12px 14px}
 .tile .k{color:var(--ink2);font-size:13px}.tile .v{font-size:22px;font-variant-numeric:tabular-nums}
 .tile .w{color:var(--ink3);font-size:13px;font-variant-numeric:tabular-nums}
@@ -90,7 +100,7 @@ td,th{text-align:left;padding:6px 8px;white-space:nowrap;border-bottom:1px solid
 <h1>Wallet mimic fit</h1>
 <p class="sub" id="sub"></p>
 <div class="tiles" id="tiles"></div>
-<h2>Equity, return on a $10,000 account</h2>
+<h2>Equity, return on deployed capital, marked to market each hour</h2>
 <div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span><span><i style="background:var(--s2)"></i>Mimic</span></div>
 <div class="chart" id="eq"></div>
 <h2>Drawdown from peak</h2>
@@ -105,10 +115,15 @@ td,th{text-align:left;padding:6px 8px;white-space:nowrap;border-bottom:1px solid
 const D=/*DATA*/null, S=D.saved;
 const pct=(x,d=1)=>(x*100).toFixed(d)+"%", day=t=>new Date(t*1000).toISOString().slice(0,10);
 document.getElementById("sub").textContent=`${S.address} · ${S.markets.join(", ")} · ${S.start} to ${S.end} · `+
-  `MSE ${S.mse.toFixed(5)} (RMSE ${pct(Math.sqrt(S.mse))} of the account)`;
-const tiles=[["Sharpe","sharpe",x=>x.toFixed(2)],["Max drawdown","max_drawdown",pct],["Return","return",pct],["Trades","trades",x=>x]];
-document.getElementById("tiles").innerHTML=tiles.map(([k,f,fmt])=>
-  `<div class="tile"><div class="k">${k}</div><div class="v">${fmt(S.mimic[f])}</div><div class="w">wallet ${fmt(S.wallet[f])}</div></div>`).join("");
+  `MSE ${S.mse.toFixed(5)} (RMSE ${pct(Math.sqrt(S.mse))} of deployed capital)`+
+  " · both curves are the return on deployed capital: each hour's PnL over the notional held the hour before or opened in it"+
+  (S.venue==="hyperliquid"?" · the account scores are a time-weighted return on the whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out":"");
+const num=(fmt)=>x=>x==null?"–":fmt(x);
+const tiles=[["Sharpe","sharpe",num(x=>x.toFixed(2))],["Max drawdown","max_drawdown",num(pct)],["Return","return",num(pct)]];
+const sets=[["deployed","On deployed capital (the fit)"],["account","On the account: the wallet's own, the mimic's $10,000"]];
+document.getElementById("tiles").innerHTML=sets.map(([set,title])=>`<h3>${title}</h3>`+tiles.map(([k,f,fmt])=>
+  `<div class="tile"><div class="k">${k}</div><div class="v">${fmt(S.mimic[set][f])}</div><div class="w">wallet ${fmt(S.wallet[set][f])}</div></div>`).join("")).join("")+
+  `<div class="tile"><div class="k">Trades</div><div class="v">${S.mimic.trades}</div><div class="w">wallet ${S.wallet.trades}</div></div>`;
 const dd=a=>{let p=-1e9;return a.map(r=>{const e=1+r;p=Math.max(p,e);return e/p-1})};
 const NS="http://www.w3.org/2000/svg";
 function chart(id,series,fmt){
