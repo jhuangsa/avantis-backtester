@@ -125,9 +125,41 @@ A `Result` has:
 | `timeframe` | The timeframe of the clock. |
 | `version` | The engine version that made the result. |
 
-`optimize(name, start, knobs, markets, costs, settings, rounds, progress=None)` tunes any strategy by a greedy search over pairs of params; `summary(result)` gives its Sharpe, total return, max drawdown, and trade count.
+`optimize(name, start, knobs, markets, costs, settings, rounds, progress=None, max_drawdown=None, min_gain=0.0)` tunes any strategy by a greedy search over pairs of params; `summary(result)` gives its Sharpe, total return, max drawdown, and trade count.
 
-`walk_forward(name, start, knobs, folds, settings, rounds, progress=None)` runs a walk-forward. You cut the windows: each fold is `(train_markets, train_costs, test_markets, test_costs)`. Per fold it tunes on train, then runs the winner on train and on test. It returns one dict per fold: `best`, `train` and `test` (each a `summary`), and `overfit`, train Sharpe minus test Sharpe. `progress(fold, round, rounds, sharpe, best)` is called after each round. See `examples/walk_forward.py`.
+By default `optimize` maximizes Sharpe. Give it `max_drawdown` to maximize total return instead, over only the runs whose max drawdown is within the limit:
+
+```python
+s = avbt.optimize("range_basket", start, knobs, markets, costs, settings, rounds=60,
+                  max_drawdown=0.15, min_gain=0.01)
+s["best"], s["total_return"], s["max_drawdown"]
+```
+
+- `max_drawdown` is a positive fraction: 0.15 is a 15% fall from an equity peak.
+- A run over the limit scores NaN and never wins. It stays in `runs`, with its `total_return` and `max_drawdown`.
+- `min_gain`: the search stops after a full pass over the pairs where no gain is bigger than this.
+- If no run meets the limit, `score` is NaN and `best` is the start.
+- The result has `best`, `score` (what was maximized), `sharpe`, `total_return`, `max_drawdown`, `trades`, `runs`, and `timeframe`.
+
+The winner tends to sit just under the limit, and on new bars its drawdown is often larger. `examples/sharpe_hunt/drawdown_limit.py` shows this. It tunes `range_basket` on five coins in one account, on 2026-01-01 to 2026-10-01, then runs each winner on 2025-03-25 to 2026-01-01:
+
+| Limit | 2026 return | 2026 drawdown | 2025 return | 2025 drawdown |
+|---|---|---|---|---|
+| 10% | 138.5% | 9.7% | 0.3% | 19.9% |
+| 15% | 261.1% | 14.3% | −0.9% | 28.7% |
+| 20% | 439.7% | 18.7% | −3.1% | 36.8% |
+
+The script takes any strategy with a `run_<name>.py`, `range_basket` by default:
+
+```bash
+python3 examples/sharpe_hunt/drawdown_limit.py rsi_snap
+```
+
+It searches leverage over 1 to 10, and each other number knob over values from half to twice its start. Each winner is saved to `results_drawdown/<name>_dd<limit>.json`: its full `params`, its 2026 and 2025 scores, whether a run met the limit (`feasible`), and every value searched (`searched`).
+
+Check a winner on bars the search did not see; `walk_forward` takes the same `max_drawdown` and `min_gain`. See [ADR 0018](docs/adr/0018-a-search-may-cap-drawdown-and-maximize-return.md).
+
+`walk_forward(name, start, knobs, folds, settings, rounds, progress=None, max_drawdown=None, min_gain=0.0)` runs a walk-forward. You cut the windows: each fold is `(train_markets, train_costs, test_markets, test_costs)`. Per fold it tunes on train, then runs the winner on train and on test. It returns one dict per fold: `best`, `train` and `test` (each a `summary`), and `overfit`, train Sharpe minus test Sharpe. `progress(fold, round, rounds, score, best)` is called after each round. See `examples/walk_forward.py`.
 
 The indicators are also callable on their own: `sma`, `pct_change`, `prior_max`, `prior_min`, `true_range`, `atr`, `hour_of_day`, `bar_change`, `chandelier`.
 
@@ -157,11 +189,16 @@ More detail: [cpp/README.md](cpp/README.md) and [ADR 0017](docs/adr/0017-indicat
 
 ## Versions
 
-The version has three numbers, such as 0.4.1. The engine and every result carry it (`version`).
+The version has three numbers, such as 0.4.2. The engine and every result carry it (`version`).
 
 - Renaming or removing anything, or changing what a result means, raises the middle number: 0.2 to 0.3.
 - Adding something new raises the last number: 0.2.0 to 0.2.1.
 - Names stay stable within a version.
+
+Version 0.4.2:
+
+- `mimic`: the hour window wraps past midnight when `hour_to` is at or below `hour_from`, so 22 to 4 means 22:00 to 04:00 UTC. `stop_atrs` and `tp_atrs` must be greater than 0; 0 raises `ValueError`.
+- `Result.open_positions`: the positions still open after the last step. They are not trades; they count only in the last equity value.
 
 Version 0.4.1:
 
