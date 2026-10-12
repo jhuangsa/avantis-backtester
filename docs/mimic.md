@@ -34,6 +34,12 @@ To put every saved Hyperliquid result on one page, `examples/mimic_hl_all.html`:
 python3 examples/mimic_hl_all.py
 ```
 
+To put only some wallets on a page, give their addresses and a page name in `examples/`:
+
+```bash
+python3 examples/mimic_hl_all.py --out mimic_hl_top5.html <address> <address> ...
+```
+
 Options: `--top` sets how many markets to use (default 8), `--restarts` the random starting points (default 4), `--passes` the most passes per start (default 6), `--workers` the backtest threads (default one per core). For an Avantis wallet's account scores, `--fees real` (default) charges its real closing fees and `--fees flat` a fixed 0.025% of notional at each open and close; `--funding` (default) charges its real funding and `--no-funding` leaves it out. The return the fit uses always has the real fees and funding.
 
 You need the C++ module built (see `README.md`) and the `pycryptodome` package.
@@ -197,5 +203,6 @@ The wallet's account drawdown is real. On 1 February 2026 it held 21 ZK shorts t
 | `examples/mimic.py` | Downloads, builds the curves, fits, saves and replays |
 | `examples/wallet_returns.py` | `ledger()`: the return on peak own capital, for wallet and mimic |
 | `examples/mimic_chart.py` | Draws a saved fit as a web page |
-| `examples/mimic_hl_all.py` | Puts all saved Hyperliquid fits on one page |
+| `examples/mimic_hl_all.py` | Puts saved Hyperliquid fits on one page: all, or the addresses given |
+| `examples/mimic_top.py` | Puts the leaderboard's top Avantis wallets and their saved fits on one page |
 | `tests/test_mimic.py` | Python tests: curves, fees, scores, the fit on own capital, fill order, caches |
