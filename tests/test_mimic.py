@@ -246,8 +246,8 @@ def test_closed_positions_opening_fills_are_none():
 
 LO, HI = "2025-01-11", "2025-02-10"
 FEE = 0.00025
-STATS_KEYS = {"deployed", "account", "trades", "short_share", "pnl", "start_account", "net_flows",
-              "account_drift", "gap_share", "dropped_pnl", "dropped_share"}
+STATS_KEYS = {"account", "trades", "short_share", "pnl", "start_account", "net_flows",
+              "account_drift", "gap_share"}
 
 
 @pytest.fixture
@@ -290,13 +290,13 @@ def test_hl_curve_first_fill_inside_the_window_with_a_start_position_trades_the_
     # fills that opened the short of 10: the open is traded at 337, the close's price, not held since
     # the window start at 250. The netted open and close pay no fee.
     step = lambda t: np.where(t < lo + 2 * D, 250.0, 300.0)
-    eq, stats, *_ = hl_curve_env([
+    pnl, stats, *_ = hl_curve_env([
         fill("BTC", "B", 200, 1, (lo - 10 * D) * 1000, 0, 1),
         fill("BTC", "A", 200, 1, (lo - 9 * D) * 1000, 1, 2, "Close Long"),
         fill("SOL", "B", 337, 10, (lo + D + 1800) * 1000, -10, 3, "Close Short")], price=step)
     assert stats["pnl"] == pytest.approx(0, abs=1e-9)  # no 870 loss from 250 to 337
     assert stats["gap_share"] == pytest.approx(0.5)  # the 10 x 337 open over the open plus the close
-    assert eq.iloc[0] == ACCOUNT and eq.iloc[-1] == pytest.approx(ACCOUNT)
+    assert pnl.iloc[0] == 0 and pnl.iloc[-1] == pytest.approx(0, abs=1e-9)
     assert stats["trades"] == 1 and stats["short_share"] == 1.0
 
 
@@ -575,13 +575,12 @@ def test_avantis_curve_marks_an_open_short_to_market(avantis_env):
     assert stats["account"]["return"] == pytest.approx(0.099)
     assert stats["trades"] == 1 and stats["short_share"] == 1.0
     assert set(stats) == STATS_KEYS - {"pnl", "start_account", "net_flows", "account_drift", "gap_share"}
-    assert stats["dropped_pnl"] == 0 and stats["dropped_share"] == 0
     assert counts["BTC/USD"] == 1
     assert start < end
 
 
 def test_avantis_curve_before_the_open_is_the_account(avantis_env):
-    eq, *_ = avantis_env([trade(BASE + 5 * D + 6 * 3600, 1000, 100.0)])
+    *_, eq = avantis_env([trade(BASE + 5 * D + 6 * 3600, 1000, 100.0)])
     assert np.allclose(eq.loc[: BASE + D + 11 * 3600].to_numpy(), ACCOUNT)
 
 
@@ -680,16 +679,16 @@ def test_hl_curve_scrambled_one_ms_group_has_no_gap_trades(hl_curve_env):
     fills = scrambled_buy((lo + D + 1800) * 1000)
     fills = [fills[3], fills[0], fills[2], fills[1]]
     fills.append(fill("BTC", "A", 110, 10, (lo + 2 * D) * 1000, 10, 20, "Close Long"))
-    eq, stats, *_ = hl_curve_env(fills)
+    pnl, stats, *_ = hl_curve_env(fills)
     assert stats["pnl"] == pytest.approx(100 - FEE * (1000 + 1100))
-    assert stats["trades"] == 1 and eq.iloc[0] == ACCOUNT
+    assert stats["trades"] == 1 and pnl.iloc[0] == 0
 
 
 def test_hl_curve_position_held_from_before_lo_built_by_a_scrambled_group(hl_curve_env):
     lo = ts(LO)
     fills = scrambled_buy((lo - 10 * D) * 1000)
     fills = [fills[3], fills[0], fills[2], fills[1]]
-    eq, stats, *_ = hl_curve_env(fills, price=step_price(lo + 5 * D))
+    _, stats, *_, eq = hl_curve_env(fills, price=step_price(lo + 5 * D))
     assert eq.iloc[0] == ACCOUNT
     assert eq.loc[lo + 4 * D] == pytest.approx(ACCOUNT)
     # 10 held, not 4: the whole group's position rides the move.
@@ -771,6 +770,7 @@ def test_replay_uses_the_saved_costs_and_settings(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(sys, "argv", ["mimic.py", "--replay", str(path)])
     M.main()
     assert got, "replay ran no backtest"
+    assert "deployed" in capsys.readouterr().out  # no "fit": the save warns it was fitted on the deployed curve
     assert got["costs"]["BTC/USD"].open_fee == 0.0005 and got["costs"]["BTC/USD"].close_fee == 0.0005
     assert got["settings"].scale_risk_with_leverage is False
     assert got["settings"].risk_per_trade == 0.01 and got["settings"].starting_balance == ACCOUNT
@@ -841,7 +841,7 @@ def gap_fills(lo):
 
 def test_hl_curve_gap_at_the_first_inside_fill_does_not_shift_the_curve(hl_curve_env):
     lo = ts(LO)
-    eq, stats, *_ = hl_curve_env(gap_fills(lo))
+    _, stats, *_, eq = hl_curve_env(gap_fills(lo))
     assert eq.iloc[0] == ACCOUNT
     assert np.allclose(eq.loc[: lo + 5 * D - 3600].to_numpy(), ACCOUNT)
     # The missing buy of 1 and the sell of 2 net to a sell of 1 at 100: only its fee is lost.
@@ -868,11 +868,17 @@ def test_hl_curve_gap_share_counts_inside_fills_of_every_coin(hl_curve_env):
 def setup_env(monkeypatch, hl):
     def use(gap_share):
         scores = {"sharpe": 0.0, "max_drawdown": 0.0, "return": 0.0}
-        stats = {"deployed": scores, "account": scores, "trades": 1, "short_share": 0.0,
+        stats = {"account": scores, "trades": 1, "short_share": 0.0,
                  "pnl": 1.0, "start_account": 1000.0, "net_flows": 0.0, "account_drift": 0.0, "gap_share": gap_share}
         eq = hourly(ts(LO), 24, [ACCOUNT] * 24)
         monkeypatch.setattr(M, "hl_curve", lambda address, since: (eq, stats, pd.Series({"BTC": 3}), LO, HI, eq))
         monkeypatch.setattr(M, "load_markets", lambda symbols, start, end: "markets")
+        one = [fill("BTC", "B", 100, 1, (ts(LO) + 3600) * 1000, 0, 1)]  # so the return is defined
+        monkeypatch.setattr(M, "hl_fills", lambda address: one)
+        monkeypatch.setattr(M, "hl_funding", lambda address, since, end=None: [])
+        monkeypatch.setattr(M, "hl_leverage", lambda address, coins: {c: 5.0 for c in coins})
+        monkeypatch.setattr(M, "hl_bars", lambda coin, start, end: None)
+        monkeypatch.setattr(M, "hl_portfolio", lambda address: {})
         return M.setup("0xabc", 8)
     return use
 
@@ -1284,451 +1290,313 @@ def test_tw_stats_come_from_the_new_curve(tw_env):
     assert stats["account"]["max_drawdown"] == pytest.approx(0.8)
 
 
-# ---- S13 return on deployed capital --------------------------------------------
+# ---- return on peak own capital (issue #16) ------------------------------------
 
 from types import SimpleNamespace as NS  # noqa: E402
 
-
-def series(t0, *values):
-    return hourly(t0, len(values), values)
-
-
-def hourly_returns(eq):
-    return (eq / eq.shift(1) - 1).dropna().to_numpy()
+W = M.W
+CLOSES4 = [100, 100, 110, 99]  # bar k opens at t0 + k h; its close is known at t0 + (k + 1) h
 
 
-def test_deployed_curve_long_held_three_hours_by_hand():
-    # Long 10 at 100, held; the price goes 100 -> 110 -> 99: +10% on the 1000 opened, then
-    # -110 on the 1100 held the hour before, -10%.
-    t0 = ts(LO)
-    P = series(t0, 0.0, 100.0, -10.0)
-    N = series(t0, 1000.0, 1100.0, 990.0)
-    T = series(t0, 1000.0, 0.0, 0.0)
-    eq = M.deployed_curve(P, N, T)
-    assert isinstance(eq, pd.Series) and list(eq.index) == list(P.index)
-    assert eq.iloc[0] == ACCOUNT
-    assert np.allclose(eq.to_numpy(), ACCOUNT * np.array([1.0, 1.1, 1.1 * 0.9]))
-
-
-def test_deployed_curve_no_position_is_flat_even_when_pnl_moves():
-    t0 = ts(LO)
-    P = series(t0, 0.0, 5.0, 10.0, 3.0)
-    zero = series(t0, 0.0, 0.0, 0.0, 0.0)
-    eq = M.deployed_curve(P, zero, zero)
-    assert np.allclose(eq.to_numpy(), ACCOUNT)
-
-
-def test_deployed_curve_open_and_close_inside_one_hour_divides_by_the_opening_notional():
-    # Nothing held the hour before, 100 opened and closed inside the hour, 5 made: 5%.
-    t0 = ts(LO)
-    P = series(t0, 0.0, 0.0, 5.0, 5.0)
-    N = series(t0, 0.0, 0.0, 0.0, 0.0)
-    T = series(t0, 0.0, 0.0, 100.0, 0.0)
-    eq = M.deployed_curve(P, N, T)
-    assert np.allclose(eq.to_numpy(), ACCOUNT * np.array([1.0, 1.0, 1.05, 1.05]))
-
-
-def test_deployed_curve_uses_the_larger_of_held_and_opened():
-    # 1000 held the hour before and 400 more opened this hour: the +50 is on 1000, not 400 or 1400.
-    t0 = ts(LO)
-    P = series(t0, 0.0, 0.0, 50.0)
-    N = series(t0, 0.0, 1000.0, 1450.0)
-    T = series(t0, 0.0, 1000.0, 400.0)
-    eq = M.deployed_curve(P, N, T)
-    assert eq.iloc[-1] == pytest.approx(ACCOUNT * 1.05)
-    # 300 held and 1000 opened: the +50 is on 1000.
-    N = series(t0, 0.0, 300.0, 1350.0)
-    T = series(t0, 0.0, 300.0, 1000.0)
-    assert M.deployed_curve(P, N, T).iloc[-1] == pytest.approx(ACCOUNT * 1.05)
-
-
-def test_deployed_curve_short_by_hand():
-    # Short 1 at 100 (gross notional 100); the price falls to 90: +10 on 100.
-    t0 = ts(LO)
-    P = series(t0, 0.0, 10.0)
-    N = series(t0, 100.0, 90.0)
-    T = series(t0, 100.0, 0.0)
-    assert M.deployed_curve(P, N, T).iloc[-1] == pytest.approx(ACCOUNT * 1.1)
-
-
-def test_deployed_curve_is_scale_free():
-    t0 = ts(LO)
-    P = series(t0, 0.0, 3.0, -2.0, 7.0)
-    N = series(t0, 50.0, 55.0, 60.0, 0.0)
-    T = series(t0, 50.0, 0.0, 10.0, 0.0)
-    a = M.deployed_curve(P, N, T)
-    b = M.deployed_curve(P * 1000, N * 1000, T * 1000)
-    assert np.allclose(a.to_numpy(), b.to_numpy())
-
-
-def step_at(at, before, after):
-    """A bar-open price function: `before` for bars opening before `at`, `after` from it on."""
-    return lambda t: np.where(t < at, float(before), float(after))
-
-
-def test_hl_deployed_long_round_trip_matches_a_hand_count(hl_curve_env):
-    lo = ts(LO)
-    s = lo + 2 * D  # the bar opening at s closes at s + 1h at 110
-    fills = [fill("ETH", "B", 100, 1, (lo + D + 1800) * 1000, 0, 1),
-             fill("ETH", "A", 110, 1, (lo + 3 * D) * 1000, 1, 2, "Close Long")]
-    eq, *_ = hl_curve_env(fills, price=step_at(s, 100, 110))
-    assert eq.iloc[0] == ACCOUNT
-    assert eq.loc[lo + D + 3600] == pytest.approx(ACCOUNT * (1 - FEE))  # the open fee on the 100 opened
-    assert eq.loc[s + 3600] / eq.loc[s] == pytest.approx(1.1)  # +10 on the 100 held the hour before
-    assert eq.loc[lo + 3 * D] / eq.loc[lo + 3 * D - 3600] == pytest.approx(1 - FEE)  # the close fee on 110 held
-    assert eq.iloc[-1] == pytest.approx(ACCOUNT * (1 - FEE) * 1.1 * (1 - FEE))
-
-
-def test_hl_deployed_is_the_same_at_ten_times_the_size(hl_curve_env):
-    lo = ts(LO)
-    price = step_at(lo + 2 * D, 100, 110)
-
-    def fills(sz):
-        return [fill("ETH", "B", 100, sz, (lo + D + 1800) * 1000, 0, 1),
-                fill("ETH", "A", 110, sz, (lo + 3 * D) * 1000, sz, 2, "Close Long")]
-    one, *_ = hl_curve_env(fills(1), price=price)
-    ten, *_ = hl_curve_env(fills(10), price=price)
-    assert not np.allclose(one.to_numpy(), ACCOUNT)  # the fixture discriminates
-    assert np.allclose(one.to_numpy(), ten.to_numpy())
-
-
-def test_avantis_deployed_is_the_same_at_ten_times_the_size_or_the_leverage(avantis_env):
-    t = BASE + 5 * D + 6 * 3600
-    base, *_ = avantis_env([trade(t, 1000, 100.0)])
-    size, *_ = avantis_env([trade(t, 10_000, 1000.0)])
-    lever, *_ = avantis_env([trade(t, 1000, 1000.0, lev=20)])
-    assert not np.allclose(base.to_numpy(), ACCOUNT)
-    assert np.allclose(base.to_numpy(), size.to_numpy())
-    assert np.allclose(base.to_numpy(), lever.to_numpy())
-
-
-def test_avantis_deployed_short_matches_a_hand_count(avantis_env):
-    # Short 2000 notional at 100; 110 on day 3 (-200 on 2000), 95 from day 4 (+300 on 2200); closed day 5.
-    t = BASE + 5 * D + 6 * 3600
-    eq, stats, *_ = avantis_env([trade(t, 1000, 100.0)])
-    day3, day4 = BASE + 3 * D + 3600, BASE + 4 * D + 3600  # the first hours priced 110 and 95
-    assert eq.loc[day3] / eq.loc[day3 - 3600] == pytest.approx(1 - 200 / 2000)
-    assert eq.loc[day4] / eq.loc[day4 - 3600] == pytest.approx(1 + 300 / 2200)
-    open_hour = BASE + D + 13 * 3600  # the first hour after the open at 12:00
-    assert eq.loc[open_hour] == pytest.approx(ACCOUNT * (1 - FEE))  # the open fee on the 2000 opened
-    assert stats["deployed"]["return"] == pytest.approx(eq.iloc[-1] / ACCOUNT - 1)
-
-
-def test_hl_deployed_ignores_idle_cash_and_deposits(tw_env):
-    lo = ts(LO)
-    price = steps((0, 100), (lo + 2 * D, 200))
-    small, *_ = tw_env(held(1), price, [["allTime", history((lo, 1000), pnl=[0])]])
-    big, *_ = tw_env(held(1), price, [["allTime", history((lo, 1_000_000), pnl=[0])]],
-                     [flow(lo + D, "deposit", usdc="5000000.0")])
-    assert np.allclose(small.to_numpy(), big.to_numpy())
-    assert small.iloc[-1] == pytest.approx(2 * ACCOUNT)  # +100 on the 100 held: the account plays no part
-
-
-def test_hl_deployed_is_bounded_by_the_price_move_on_a_tiny_account(tw_env):
-    lo = ts(LO)
-    # 1 BTC held, the price moves 5%; the account snapshot is $1: the old account return would be
-    # +250% on the $2 floor. The deployed return is 5%.
-    price = steps((0, 100), (lo + 2 * D, 105))
-    eq, stats, *_ = tw_env(held(1), price, [["allTime", history((lo, 1), pnl=[0])]])
-    r = hourly_returns(eq)
-    assert np.abs(r).max() <= 0.05 + 2 * FEE + 1e-12
-    assert eq.iloc[-1] == pytest.approx(ACCOUNT * 1.05)
-
-
-def test_hl_deployed_open_and_close_inside_one_hour(hl_curve_env):
-    lo = ts(LO)
-    h = lo + D + 3600  # the hour the two fills land in
-    fills = [fill("ETH", "B", 100, 1, (lo + D + 600) * 1000, 0, 1),
-             fill("ETH", "A", 105, 1, (lo + D + 1200) * 1000, 1, 2, "Close Long")]
-    eq, stats, *_ = hl_curve_env(fills)
-    r = (5 - FEE * 205) / 100  # the opening notional is the capital
-    assert np.allclose(eq.loc[:h - 3600].to_numpy(), ACCOUNT)
-    assert eq.loc[h] == pytest.approx(ACCOUNT * (1 + r))
-    assert np.allclose(eq.loc[h:].to_numpy(), ACCOUNT * (1 + r))
-    assert stats["trades"] == 1
-
-
-def test_hl_deployed_short_gains_on_its_notional(hl_curve_env):
-    lo = ts(LO)
-    s = lo + 2 * D
-    eq, *_ = hl_curve_env([fill("ETH", "A", 100, 1, (lo + D + 1800) * 1000, 0, 1, "Open Short")],
-                          price=step_at(s, 100, 90))
-    assert eq.loc[lo + D + 3600] == pytest.approx(ACCOUNT * (1 - FEE))
-    assert eq.loc[s + 3600] / eq.loc[s] == pytest.approx(1.1)  # +10 on the 100 short
-    assert eq.iloc[-1] == pytest.approx(ACCOUNT * (1 - FEE) * 1.1)
-
-
-def test_hl_deployed_after_a_flip_the_new_side_earns_on_its_notional(hl_curve_env):
-    lo = ts(LO)
-    s = lo + 3 * D
-    # Short 1 at 100, then buy 2 at 100 (long 1); the price goes to 110 a day later: +10 on 100.
-    fills = [fill("ETH", "A", 100, 1, (lo + D + 1800) * 1000, 0, 1, "Open Short"),
-             fill("ETH", "B", 100, 2, (lo + 2 * D) * 1000, -1, 2, "Close Short")]
-    eq, stats, *_ = hl_curve_env(fills, price=step_at(s, 100, 110))
-    assert eq.loc[s + 3600] / eq.loc[s] == pytest.approx(1.1)
-    assert stats["trades"] == 1 and stats["short_share"] == 1.0
-
-
-def test_hl_deployed_no_fill_inside_and_no_position_is_flat(hl_curve_env):
-    lo = ts(LO)
-    fills = [fill("BTC", "B", 50, 1, (lo - 10 * D) * 1000, 0, 1),
-             fill("BTC", "A", 60, 1, (lo - 9 * D) * 1000, 1, 2, "Close Long")]
-    eq, stats, *_ = hl_curve_env(fills, price=step_at(lo + 2 * D, 100, 150))
-    assert np.allclose(eq.to_numpy(), ACCOUNT)
-    assert stats["deployed"]["return"] == 0
-
-
-# mimic_deployed: a fake Result (equity at each bar's close, clock = the bars' opens) on fake bars.
-
-def mimic_env(t0, closes, equity, trades):
+def mimic_env(t0, closes, trades=(), open_positions=()):
     """Hour1 bars closing at `closes` from t0, a Result-like object, and the hourly grid."""
     n = len(closes)
     opens = t0 + 3600 * np.arange(n, dtype="int64")
     price = lambda t: np.asarray(closes, float)[np.clip(np.searchsorted(opens, t, side="right") - 1, 0, n - 1)]
     markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars(M.TFS, t0, t0 + 3600 * n, price))])
-    r = NS(equity=np.asarray(equity, float), clock=opens, timeframe=TF.Hour1, trades=list(trades),
-           open_positions=[], ending_balance=float(equity[-1]), version=avbt_cpp.version)
+    r = NS(equity=np.full(n, ACCOUNT), clock=opens, timeframe=TF.Hour1, trades=list(trades),
+           open_positions=list(open_positions))
     return r, markets, pd.Index(opens + 3600)
 
 
-def mtrade(entry_bar, exit_bar, clock, size, entry_price, exit_price, side=None):
-    return NS(instrument="BTC", entry_bar=entry_bar, exit_bar=exit_bar, entry_time=int(clock[entry_bar]),
-              exit_time=int(clock[exit_bar]), side=side or avbt_cpp.Side.Long, entry_price=float(entry_price),
-              exit_price=float(exit_price), size=float(size), leverage=1.0, fees=0.0, holding_costs=0.0,
-              result=0.0, cause=avbt_cpp.Cause.Order)
+def mtrade(t0, entry_bar, exit_bar, size, entry, exit, side="Long", lev=2.0, fees=1.0, holding=0.5):
+    """A Trade-like object; result is the price PnL less fees and holding costs."""
+    s = 1 if side == "Long" else -1
+    return NS(instrument="BTC", side=getattr(avbt_cpp.Side, side), entry_time=t0 + 3600 * entry_bar,
+              exit_time=t0 + 3600 * exit_bar, entry_price=float(entry), exit_price=float(exit), size=float(size),
+              leverage=lev, fees=fees, holding_costs=holding, result=s * size * (exit - entry) - fees - holding)
 
 
-def test_mimic_deployed_matches_a_hand_count(hl):
+def test_trade_becomes_an_avantis_row():
     t0 = ts(LO)
-    closes = [100, 100, 110, 99]
-    # Entered at the open of bar 1 (100), marked at the closes of bars 1 and 2, out at the open of bar 3 (99).
-    r, markets, grid = mimic_env(t0, closes, [ACCOUNT, ACCOUNT, ACCOUNT + 100, ACCOUNT - 10],
-                                 [mtrade(1, 3, t0 + 3600 * np.arange(4), 10, 100, 99)])
-    eq = M.mimic_deployed(r, markets, grid)
-    assert isinstance(eq, pd.Series) and list(eq.index) == list(grid)
-    # Nothing on the entry's close (no PnL yet); +100 on the 1000 held; -110 on the 1100 held at
-    # the close before the exit, which is still open at that close.
-    assert np.allclose(eq.to_numpy(), ACCOUNT * np.array([1.0, 1.0, 1.1, 1.1 * 0.9]))
+    r, _, grid = mimic_env(t0, CLOSES4, [mtrade(t0, 1, 3, 10, 100, 99)])
+    [row] = M.mimic_rows(r, grid)
+    assert row["symbol"] == "BTC" and row["buy"] is True and row["leverage"] == 2.0
+    assert row["openPrice"] == 100 and row["openedAt"] == t0 + 2 * 3600  # the fill shows at the bar's close
+    assert pd.Timestamp(row["time"]).timestamp() == t0 + 4 * 3600
+    assert row["positionSize"] == pytest.approx(500)  # 10 x 100 / 2
+    assert row["gross"] == pytest.approx(-10)  # result + fees + holding costs
+    assert row["closingFee"] == 1.0 and row["funding"] == 0.5
 
 
-def test_mimic_deployed_does_not_change_with_the_risk(hl):
+@pytest.mark.parametrize("side, want", [
+    # Hours t0+1h..t0+4h: before the open; open at 100; 110 with half the funding; closed at 99.
+    ("Long", [np.nan, 0.0, (100 - 0.25) / 500, (-10 - 1.5) / 500]),
+    ("Short", [np.nan, 0.0, (-100 - 0.25) / 500, (10 - 1.5) / 500]),
+])
+def test_mimic_own_long_and_short_by_hand(hl, side, want):
     t0 = ts(LO)
-    closes = [100, 100, 110, 99]
-    clock = t0 + 3600 * np.arange(4)
-    small, markets, grid = mimic_env(t0, closes, [ACCOUNT, ACCOUNT, ACCOUNT + 100, ACCOUNT - 10],
-                                     [mtrade(1, 3, clock, 10, 100, 99)])
-    large, *_ = mimic_env(t0, closes, [ACCOUNT, ACCOUNT, ACCOUNT + 1000, ACCOUNT - 100],
-                          [mtrade(1, 3, clock, 100, 100, 99)])
-    a, b = M.mimic_deployed(small, markets, grid), M.mimic_deployed(large, markets, grid)
-    assert np.allclose(a.to_numpy(), b.to_numpy())
+    r, markets, grid = mimic_env(t0, CLOSES4, [mtrade(t0, 1, 3, 10, 100, 99, side)])
+    [row] = M.mimic_rows(r, grid)
+    assert row["buy"] is (side == "Long") and row["positionSize"] == pytest.approx(500)
+    rho = M.mimic_own(r, markets, grid)
+    assert isinstance(rho, pd.Series) and list(rho.index) == list(grid)
+    np.testing.assert_allclose(rho.to_numpy(), want)
 
 
-def test_mimic_deployed_short_and_no_trades(hl):
+def test_open_position_at_the_end_is_marked_not_realized(hl):
     t0 = ts(LO)
-    closes = [100, 100, 90, 90]
-    clock = t0 + 3600 * np.arange(4)
-    r, markets, grid = mimic_env(t0, closes, [ACCOUNT, ACCOUNT, ACCOUNT + 100, ACCOUNT + 100],
-                                 [mtrade(1, 3, clock, 10, 100, 90, side=avbt_cpp.Side.Short)])
-    eq = M.mimic_deployed(r, markets, grid)
-    assert np.allclose(eq.to_numpy(), ACCOUNT * np.array([1.0, 1.0, 1.1, 1.1]))  # +100 on the 1000 short
-    flat, markets, grid = mimic_env(t0, closes, [ACCOUNT] * 4, [])
-    assert np.allclose(M.mimic_deployed(flat, markets, grid).to_numpy(), ACCOUNT)
+    pos = NS(instrument="BTC", side=avbt_cpp.Side.Long, entry_price=100.0, size=10.0, entry_time=t0 + 3600)
+    r, markets, grid = mimic_env(t0, CLOSES4, open_positions=[pos])
+    [row] = M.mimic_rows(r, grid, 4)
+    assert pd.Timestamp(row["time"]).timestamp() == grid[-1] + 3600  # after the grid: never realized
+    assert row["gross"] == 0 and row["closingFee"] == 0 and row["funding"] == 0
+    assert row["positionSize"] == pytest.approx(250)
+    book = W.ledger("avantis", [row], M.market_prices(markets), times=grid)
+    # margin 10 x 100 / 4 = 250; U = 250 x 4 x (99 / 100 - 1) = -10
+    assert (book["realized"] == 0).all()
+    assert book["unrealized"].iloc[-1] == pytest.approx(-10)
+    assert M.mimic_own(r, markets, grid, 4).iloc[-1] == pytest.approx(-10 / 250)
 
 
-def test_mimic_deployed_on_a_real_backtest_is_scale_free(hl):
-    # The library strategy with a long on every bar: twice the risk, the same deployed curve.
+def test_market_prices_are_the_hour_closes_known_at_the_bar_end(hl):
     t0 = ts(LO)
-    n = 24 * 40
-    k = np.arange(n)
+    _, markets, grid = mimic_env(t0, CLOSES4)
+    s = M.market_prices(markets)["BTC"]
+    assert list(s.index) == list(grid) and list(s) == CLOSES4
+
+
+def test_identical_trades_give_mse_zero(hl):
+    t0 = ts(LO)
+    r, markets, grid = mimic_env(t0, CLOSES4, [mtrade(t0, 1, 3, 10, 100, 99, fees=0.0, holding=0.0)])
+    # The same position as an Avantis wallet's close: 500 margin at 2x, open at 100, closed at 99.
+    row = {"symbol": "BTC", "buy": True, "leverage": 2, "openPrice": 100, "openedAt": t0 + 7200,
+           "time": "2025-01-11T04:00:00Z", "positionSize": 500, "gross": -10, "closingFee": 0, "funding": 0}
+    target = W.ledger("avantis", [row], M.market_prices(markets), times=grid)["return"]
+    assert np.isnan(target.iloc[0]) and target.iloc[-1] == pytest.approx(-0.02)
+    assert M.own_mse(M.mimic_own(r, markets, grid), target.to_numpy()) == pytest.approx(0, abs=1e-12)
+
+
+def test_own_mse_counts_the_mimic_as_zero_before_its_first_open_and_skips_hours_without_a_target():
+    mimic = [np.nan, np.nan, 0.1, 0.2]
+    target = [np.nan, 0.1, 0.1, 0.1]
+    assert M.own_mse(mimic, target) == pytest.approx((0.01 + 0 + 0.01) / 3)
+    assert np.isnan(M.own_mse(mimic, [np.nan] * 4))
+
+
+def test_own_scores():
+    s = M.own_scores(pd.Series([np.nan, 0.1, -0.3, 0.5, 0.2]), [np.nan, 0.1, -0.3, 0.5, 0.0])
+    assert (s["final"], s["peak"], s["lowest"]) == (0.2, 0.5, -0.3)
+    assert s["rmse"] == pytest.approx((0.04 / 4) ** 0.5)
+    assert np.isnan(M.own_scores([0.1])["rmse"])
+    assert all(np.isnan(v) for v in M.own_scores([np.nan]).values())
+
+
+def test_doubling_the_leverage_doubles_the_return(hl):
+    t0 = ts(LO)
+    one = mimic_env(t0, CLOSES4, [mtrade(t0, 1, 3, 10, 100, 99, lev=1.0)])
+    two = mimic_env(t0, CLOSES4, [mtrade(t0, 1, 3, 10, 100, 99, lev=2.0)])
+    a, b = M.mimic_own(*one), M.mimic_own(*two)
+    # 1x: margin 1000; t0+3h U = 100 less half the funding; closed -10 - 1.5.
+    np.testing.assert_allclose(a.to_numpy()[1:], [0, 99.75 / 1000, -11.5 / 1000])
+    np.testing.assert_allclose(b.to_numpy()[1:], 2 * a.to_numpy()[1:])
+
+
+def sine_markets(t0, n=24 * 40):
     price = lambda t: 100 + 5 * np.sin((np.asarray(t) - t0) / 3600 / 7.0)
-    bars = make_bars(M.TFS, t0, t0 + 3600 * n, price)
-    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", bars)])
-    grid = pd.Index(t0 + 3600 * (k + 1))
+    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars(M.TFS, t0, t0 + 3600 * n, price))])
+    return markets, M.hour_grid(LO, pd.Timestamp(t0 + 3600 * n, unit="s").strftime("%Y-%m-%d"))
+
+
+P_LONG = {**M.START, "side": 1, "hold": 4, "stop_atrs": 8, "tp_atrs": 12, "timeframe": "1 hour"}
+
+
+def test_fit_moves_leverage_toward_the_wallets(monkeypatch, hl):
+    markets, grid = sine_markets(ts(LO))
     costs = {"BTC": avbt_cpp.Costs(FEE, FEE)}
-    p = {**M.START, "side": 1, "hold": 4, "stop_atrs": 8, "tp_atrs": 12, "timeframe": "1 hour"}
-    params = {k: v for k, v in p.items() if k not in ("risk", "leverage")}
-    params["timeframe"] = TF.Hour1
-    curves = []
-    for risk in (0.002, 0.02):
-        s = avbt_cpp.PortfolioSettings()
-        s.starting_balance, s.risk_per_trade, s.hard_stop, s.scale_risk_with_leverage = ACCOUNT, risk, 1.0, True
-        r = avbt_cpp.run("mimic", {**params, "leverage": 3}, markets, costs, s)
-        assert len(r.trades) > 2
-        curves.append(M.mimic_deployed(r, markets, grid))
-    assert not np.allclose(curves[0].to_numpy(), ACCOUNT)
-    assert np.allclose(curves[0].to_numpy(), curves[1].to_numpy(), rtol=1e-6)
+    target = M.mimic_own(M.backtest({**P_LONG, "leverage": 10}, markets, costs), markets, grid, 10)
+    monkeypatch.setattr(M, "KNOBS", {"leverage": [1, 3, 10, 30], "hold": [4]})
+    best, mse = M.fit(markets, costs, target, grid, {**P_LONG, "leverage": 1}, restarts=0, passes=2, workers=1)
+    assert best["leverage"] == 10 and mse == pytest.approx(0, abs=1e-12)
 
 
-def test_mimic_deployed_on_a_4_hour_base_clock_places_fills_at_the_bar_close(hl):
-    # A 4-hour base clock: a fill at a bar's open first shows in the equity 4 hours later.
-    t0 = ts(LO)
-    closes = [100] * 7 + [105] * 4 + [100]  # 12 hourly closes; 105 on the hours the trade is held
-    opens = t0 + 3600 * np.arange(12, dtype="int64")
-    price = lambda t: np.asarray(closes, float)[np.clip(np.searchsorted(opens, t, side="right") - 1, 0, 11)]
-    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars((TF.Hour1, TF.Hour4), t0, t0 + 12 * 3600, price))])
-    clock = t0 + 4 * 3600 * np.arange(3, dtype="int64")
-    # In at the open of 4-hour bar 1 (shows at t0 + 8h), out at the open of bar 2 (shows at t0 + 12h).
-    r = NS(equity=np.array([ACCOUNT, ACCOUNT, ACCOUNT + 100.0]), clock=clock, timeframe=TF.Hour4,
-           trades=[mtrade(1, 2, clock, 10, 100, 110)], open_positions=[], ending_balance=ACCOUNT + 100.0,
-           version=avbt_cpp.version)
-    grid = pd.Index(opens + 3600)
-    eq = M.mimic_deployed(r, markets, grid)
-    # +100 at the last hour, on the 1050 held the hour before; nothing is dropped.
-    assert np.allclose(eq.to_numpy(), ACCOUNT * np.array([1.0] * 11 + [1 + 100 / 1050]))
-    assert M.mimic_dropped(r, markets, grid) == (0.0, 0.0)
+def test_knobs_hold_leverage_and_not_risk():
+    assert "risk" not in M.KNOBS and "risk" not in M.START
+    assert M.START["leverage"] in M.KNOBS["leverage"]
+    assert min(M.KNOBS["leverage"]) >= 1 and max(M.KNOBS["leverage"]) <= 100
 
 
-def test_mimic_deployed_4_hour_signal_on_a_real_backtest_drops_no_pnl(hl):
-    # Signals on 4-hour bars, fills on the 1-hour base clock: every exit's PnL lands on a held hour,
-    # and the curve compounds each long's exit over entry less the fee at each end.
-    t0 = ts(LO)
-    n = 24 * 40
-    price = lambda t: 100 + 5 * np.sin((np.asarray(t) - t0) / 3600 / 7.0)
-    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars((TF.Hour1, TF.Hour4), t0, t0 + 3600 * n, price))])
-    grid = pd.Index(t0 + 3600 * (np.arange(n) + 1))
-    p = {**M.START, "side": 1, "hold": 4, "stop_atrs": 8, "tp_atrs": 12, "timeframe": "4 hours"}
-    r = M.backtest(p, markets, {"BTC": avbt_cpp.Costs(FEE, FEE)})
-    assert r.timeframe == TF.Hour1 and len(r.trades) > 2
-    assert M.mimic_dropped(r, markets, grid) == (0.0, 0.0)
-    eq = M.mimic_deployed(r, markets, grid)
-    hand = np.prod([(1 - FEE) ** 2 * t.exit_price / t.entry_price for t in r.trades])
-    assert eq.iloc[-1] / ACCOUNT == pytest.approx(hand, rel=1e-9)
-
-
-def test_dropped_pnl_counts_pnl_on_hours_with_no_deployed_capital():
-    P = pd.Series([0.0, 0.0, 5.0, 5.0, -3.0])  # moves: 0, +5, 0, -8
-    assert M.dropped_pnl(P, np.zeros(5), np.zeros(5)) == (13.0, 1.0)
-    assert M.dropped_pnl(P, [0, 1, 1, 0, 0], np.zeros(5)) == (8.0, 8 / 13)  # the +5 lands on the 1 held
-    assert M.dropped_pnl(P, [0, 1, 1, 1, 0], np.zeros(5)) == (0.0, 0.0)
-    assert M.dropped_pnl(P, np.zeros(5), [0, 0, 1, 0, 1]) == (0.0, 0.0)  # or on the 1 opened in the hour
-    assert M.dropped_pnl(pd.Series(np.zeros(5)), np.zeros(5), np.zeros(5)) == (0.0, 0.0)
-
-
-def test_mimic_deployed_counts_a_position_still_open_at_the_end(hl):
-    # In at the open of bar 1 (100) and never closed: its mark is in the equity, it is not in trades.
-    t0 = ts(LO)
-    closes = [100, 100, 110, 99]
-    r, markets, grid = mimic_env(t0, closes, [ACCOUNT, ACCOUNT, ACCOUNT + 100, ACCOUNT - 10], [])
-    r.open_positions = [avbt_cpp.Position("BTC", avbt_cpp.Side.Long, 100.0, 10.0, int(r.clock[1]))]
-    P, N, T = M.mimic_pnl(r, markets, grid)
-    assert list(T) == [0.0, 1000.0, 0.0, 0.0]  # opened at the hour its fill first shows
-    assert list(N) == [0.0, 1000.0, 1100.0, 990.0]  # held to the end, at each hour's close
-    assert M.mimic_dropped(r, markets, grid) == (0.0, 0.0)
-    eq = M.mimic_deployed(r, markets, grid)
-    assert np.allclose(eq.to_numpy(), ACCOUNT * np.array([1.0, 1.0, 1.1, 1.1 * (1 - 110 / 1100)]))
-
-
-def test_mimic_scores_on_a_real_backtest_ending_with_an_open_position_drop_no_pnl(hl):
-    # The last long is still open when the data ends: not a trade, but its PnL moves the equity.
-    t0 = ts(LO)
-    n = 24 * 10
-    price = lambda t: 100 + 5 * np.sin((np.asarray(t) - t0) / 3600 / 7.0)
-    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars((TF.Hour1, TF.Hour4), t0, t0 + 3600 * n, price))])
-    grid = pd.Index(t0 + 3600 * (np.arange(n) + 1))
-    p = {**M.START, "side": 1, "hold": 168, "stop_atrs": 8, "tp_atrs": 12, "timeframe": "1 hour"}
-    r = M.backtest(p, markets, {"BTC": avbt_cpp.Costs(FEE, FEE)})
-    assert len(r.open_positions) == 1 and r.equity[-1] != r.ending_balance
-    last = r.open_positions[0]
-    assert last.entry_time > max(t.exit_time for t in r.trades)
-    s = M.mimic_scores(r, markets, grid)
-    assert (s["dropped_pnl"], s["dropped_share"]) == (0.0, 0.0)
-    # The open position's mark is the last long's move at the closes since its entry.
-    P, N, T = M.mimic_pnl(r, markets, grid)
-    a = np.searchsorted(grid, last.entry_time + 3600)
-    assert np.allclose(N[a:], last.size * M.market_closes(markets, grid)["BTC"][a:])
-    assert T[a] == last.size * last.entry_price
-
-
-def test_mimic_scores_and_report_warn_on_dropped_pnl(hl, capsys):
-    t0 = ts(LO)
-    n = 24 * 10
-    price = lambda t: 100 + 5 * np.sin((np.asarray(t) - t0) / 3600 / 7.0)
-    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars((TF.Hour1, TF.Hour4), t0, t0 + 3600 * n, price))])
-    grid = pd.Index(t0 + 3600 * (np.arange(n) + 1))
-    p = {**M.START, "side": 1, "hold": 4, "stop_atrs": 8, "tp_atrs": 12, "timeframe": "1 hour"}
-    r = M.backtest(p, markets, {"BTC": avbt_cpp.Costs(FEE, FEE)})
-    s = M.mimic_scores(r, markets, grid)
-    assert len(r.trades) > 0
-    assert s["dropped_pnl"] == 0 and s["dropped_share"] == 0
-    M.warn_dropped("mimic", s)
-    assert capsys.readouterr().out == ""
-    M.warn_dropped("mimic", {**s, "dropped_pnl": 7.0, "dropped_share": 0.02})
-    assert "warning" in capsys.readouterr().out
-    M.warn_dropped("mimic", {})  # an old file's scores
-    assert capsys.readouterr().out == ""
-
-
-# the fit's fixed account, and the score layout
-
-def test_knobs_no_longer_hold_risk_or_leverage():
-    assert "risk" not in M.KNOBS and "leverage" not in M.KNOBS
-    assert "risk" not in M.START and "leverage" not in M.START
-
-
-def test_backtest_fixes_risk_leverage_and_scale(monkeypatch):
+def test_backtest_fixes_risk_and_scale_and_takes_the_leverage(monkeypatch):
     got = {}
 
     def run(name, params, markets, costs, settings):
         got.update(name=name, params=dict(params), settings=settings)
         return avbt_cpp.Result(np.array([1.0, 1.0]), TF.Hour1, np.array([0, 3600], dtype="int64"))
     monkeypatch.setattr(M.avbt_cpp, "run", run)
-    M.backtest(dict(M.START), "markets", "costs")
-    assert got["name"] == "mimic" and got["params"]["leverage"] == 3
+    M.backtest({**M.START, "leverage": 15}, "markets", "costs")
+    assert got["name"] == "mimic" and got["params"]["leverage"] == 15
     assert got["settings"].risk_per_trade == 0.002
     assert got["settings"].scale_risk_with_leverage is True
     assert got["settings"].starting_balance == ACCOUNT
 
 
-SCORE_KEYS = {"sharpe", "max_drawdown", "return"}
+def test_score_sets_of_an_old_save_drop_deployed():
+    nan = float("nan")
+    old = {"deployed": {"sharpe": 1.0, "max_drawdown": 0.1, "return": 0.2},
+           "account": {"sharpe": 2.0, "max_drawdown": 0.2, "return": 0.3}, "trades": 4}
+    s = M.score_sets(old)
+    assert "deployed" not in s and s["account"] == old["account"] and s["trades"] == 4
+    assert all(np.isnan(v) for v in s["own"].values())
+    oldest = M.score_sets({"sharpe": 1.0, "max_drawdown": 0.1, "return": nan, "trades": 2})
+    assert oldest["account"]["sharpe"] == 1.0
 
 
-def test_hl_curve_stats_hold_deployed_and_account_scores(hl_curve_env):
-    lo = ts(LO)
-    eq, stats, *_ = hl_curve_env([fill("BTC", "B", 100, 1, (lo + D + 1800) * 1000, 0, 1)],
-                                 price=step_at(lo + 2 * D, 100, 120))
-    assert SCORE_KEYS <= set(stats["deployed"]) and SCORE_KEYS <= set(stats["account"])
-    for k in ("trades", "short_share", "pnl", "net_flows", "account_drift", "gap_share"):
-        assert k in stats, k
-    s = M.curve_stats(eq)
-    np.testing.assert_equal([stats["deployed"][k] for k in SCORE_KEYS], [s[k] for k in SCORE_KEYS])
-    # The $1000 account and the 100 deployed: the +20 is 2% of one, 20% of the other.
-    assert stats["deployed"]["return"] == pytest.approx((1 - FEE) * 1.2 - 1)
-    assert stats["account"]["return"] == pytest.approx((1 - FEE * 100 / 1000) * (1 + 20 / (1000 - FEE * 100)) - 1)
+# setup builds the wallet's curve from ledger()
+
+STEP = ts(LO) + 2 * D  # prices step from 100 to 110 here
 
 
-def test_avantis_curve_stats_hold_deployed_and_account_scores(avantis_env):
-    eq, stats, *_ = avantis_env([trade(BASE + 5 * D + 6 * 3600, 1000, 100.0)])
-    assert SCORE_KEYS <= set(stats["deployed"]) and SCORE_KEYS <= set(stats["account"])
-    assert "trades" in stats and "short_share" in stats
-    assert stats["account"]["return"] == pytest.approx(0.099)  # the peak-margin curve, as before
-    s = M.curve_stats(eq)
-    np.testing.assert_equal([stats["deployed"][k] for k in SCORE_KEYS], [s[k] for k in SCORE_KEYS])
+def hl_setup_env(monkeypatch, fills, leverage):
+    stats = {"account": {"sharpe": 0.0, "max_drawdown": 0.0, "return": 0.0}, "trades": 1, "short_share": 0.0,
+             "pnl": 1.0, "start_account": 1000.0, "net_flows": 0.0, "account_drift": 0.0, "gap_share": 0.0}
+    eq = hourly(ts(LO), 24, [ACCOUNT] * 24)
+    counts = pd.Series({f["coin"]: 1 for f in fills})
+    price = lambda t: np.where(t < STEP, 100.0, 110.0)
+    monkeypatch.setattr(M, "hl_curve", lambda address, since: (eq, stats, counts, LO, HI, eq))
+    monkeypatch.setattr(M, "hl_fills", lambda address: fills)
+    monkeypatch.setattr(M, "hl_funding", lambda address, since, end=None: [])
+    monkeypatch.setattr(M, "hl_leverage", lambda address, coins: {c: leverage.get(c) for c in coins})
+    monkeypatch.setattr(M, "hl_bars", lambda coin, start, end: make_bars(M.TFS, ts(start), ts(end), price))
+    monkeypatch.setattr(M, "hl_portfolio", lambda address: {})
+    monkeypatch.setattr(M, "load_markets", lambda symbols, start, end: "markets")
+    return M.setup("0xabc", 8)
 
 
-def test_main_saves_deployed_and_account_scores_per_side(monkeypatch, tmp_path, hl):
-    t0 = ts(LO)
-    n = 24 * 40
-    closes = 100 + 5 * np.sin(np.arange(n) / 7.0)
-    opens = t0 + 3600 * np.arange(n, dtype="int64")
-    price = lambda t: closes[np.clip(np.searchsorted(opens, t, side="right") - 1, 0, n - 1)]
-    markets = avbt_cpp.Markets([avbt_cpp.Market("BTC", make_bars(M.TFS, t0, t0 + 3600 * n, price))])
-    eq = hourly(t0 + 3600, n, ACCOUNT * (1 + 0.001 * np.arange(n)))
-    wallet = {"deployed": M.curve_stats(eq), "account": M.curve_stats(eq), "trades": 3, "short_share": 1.0,
+def test_setup_builds_the_hyperliquid_target_with_the_median_leverage_fallback(monkeypatch, hl):
+    t = (ts(LO) + D + 1800) * 1000
+    fills = [fill(c, "B", 100, 1, t, 0, i + 1) for i, c in enumerate(("BTC", "SOL", "ETH"))]
+    w = hl_setup_env(monkeypatch, fills, {"BTC": 5.0, "SOL": 15.0})
+    target = w["target"]
+    assert list(target.index) == list(M.hour_grid(LO, HI))
+    assert target.loc[: ts(LO) + D].isna().all()  # before the first fill
+    margin = 100 / 5 + 100 / 15 + 100 / 10  # ETH takes the median of 5 and 15
+    assert target.iloc[-1] == pytest.approx(30 / margin)
+    assert w["leverage"] == 10.0 and w["capital"] == pytest.approx(margin)
+    assert all(len(c) == 3 for c in w["checks"])
+    names = [n for n, *_ in w["checks"]]
+    assert "U >= -margin open" in names and "12 return >= -100%" in names
+
+
+def test_setup_builds_the_avantis_target_from_its_rows(monkeypatch, avantis_env):
+    monkeypatch.setattr(M.W, "board_row", lambda address: None)
+    monkeypatch.setattr(M, "load_markets", lambda symbols, start, end: "markets")
+    avantis_env([trade(BASE + 5 * D + 6 * 3600, 1000, 100.0)])  # writes the history, mocks the bars
+    w = M.setup(ADDR, 8)
+    rho = w["target"]
+    # Short 1000 margin at 2x from 100, 110 on day 3, closed on day 5 for +100.
+    assert rho.loc[BASE + D + 12 * 3600] == 0 and np.isnan(rho.loc[BASE + D + 11 * 3600])
+    assert rho.loc[BASE + 3 * D + 3600] == pytest.approx(-0.2)
+    assert rho.iloc[-1] == pytest.approx(0.1)
+    assert w["leverage"] == 2 and w["capital"] == 1000
+
+
+def test_wallet_note_prints_the_return_capital_and_hyperliquid_checks(hl, capsys):
+    w = {"target": pd.Series([np.nan, 0.25]), "capital": 1234.0,
+         "checks": [("8 P = R + U", True, "fine"), ("U >= -margin open", True, "holds"),
+                    ("12 return >= -100%", True, "ok"), ("10 capital never falls", False, "fell")]}
+    M.wallet_note(w)
+    out = capsys.readouterr().out
+    assert "25.0%" in out and "$1,234" in out
+    assert "U >= -margin open" in out and "12 return" in out and "10 capital" in out and "8 P" not in out
+
+
+def own_main(monkeypatch, tmp_path, leverage=7.0):
+    markets, grid = sine_markets(ts(LO))
+    costs = {"BTC": avbt_cpp.Costs(FEE, FEE)}
+    target = M.mimic_own(M.backtest({**P_LONG, "leverage": 10}, markets, costs), markets, grid, 10) * 1.1
+    wallet = {"account": {"sharpe": 1.0, "max_drawdown": 0.1, "return": 0.2}, "trades": 3, "short_share": 0.0,
               "pnl": 10.0, "net_flows": 0.0, "account_drift": 0.0, "gap_share": 0.0}
+    end = pd.Timestamp(grid[-1] + 3600, unit="s").strftime("%Y-%m-%d")
     monkeypatch.setattr(M, "setup", lambda address, top, *costs: {
-        "eq": eq, "wallet": wallet, "symbols": ["BTC"], "start": LO, "end": "2025-02-20",
-        "markets": markets, "covered_share": 1.0})
-    monkeypatch.setattr(M, "fit", lambda *a, **k: (dict(a[4]), 0.5))
+        "wallet": wallet, "symbols": ["BTC"], "start": LO, "end": end, "markets": markets,
+        "covered_share": 1.0, "target": target, "capital": 100.0, "leverage": leverage, "checks": []})
+    got = {}
+
+    def fake_fit(markets, costs, target, grid, first, *a, knobs, **k):
+        got.update(first=first, knobs=list(knobs["leverage"]))
+        return {**first, "side": 1, "hold": 4, "stop_atrs": 8, "tp_atrs": 12}, 0.5
+    monkeypatch.setattr(M, "fit", fake_fit)
+    monkeypatch.setattr(M, "load_markets", lambda symbols, start, end: markets)
     monkeypatch.setattr(sys, "argv", ["mimic.py", "--venue", "hyperliquid", "0x" + "ab" * 20])
     M.main()
-    saved = json.loads(next(tmp_path.glob("mimic_hl_*.json")).read_text())
+    path = next(tmp_path.glob("mimic_hl_*.json"))
+    return path, got, markets, grid
+
+
+def test_main_saves_own_and_account_scores_and_the_wallet_curve(monkeypatch, tmp_path, hl):
+    path, got, *_ = own_main(monkeypatch, tmp_path)
+    saved = json.loads(path.read_text())
+    assert saved["fit"] == "own" and "deployed" not in json.dumps(saved)
+    assert got["first"]["leverage"] == 7.0 and 7.0 in got["knobs"] and got["knobs"] == sorted(got["knobs"])
+    assert saved["params"]["leverage"] == 7.0
     for side in ("wallet", "mimic"):
-        assert SCORE_KEYS <= set(saved[side]["deployed"]), side
-        assert SCORE_KEYS <= set(saved[side]["account"]), side
+        assert set(saved[side]["own"]) == {"final", "peak", "lowest", "rmse"}, side
+        assert {"sharpe", "max_drawdown", "return"} <= set(saved[side]["account"]), side
         assert "trades" in saved[side], side
+    assert np.isnan(saved["wallet"]["own"]["rmse"]) and saved["mimic"]["own"]["rmse"] > 0
+    assert M.target_path(path).exists()
+    assert "deployed" not in path.read_text()
+    rho = M.load_target(path, M.hour_grid(saved["start"], saved["end"])).dropna()
+    assert saved["wallet"]["own"]["final"] == pytest.approx(rho.iloc[-1])
     assert "risk" not in saved["params"] and saved["settings"]["risk_per_trade"] == 0.002
-    assert saved["settings"]["scale_risk_with_leverage"] is True
     assert saved["mse"] == 0.5
+
+
+def test_replay_of_a_new_save_reproduces_its_scores(monkeypatch, tmp_path, hl, capsys):
+    path, _, markets, grid = own_main(monkeypatch, tmp_path)
+    saved = json.loads(path.read_text())
+    target = M.load_target(path, grid)
+    again = M.mimic_scores(M.rerun(saved, markets), markets, grid, target, saved["params"]["leverage"])
+    assert again["own"] == pytest.approx(saved["mimic"]["own"])
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["mimic.py", "--replay", str(path)])
+    M.main()
+    assert "deployed" not in capsys.readouterr().out
+
+
+def test_main_leaves_the_module_knobs_alone(monkeypatch, tmp_path, hl):
+    before = list(M.KNOBS["leverage"])
+    assert 7.0 not in before and 13.0 not in before
+    _, one, *_ = own_main(monkeypatch, tmp_path, 7.0)
+    _, two, *_ = own_main(monkeypatch, tmp_path, 13.0)
+    assert M.KNOBS["leverage"] == before
+    assert 7.0 in one["knobs"] and 13.0 not in one["knobs"]
+    assert 13.0 in two["knobs"] and 7.0 not in two["knobs"]
+
+
+def test_replay_without_the_wallet_curve_says_the_rmse_is_lost(monkeypatch, tmp_path, hl, capsys):
+    path, *_ = own_main(monkeypatch, tmp_path)
+    M.target_path(path).unlink()
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["mimic.py", "--replay", str(path)])
+    M.main()
+    out = capsys.readouterr().out
+    assert "wallet curve" in out and "missing" in out and "RMSE" in out
+
+
+def test_table_prints_a_dash_for_a_nan_score(capsys):
+    nan = float("nan")
+    s = {"own": {"final": 0.25, "peak": 0.5, "lowest": -0.1, "rmse": nan},
+         "account": {"sharpe": 1.0, "max_drawdown": 0.1, "return": 0.2}, "trades": 3}
+    M.table([("wallet", s)])
+    row = capsys.readouterr().out.splitlines()[-1]
+    assert "nan" not in row and row.split()[4] == "-"
+    assert "25.0%" in row and "50.0%" in row
+
+
+def test_setup_stops_when_the_wallet_return_is_never_defined(monkeypatch, hl):
+    with pytest.raises(SystemExit, match="no hour"):
+        hl_setup_env(monkeypatch, [], {})
 
 
 # ---- funding, leverage, the fill limit ---------------------------------------
@@ -1825,3 +1693,100 @@ def test_hl_leverage_parses_value_and_records_none(monkeypatch, tmp_path):
     lev["XRP"] = {"leverage": {"value": 3}}
     assert M.hl_leverage("0xabc", ["BTC", "XRP"]) == {"BTC": 20.0, "XRP": 3.0}
     assert len(server.calls) == n + 1, "only the new coin is fetched"
+
+
+# ---- the ledger's sums, the 15-minute base, empty curves ---------------------
+
+CLOSES8 = [100, 100, 110, 99, 99, 99, 99, 99]
+
+
+def env8(trades=(), timeframe=TF.Hour1):
+    """mimic_env on CLOSES8 and its first six grid hours, t0 + 1h .. t0 + 6h."""
+    r, markets, grid = mimic_env(ts(LO), CLOSES8, trades)
+    r.timeframe = timeframe
+    return r, markets, grid[:6]
+
+
+def ledger8(r, markets, grid):
+    return W.ledger("avantis", M.mimic_rows(r, grid), M.market_prices(markets), times=np.asarray(grid))
+
+
+def test_rows_on_a_15_minute_base_shift_by_15_minutes(hl):
+    t0 = ts(LO)
+    t = mtrade(t0, 0, 0, 4, 100, 100, fees=0.0, holding=0.0)
+    t.entry_time, t.exit_time = t0 + 900, t0 + 1800
+    r, _, grid = env8([t], TF.Min15)
+    [row] = M.mimic_rows(r, grid)
+    assert row["openedAt"] == t0 + 1800
+    assert W.unix(row["time"])[0] == t0 + 2700
+
+
+def test_realized_at_the_end_is_the_sum_of_results(hl):
+    t0 = ts(LO)
+    trades = [mtrade(t0, 1, 2, 10, 100, 110, fees=1.0, holding=0.25),
+              mtrade(t0, 3, 4, 3, 99, 99, "Short", lev=3.0, fees=0.5, holding=-0.75)]
+    # Results: 10 * 10 - 1 - 0.25 = 98.75 and 0 - 0.5 + 0.75 = 0.25.
+    df = ledger8(*env8(trades))
+    assert df["realized"].iloc[-1] == pytest.approx(98.75 + 0.25)
+
+
+def test_partial_close_counts_the_margin_once(hl):
+    t0 = ts(LO)
+    # One 10-unit long at 100, 2x (margin 500), closed as 6 at t0+3h open and 4 at t0+5h open.
+    a = mtrade(t0, 1, 3, 6, 100, 110, fees=0.0, holding=0.0)  # result 60
+    b = mtrade(t0, 1, 5, 4, 100, 99, fees=0.0, holding=0.0)  # result -4
+    rho = M.mimic_own(*env8([a, b]))
+    # t0+3h: price 110, U = 600*0.1 + 400*0.1 = 100; K = 300 + 200 = 500: 0.2.
+    # t0+4h: A closed (+60); B at 99: -4; P = 56: 0.112. t0+6h: both closed, 56 / 500.
+    np.testing.assert_allclose(rho.iloc[2:], [0.2, 0.112, 0.112, 0.112])
+    assert ledger8(*env8([a, b]))["capital"].iloc[-1] == pytest.approx(500)
+
+
+def test_exit_on_the_last_grid_hour_is_realized(hl):
+    t0 = ts(LO)
+    t = mtrade(t0, 1, 5, 10, 100, 99, fees=0.0, holding=0.0)  # exit at t0+5h open, shows at t0+6h, the last hour
+    df = ledger8(*env8([t]))
+    assert df["realized"].iloc[-1] == pytest.approx(-10)
+    assert df["unrealized"].iloc[-1] == pytest.approx(0)
+
+
+def test_mimic_with_no_trades_is_nan_and_mse_is_the_target_squared(hl):
+    r, markets, grid = env8()
+    rho = M.mimic_own(r, markets, grid)
+    assert rho.isna().all()
+    target = pd.Series([np.nan, 0.1, -0.2, 0.3, np.nan, 0.0], index=grid)
+    m = M.own_mse(rho, target)
+    assert np.isfinite(m) and m == pytest.approx((0.01 + 0.04 + 0.09 + 0) / 4)
+
+
+def test_mse_with_no_target_hour_is_nan():
+    mimic = pd.Series([0.1, 0.2])
+    assert np.isnan(M.own_mse(mimic, pd.Series([np.nan, np.nan])))
+
+
+@pytest.mark.parametrize("name", ["deployed_curve", "dropped_pnl", "warn_dropped",
+                                  "mimic_deployed", "mimic_dropped"])
+def test_deployed_helpers_are_gone(name):
+    assert not hasattr(M, name)
+
+
+def test_chart_ends_on_the_last_grid_hour_at_the_saved_final(monkeypatch, tmp_path, hl):
+    chart = pytest.importorskip("mimic_chart")
+    path, _, _, grid = own_main(monkeypatch, tmp_path)
+    saved = json.loads(path.read_text())
+    out = chart.curves(saved)
+    assert len(grid) % 4 != 1  # every 4th hour alone would miss the last
+    assert out["t"][-1] == grid[-1] and out["t"][:2] == [grid[0], grid[4]]
+    assert out["mimic"][-1] == pytest.approx(saved["mimic"]["own"]["final"], abs=1e-4)
+    assert out["wallet"][-1] == pytest.approx(saved["wallet"]["own"]["final"], abs=1e-4)
+
+
+def test_hl_all_takes_addresses_and_an_output_name():
+    import mimic_hl_all as A
+    a = A.parse(["--out", "top.html", "0xAB", "0xcd"])
+    assert (a.out, a.addresses) == ("top.html", ["0xAB", "0xcd"])
+    a = A.parse([])
+    assert (a.out, a.addresses) == ("mimic_hl_all.html", [])
+    saves = [{"address": "0xab"}, {"address": "0xCD"}, {"address": "0xef"}]
+    assert A.pick(saves, ["0xAB", "0xcd"]) == saves[:2]
+    assert A.pick(saves, []) == saves

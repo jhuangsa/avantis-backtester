@@ -703,3 +703,11 @@ def test_hyper_two_coins_own_leverage():
     # M = 2*100/2 + 1*200/4 = 100 + 50 = 150
     assert df.iloc[-1]["margin_open"] == approx(150)
     assert df.iloc[-1]["capital"] == approx(150)
+
+
+def test_avantis_columns_are_float_when_no_trade_is_ever_live():
+    rows = [av("AAA", True, 5, 100.0, 0, 0, 100.0, 1.0, 0.1)]  # opens and closes in one second
+    df = W.ledger("avantis", rows, {})
+    assert len(df)
+    for c in NUM:
+        assert df[c].dtype == np.float64, c

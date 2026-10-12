@@ -95,24 +95,45 @@ def avantis_rows(records):
     return d, skipped
 
 
-def avantis_state(d, prices, t):
-    """Columns at times t (array) for Avantis closes d."""
-    a, c = d["a"].to_numpy()[:, None], d["c"].to_numpy()[:, None]
-    closed, live = c <= t, (a <= t) & (t < c)
-    m, f = d["m"].to_numpy()[:, None], d["f"].to_numpy()[:, None]
-    p = np.vstack([price_at(prices.get(r.market), t, r.p0)
-                   for r in d.itertuples()])
-    move = (d["side"] * d["m"] * d["lev"]).to_numpy()[:, None]
-    u_price = np.where(live, move * (p / d["p0"].to_numpy()[:, None] - 1), 0)
-    held = np.where(live, (t - a) / np.where(c > a, c - a, 1), 0)
-    gain = (d["g"] - d["phi"] - d["f"]).to_numpy()[:, None]
+def avantis_state(d, prices, t, points=2_000_000):
+    """Columns at times t (sorted array) for Avantis closes d.
+
+    Closed sums are running sums over the closes in time order. Live
+    sums touch only each trade's times in [open, close), at most
+    `points` of them at once.
+    """
+    a, c, p0 = (d[k].to_numpy() for k in ("a", "c", "p0"))
+    m, f, phi = (d[k].to_numpy() for k in ("m", "f", "phi"))
+    o = np.argsort(c, kind="stable")
+    done = np.searchsorted(c[o], t, side="right")
+
+    def closed(x):
+        return np.concatenate([[0.0], np.cumsum(x[o])])[done]
+
+    code, names = pd.factorize(d["market"])
+    price = np.full((len(names), len(t)), np.nan)
+    first = np.full(len(names), len(t))  # the first time each market's price is known
+    for i, name in enumerate(names):
+        if has_prices(prices, name):
+            price[i] = price_at(prices[name], t, np.nan)
+            first[i] = np.searchsorted(t, prices[name].index.min())
+    move = (d["side"] * d["m"] * d["lev"]).to_numpy()
+    lo = np.searchsorted(t, a)
+    n = np.searchsorted(t, c) - lo
+    cuts = np.searchsorted(np.cumsum(n), np.arange(points, n.sum(), points))
+    u, uf, mo = np.zeros(len(t)), np.zeros(len(t)), np.zeros(len(t))
+    for b0, b1 in zip(np.r_[0, cuts], np.r_[cuts, len(d)]):
+        nb = n[b0:b1]
+        k = np.repeat(np.arange(b0, b1), nb)  # the trade of each live point
+        j = np.arange(len(k)) - np.repeat(np.cumsum(nb) - nb, nb) + lo[k]  # its time
+        p = np.where(j >= first[code[k]], price[code[k], j], p0[k])
+        u += np.bincount(j, move[k] * (p / p0[k] - 1), minlength=len(t))
+        uf -= np.bincount(j, f[k] * (t[j] - a[k]) / (c - a)[k], minlength=len(t))
+        mo += np.bincount(j, m[k], minlength=len(t))
     return dict(
-        realized=(closed * gain).sum(0),
-        unrealized_price=u_price.sum(0),
-        unrealized_funding=-(f * held).sum(0),
-        fees=(closed * d["phi"].to_numpy()[:, None]).sum(0),
-        funding=(closed * f).sum(0),
-        margin_open=(live * m).sum(0))
+        realized=closed(d["g"].to_numpy() - phi - f),
+        unrealized_price=u, unrealized_funding=uf,
+        fees=closed(phi), funding=closed(f), margin_open=mo)
 
 
 def trade(q, e, i, d, px):
@@ -253,7 +274,7 @@ def ledger(venue, records, prices, *, funding=(), leverage=None, start=None,
     t = grid(first, events.max()) if times is None else np.asarray(times)
     t = t.astype(float)
     every = np.union1d(events, t)
-    step = max(1, 2_000_000 // max(len(records), 1))
+    step = len(every) if venue == "avantis" else max(1, 2_000_000 // max(len(records), 1))
     s = pd.concat([pd.DataFrame(state(every[i:i + step]))
                    for i in range(0, len(every), step)], ignore_index=True)
     s["own"] = s["margin_open"] - s["realized"]
@@ -476,11 +497,15 @@ def pnl_history(portfolio):
     return None
 
 
-def run_avantis(M, address):
+def run_avantis(M, address, times=None):
+    """A wallet's table and checks; times as in ledger().
+
+    attrs["leverage"] is the median leverage of its rows.
+    """
     rows = json.loads(M.download(address).read_text())["trades"]
     good = [r for r in rows if kept(r)]
     if not good:
-        return ledger("avantis", rows, {}), []
+        return ledger("avantis", rows, {}, times=times), []
     first = int(min(r["openedAt"] for r in good))
     last = int(max(unix([r["time"] for r in good])))
     start, end = M.day_bounds(first, last)[:2]
@@ -489,18 +514,26 @@ def run_avantis(M, address):
         b = M.bars(pid, start, end)
         if b is not None and len(b[1].ts):
             prices[sym] = pd.Series(b[1].close, index=b[1].ts + HOUR)
-    df = ledger("avantis", rows, prices)
+    df = ledger("avantis", rows, prices, times=times)
+    df.attrs["leverage"] = float(np.median([fnum(r["leverage"]) for r in good]))
     return df, checks(df, "avantis", rows, board=board_row(address))
 
 
-def run_hyperliquid(M, address):
+def run_hyperliquid(M, address, since=None, end=None, times=None):
+    """A wallet's table and checks over its last HL_DAYS, or from since to end (dates).
+
+    times as in ledger(); fills and funding after its last time are left
+    out, so the checks on R hold at the last row. attrs["leverage"] is
+    the median of the known leverage settings, else 1.
+    """
     now = pd.Timestamp.now(tz="UTC")
-    since = (now - pd.Timedelta(days=M.HL_DAYS)).strftime("%Y-%m-%d")
-    end = (now + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    since = since or (now - pd.Timedelta(days=M.HL_DAYS)).strftime("%Y-%m-%d")
+    end = end or (now + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     lo = int(pd.Timestamp(since, tz="UTC").timestamp())
+    hi = np.inf if times is None else float(np.max(times))
     every = M.hl_fills(address)
-    fills = [f for f in every if f["time"] >= lo * 1000]
-    funding = M.hl_funding(address, lo * 1000)
+    fills = [f for f in every if lo * 1000 <= f["time"] <= hi * 1000]
+    funding = [x for x in M.hl_funding(address, lo * 1000) if x["time"] <= hi * 1000]
     coins = sorted({f["coin"] for f in fills} | {x["coin"] for x in funding})
     lev = M.hl_leverage(address, coins)
     known = [v for v in lev.values() if v]
@@ -513,9 +546,15 @@ def run_hyperliquid(M, address):
         if b is not None:
             prices[c] = pd.Series(b[0].close, index=b[0].ts + HOUR)
     df = ledger("hyperliquid", fills, prices, funding=funding,
-                leverage=lev, start=lo)
+                leverage=lev, start=lo, times=times)
+    df.attrs["leverage"] = guess
+    try:  # only check 18 reads it: no portfolio, no check
+        history = pnl_history(M.hl_portfolio(address))
+    except Exception as e:
+        print(f"note: no portfolio ({e!r}); check 18 is skipped")
+        history = None
     res = checks(df, "hyperliquid", fills, funding=funding,
-                 history=pnl_history(M.hl_portfolio(address)),
+                 history=history,
                  capped=M.hl_fills_capped(every, lo * 1000),
                  fallback=fallback)
     return df, res
