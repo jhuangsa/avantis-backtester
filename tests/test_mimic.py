@@ -528,11 +528,12 @@ ADDR = "0xAbC"
 
 
 def trade(close_at, pos, gross, buy=False, open_at=BASE + D + 12 * 3600, open_px=100.0, close_px=95.0,
-          lev=2, symbol="BTC/USD", pid=1, index=0):
+          lev=2, symbol="BTC/USD", pid=1, index=0, closing_fee=0.0, funding=0.0):
     return {"time": pd.Timestamp(close_at, unit="s", tz="UTC").strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             "gross": gross, "pairIndex": pid, "symbol": symbol, "index": index, "buy": buy, "leverage": lev,
             "openPrice": open_px, "tp": 0, "sl": 0, "collateral": pos, "positionSize": pos,
-            "closePrice": close_px, "usdcSent": pos + gross, "openedAt": open_at, "closingFee": 0, "funding": 0}
+            "closePrice": close_px, "usdcSent": pos + gross - closing_fee - funding, "openedAt": open_at,
+            "closingFee": closing_fee, "funding": funding}
 
 
 def price_path(t):
@@ -542,12 +543,12 @@ def price_path(t):
 
 @pytest.fixture
 def avantis_env(monkeypatch, tmp_path):
-    def use(trades, candles=True):
+    def use(trades, candles=True, fees="flat", funding=False):
         (tmp_path / f"wallet_{ADDR}.json").write_text(json.dumps({"address": ADDR, "count": len(trades), "trades": trades}))
         monkeypatch.setattr(M.vt, "_symbols", lambda: {1: "BTC/USD", 2: "ETH/USD"})
         monkeypatch.setattr(M, "bars", lambda pid, start, end:
                             make_bars(M.TFS, BASE, BASE + 8 * D, price_path) if candles else None)
-        return M.avantis_curve(ADDR)
+        return M.avantis_curve(ADDR, fees, funding)
     return use
 
 
@@ -599,6 +600,19 @@ def test_avantis_curve_fees_use_notional_at_open_and_at_close(avantis_env):
     # A long at 5x on 200 margin (notional 1000) closed flat: only the fees show.
     _, stats, *_, eq = avantis_env([trade(BASE + 5 * D + 6 * 3600, 200, 0.0, buy=True, open_px=95.0, close_px=95.0, lev=5)])
     assert eq.iloc[-1] == pytest.approx(ACCOUNT - (ACCOUNT / 200) * FEE * 2000)
+
+
+def test_avantis_curve_charges_the_real_closing_fee_and_funding_at_the_close(avantis_env):
+    # A long at 5x on 200 margin closed flat, with a 1.5 closing fee and 3.5 funding: only they show.
+    t = BASE + 5 * D + 6 * 3600
+    row = trade(t, 200, 0.0, buy=True, open_px=95.0, close_px=95.0, lev=5, closing_fee=1.5, funding=3.5)
+    scale = ACCOUNT / 200
+    eq = avantis_env([row], fees="real", funding=True)[-1]
+    assert eq.loc[t - 3600] == pytest.approx(ACCOUNT)
+    assert eq.iloc[-1] == pytest.approx(ACCOUNT - scale * 5.0)
+    assert avantis_env([row], fees="real", funding=False)[-1].iloc[-1] == pytest.approx(ACCOUNT - scale * 1.5)
+    flat = avantis_env([row], fees="flat", funding=True)[-1].iloc[-1]
+    assert flat == pytest.approx(ACCOUNT - scale * (FEE * 2000 + 3.5))
 
 
 def test_avantis_curve_counts_orders_busiest_first(avantis_env):
@@ -1691,7 +1705,7 @@ def test_main_saves_deployed_and_account_scores_per_side(monkeypatch, tmp_path, 
     eq = hourly(t0 + 3600, n, ACCOUNT * (1 + 0.001 * np.arange(n)))
     wallet = {"deployed": M.curve_stats(eq), "account": M.curve_stats(eq), "trades": 3, "short_share": 1.0,
               "pnl": 10.0, "net_flows": 0.0, "account_drift": 0.0, "gap_share": 0.0}
-    monkeypatch.setattr(M, "setup", lambda address, top: {
+    monkeypatch.setattr(M, "setup", lambda address, top, *costs: {
         "eq": eq, "wallet": wallet, "symbols": ["BTC"], "start": LO, "end": "2025-02-20",
         "markets": markets, "covered_share": 1.0})
     monkeypatch.setattr(M, "fit", lambda *a, **k: (dict(a[4]), 0.5))

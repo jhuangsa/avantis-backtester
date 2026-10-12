@@ -13,8 +13,10 @@ or leverage. A second score set, "account", is the return on the account:
 the wallet's whole Hyperliquid account or its peak Avantis margin, and
 the mimic's $10,000.
 
-Every curve pays FEE of notional at each open and each close, 0.05% per
-round trip, and leaves out funding. Every curve is scored by the C++ rules
+The mimic and a Hyperliquid wallet pay FEE of notional at each open and
+each close, 0.05% per round trip, and leave out funding. An Avantis
+wallet's costs are set by --fees and --funding: by default its real
+closing fees and funding, from its trade history. Every curve is scored by the C++ rules
 through curve_stats. A trade is one position from open to full close.
 
 Run from the repository root:
@@ -25,6 +27,10 @@ Writes data/candles/mimic_<address>.json: the strategy, its params, the
 markets, dates, costs and settings, and the scores. To rerun it:
 
     python3 examples/mimic.py --replay data/candles/mimic_<address>.json
+
+An Avantis wallet with the flat FEE and no funding, as before:
+
+    python3 examples/mimic.py --fees flat --no-funding <address>
 
 A Hyperliquid wallet (1-hour and 4-hour bars, the last 200 days), from its
 fills and hourly closes:
@@ -250,14 +256,17 @@ def day_bounds(first, last):
 PAIR_IDS = {}  # symbol -> Avantis pair id, from the wallet's rows
 
 
-def avantis_curve(address):
+def avantis_curve(address, fees="real", funding=True):
     """The wallet's hourly deployed-capital curve on Avantis, its scores, its orders per symbol, start, end, and its account curve.
 
     An order is one position: symbol, side, index, open price and open
     minute; its margin is the sum of its closes' positionSize. Each hour the
-    PnL is the realized price PnL of the closes so far, less fees, plus
-    each open order's remaining notional times its price change since the
-    open. The deployed curve (deployed_curve) is returned first; the
+    PnL is the realized price PnL of the closes so far, less fees and
+    funding, plus each open order's remaining notional times its price
+    change since the open. fees "real" charges each close's closingFee at
+    the close (the rows carry no opening fee); "flat" charges FEE of
+    notional at the open and at each close. funding True charges each
+    close's funding at the close. The deployed curve (deployed_curve) is returned first; the
     account curve, the PnL scaled so the peak open margin is the $10,000
     account, last. A symbol with no candles counts realized PnL only.
     """
@@ -285,21 +294,25 @@ def avantis_curve(address):
         prices[symbol] = close.reindex(close.index.union(grid)).ffill().loc[grid].to_numpy()
     if missing:
         print(f"  no candles, realized PnL only: {', '.join(missing)}")
-    realized, fees, unreal, notional, opening = (np.zeros(len(grid)) for _ in range(5))
+    realized, paid, unreal, notional, opening = (np.zeros(len(grid)) for _ in range(5))
     shorts, events = [], []  # events: (time, change in open margin)
     for key, group in orders.items():
         symbol, buy = key[:2]
         t0, lever = group[0]["openedAt"], float(group[0]["leverage"])
         size = np.array([float(r["positionSize"]) for r in group])
         gross = np.array([float(r["gross"]) for r in group])
+        cost = np.array([float(r.get("closingFee") or 0) * (fees == "real")
+                         + float(r.get("funding") or 0) * funding for r in group])
         t = np.array(closed_at[key])
         order = sorted(range(len(group)), key=lambda i: t[i])
-        t, size, gross = t[order], size[order], gross[order]
+        t, size, gross, cost = t[order], size[order], gross[order], cost[order]
         opened = (grid >= t0).astype(float)
         k = np.searchsorted(t, grid, side="right")  # closes up to each hour
         done = np.concatenate([[0.0], np.cumsum(size)])[k]
         realized += np.concatenate([[0.0], np.cumsum(gross)])[k]
-        fees += FEE * lever * (size.sum() * opened + done)
+        paid += np.concatenate([[0.0], np.cumsum(cost)])[k]
+        if fees == "flat":
+            paid += FEE * lever * (size.sum() * opened + done)
         events += [(t0, size.sum()), *zip(t, -size)]
         change = np.nan_to_num(prices[symbol] / float(group[0]["openPrice"]) - 1) if symbol in prices else 0.0
         remaining = (size.sum() * opened - done) * lever  # notional still open, at the open price
@@ -309,7 +322,7 @@ def avantis_curve(address):
         shorts.append(not buy)
     events.sort(key=lambda e: (e[0], e[1] < 0))  # opens before closes at one time
     scale = vt.ACCOUNT / np.cumsum([m for _, m in events]).max()  # peak open margin
-    pnl = pd.Series(realized - fees + unreal, index=grid)
+    pnl = pd.Series(realized - paid + unreal, index=grid)
     eq = vt.ACCOUNT + scale * pnl
     eq[(eq <= 0).cummax()] = 0.0  # a blown account stays at zero
     deployed = deployed_curve(pnl, notional, opening)
@@ -1081,7 +1094,7 @@ def report(out):
         print(f"  {k} = {v}")
 
 
-def setup(address, top):
+def setup(address, top, fees="real", funding=True):
     """The wallet's curve and scores, and markets for its `top` busiest symbols that have candles."""
     if VENUE == "hyperliquid":
         since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=HL_DAYS)).strftime("%Y-%m-%d")
@@ -1094,7 +1107,7 @@ def setup(address, top):
             print(f"warning: the API is missing fills worth {wallet['gap_share']:.0%} of the traded notional; "
                   "the wallet's curve may be unreliable")
     else:
-        eq, wallet, counts, start, end, _ = avantis_curve(address)
+        eq, wallet, counts, start, end, _ = avantis_curve(address, fees, funding)
     warn_dropped("wallet", wallet)
     symbols = list(counts.index[:top])
     print(f"{counts.sum()} fills or orders, {start} to {end}; {counts.iloc[:top].sum()} of them in {', '.join(symbols)}")
@@ -1114,6 +1127,10 @@ def main():
     ap.add_argument("--restarts", type=int, default=4, help="random starts after the first")
     ap.add_argument("--venue", choices=["avantis", "hyperliquid"], default="avantis")
     ap.add_argument("--workers", type=int, help="backtest threads; default one per core")
+    ap.add_argument("--fees", choices=["real", "flat"], default="real",
+                    help="Avantis wallet fees: its real closing fees, or FEE at each open and close")
+    ap.add_argument("--funding", action=argparse.BooleanOptionalAction, default=True,
+                    help="charge an Avantis wallet its real funding")
     args = ap.parse_args()
 
     if args.replay:
@@ -1132,7 +1149,7 @@ def main():
         ap.error("give a wallet address or --replay")
     use_venue(args.venue)
     address = checksum(args.address)
-    w = setup(address, args.top)
+    w = setup(address, args.top, args.fees, args.funding)
     symbols, markets, start, end = w["symbols"], w["markets"], w["start"], w["end"]
     costs = {s: avbt_cpp.Costs(FEE, FEE) for s in symbols}
     grid = hour_grid(start, end)
@@ -1147,6 +1164,7 @@ def main():
            "params": {**best, "leverage": LEVERAGE},
            "markets": symbols, "covered_share": w["covered_share"], "start": start, "end": end,
            "costs": {"open_fee": FEE, "close_fee": FEE},
+           "wallet_costs": {"fees": args.fees, "funding": args.funding},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": RISK, "hard_stop": 1.0,
                         "scale_risk_with_leverage": True},
            "mse": best_mse, "wallet": w["wallet"], "mimic": mimic_scores(backtest(best, markets, costs), markets, grid)}

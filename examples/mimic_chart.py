@@ -32,7 +32,8 @@ def curves(saved):
     if hl:
         eq = M.hl_curve(saved["address"], saved["start"], saved["end"])[0]
     else:
-        eq = M.avantis_curve(saved["address"])[0]
+        wc = saved.get("wallet_costs", {"fees": "flat", "funding": False})  # older files: the flat fee
+        eq = M.avantis_curve(saved["address"], wc["fees"], wc["funding"])[0]
     symbols = list(saved["markets"])
     markets = M.load_markets(symbols, saved["start"], saved["end"])
     r = M.rerun(saved, markets)

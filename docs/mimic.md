@@ -34,7 +34,7 @@ To put every saved Hyperliquid result on one page, `examples/mimic_hl_all.html`:
 python3 examples/mimic_hl_all.py
 ```
 
-Options: `--top` sets how many markets to use (default 8), `--restarts` the random starting points (default 4), `--passes` the most passes per start (default 6), `--workers` the backtest threads (default one per core).
+Options: `--top` sets how many markets to use (default 8), `--restarts` the random starting points (default 4), `--passes` the most passes per start (default 6), `--workers` the backtest threads (default one per core). For an Avantis wallet, `--fees real` (default) charges its real closing fees and `--fees flat` a fixed 0.025% of notional at each open and close; `--funding` (default) charges its real funding and `--no-funding` leaves it out.
 
 You need the C++ module built (see `README.md`) and the `pycryptodome` package.
 
@@ -60,7 +60,7 @@ On Hyperliquid, each fill pays its price in cash and each open position is worth
 
 Fills in one millisecond come back in no set order. The tool puts them in position order, so each fill starts where the last one ended. A few fills never come back from the service. The position they moved is still known from the next fill, so the tool trades the gap at the next fill's price, with no gain or loss. `gap_share` is the gaps' notional over all traded notional (notional is a position's size times its price). Above 1% the tool prints a warning: the curve may be unreliable.
 
-Every curve, wallet and mimic, pays a fee of 0.025% of notional at each open and each close, 0.05% per round trip. Funding is left out of all of them.
+The mimic and a Hyperliquid wallet pay a fee of 0.025% of notional at each open and each close, 0.05% per round trip, with no funding. An Avantis wallet pays its real costs by default: each close's closing fee and funding, from the trade history, charged at the close. The history has no opening fee, so none is charged. `--fees flat --no-funding` gives the old fixed fee instead. The choice is saved under `wallet_costs`, and `mimic_chart.py` uses it; a file without it used the fixed fee.
 
 ### 3. Measure the profit two ways
 
@@ -184,7 +184,7 @@ The wallet's account drawdown is real. On 1 February 2026 it held 21 ZK shorts t
 - **Only the top markets.** Trades in other markets count toward the wallet's curve but can't be copied. The covered share says how much.
 - **Missing fills.** The Hyperliquid service drops a few fills. Their gaps trade at the next fill's price. Check `gap_share`.
 - **Dropped PnL.** PnL in an hour with no deployed capital leaves the deployed curve. Check `dropped_share`.
-- **Fees are a fixed 0.05% per round trip, and funding is left out**, for wallet and mimic alike.
+- **The mimic pays a fixed 0.05% per round trip and no funding.** An Avantis wallet pays its real closing fees and funding by default, so a wallet that holds for days carries a cost the mimic does not. Funding shows at the close, not as it builds up.
 
 ## Files
 
