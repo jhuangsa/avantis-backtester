@@ -40,7 +40,7 @@ To put only some wallets on a page, give their addresses and a page name in `exa
 python3 examples/mimic_hl_all.py --out mimic_hl_top5.html <address> <address> ...
 ```
 
-Options: `--top` sets how many markets to use (default 8), `--restarts` the random starting points (default 4), `--passes` the most passes per start (default 6), `--workers` the backtest threads (default one per core). For an Avantis wallet's account scores, `--fees real` (default) charges its real closing fees and `--fees flat` a fixed 0.025% of notional at each open and close; `--funding` (default) charges its real funding and `--no-funding` leaves it out. The return the fit uses always has the real fees and funding.
+Options: `--top` sets how many markets to use (default 8), `--restarts` the random starting points (default 4), `--passes` the most passes per start (default 6), `--workers` the backtest threads (default one per core). The wallet's return always has its real fees and funding. The mimic pays 0.025% of notional per side and no funding.
 
 You need the C++ module built (see `README.md`) and the `pycryptodome` package.
 
@@ -52,7 +52,7 @@ The tool first writes the address in its standard mixed-case form (the trade ser
 
 On Avantis it downloads every closed trade from the public trade history. The history covers the wallet's whole life.
 
-On Hyperliquid it downloads the wallet's perp fills. A fill is one execution: a price, a size and a side. Spot fills are dropped. The curve covers the last 200 days, because the candle service serves about that much. Fills refresh once an hour. The tool also downloads the wallet's ledger (deposits, withdrawals and transfers) and its account snapshots (the account's value at points in time, as Hyperliquid reports it). Section 3 says what they are for.
+On Hyperliquid it downloads the wallet's perp fills. A fill is one execution: a price, a size and a side. Spot fills are dropped. The curve covers the last 200 days, because the candle service serves about that much. Fills refresh once an hour.
 
 All of it is saved in `data/candles/`, so it is downloaded only once.
 
@@ -66,15 +66,11 @@ On Hyperliquid, each fill pays its price in cash and each open position is worth
 
 Fills in one millisecond come back in no set order. The tool puts them in position order, so each fill starts where the last one ended. A few fills never come back from the service. The position they moved is still known from the next fill, so the tool trades the gap at the next fill's price, with no gain or loss. `gap_share` is the gaps' notional over all traded notional (notional is a position's size times its price). Above 1% the tool prints a warning: the curve may be unreliable.
 
-The mimic pays a fee of 0.025% of notional at each open and each close, 0.05% per round trip, with no funding. In the return the fit uses, a wallet pays its real costs: on Avantis each close's closing fee and funding, from the trade history (the history has no opening fee, so none is charged); on Hyperliquid each fill's fee and the funding payments. In the account scores, a Hyperliquid wallet pays the mimic's fixed fee, and an Avantis wallet pays what `--fees` and `--funding` choose. The choice is saved under `wallet_costs`.
+The mimic pays a fee of 0.025% of notional at each open and each close, 0.05% per round trip, with no funding. A wallet pays its real costs: on Avantis each close's closing fee and funding, from the trade history (the history has no opening fee, so none is charged); on Hyperliquid each fill's fee and the funding payments.
 
-### 3. Measure the profit two ways
+### 3. Measure the profit
 
-A dollar PnL is not a return until you divide it by something. The tool divides it two ways and scores both. The first is the one the fit uses.
-
-#### Return on peak own capital
-
-This is the measure from `examples/wallet_returns.py`; `docs/wallet_returns.md` explains it in full. At each hour:
+A dollar PnL is not a return until you divide it by something. The tool divides it by the trader's capital at risk. This is the measure from `examples/wallet_returns.py`; `docs/wallet_returns.md` explains it in full. It is the return on peak own capital, and every score and the fit use it. At each hour:
 
 - **P** is the total PnL so far, realized plus unrealized, after fees and funding.
 - **Own money** is the margin in open positions less the PnL realized so far: the trader's own money in positions.
@@ -92,21 +88,13 @@ Two limits are accepted:
 - **Hyperliquid inflation.** Hyperliquid keeps no margin history, so the margin is estimated from the wallet's current leverage setting. When that estimate is too low, K is too low and ρ too high. On 4 of the 5 wallets tested, the open loss reached 1.25 to 3.86 times the estimated margin. The fit uses ρ as it is. The run prints the check "U >= -margin open" so you can see it.
 - **Early jumpiness.** ρ moves a lot while K is small, in the first hours of a history. Every hour where the wallet's ρ is defined still has the same weight.
 
-#### Account return
-
-The second measure divides each hour's PnL by the account's value at the hour before, then compounds from $10,000. What the account is depends on the venue:
-
-- **Hyperliquid**: the wallet's whole account, perp plus spot. It starts at the account snapshot nearest the window start, then grows by the PnL and by the money that enters or leaves from outside, from the ledger: deposits, withdrawals, transfers to or from other addresses, vault moves. Moves between the wallet's own perp and spot accounts are internal and count for nothing. A flow counts from the hour it lands in. The account is never less than the open notional divided by 50, the most an account can hold. This is a time-weighted return: a deposit or a withdrawal moves the account, not the return.
-- **Avantis**: $10,000 at the wallet's busiest moment, when the margin in open orders peaks. There is no account history on Avantis.
-- **Mimic**: its own $10,000 backtest account.
-
-On Hyperliquid, `account_drift` checks the computed account against Hyperliquid's own snapshots: it is the largest gap between a snapshot inside the window and the account computed at that time, as a share of the account. The two can differ because of spot token prices, funding, and flows the ledger does not report. The tool warns above 10%, and `mimic_hl_all.py` marks a wallet above 25%. When the ledger cannot be fetched, the account restarts from each snapshot instead and `account_drift` is empty.
-
-The account return exists because of what the return on own capital leaves out: how much of the whole account was at risk. The tool once scored a fixed account only, the perp value at the start. A wallet that withdraws its profits or tops up after a loss then looked blown: one wallet made about $750,000 yet showed −100%, because its PnL dipped below a starting value it had long since withdrawn.
+The charts draw ρ in percent.
 
 ### 4. Get price bars
 
 The tool picks the markets the wallet traded most, `--top` of them (default 8). On Avantis it loads 15-minute, 1-hour and 4-hour bars from the wallet's first trade to its last. On Hyperliquid it loads 1-hour and 4-hour bars for the 200 days. A market with no candles is dropped. The tool prints the covered share: how much of the wallet's trading is in the kept markets, so how much the mimic can copy at best. The bars are saved in `data/candles/`, so they are loaded only once.
+
+For a futures market (WTI, Brent, US oil spot), the price store holds one price a minute per contract month. Avantis prices the oldest contract still publishing, and switches when its prices stop. The loader (`examples/clickhouse_data.py`, `minutes_sql`) keeps that contract each minute. Before, it kept one at random, and WTI positions were valued up to 28% off their real price: a 25× WTI long that made money showed as a −546% loss. Checked on 149 WTI fills: every fill is within 0.6% of the chosen contract's minute price. After the fix, every April 2026 fill is within about 1% of the bars.
 
 ### 5. The strategy being tuned: `mimic`
 
@@ -124,7 +112,7 @@ A trade opens only when every filter that is on agrees. Each trade has a stop an
 
 Other settings: the bar length, longs or shorts or both, and the leverage, from 1 to 100. The leverage search starts at the wallet's median leverage, which is also added to the values tried. The median comes from the wallet's closes on Avantis, and from its leverage settings on Hyperliquid (1 when it has none).
 
-Risk is fixed: each trade risks 0.2% times its leverage of the $10,000 account. It is not searched, because account size does not change the return on own capital. It still shapes the mimic's account scores.
+Risk is fixed: each trade risks 0.2% times its leverage of the $10,000 account. It is not searched, because account size does not change the return on own capital.
 
 All the rules of the backtester still hold. For example, a trade fills at the next bar's open, and a filter never trades on a value it can't compute yet.
 
@@ -149,36 +137,30 @@ The fit uses the whole history on purpose. There is no separate test period, so 
 
 ### 8. Score wallet and mimic by one rule
 
-On peak own capital, each side gets its **final** return, its **peak** and its **lowest**, and the mimic its **RMSE**: the square root of the MSE, in return points.
+Each side gets these scores, all on its return ρ:
 
-The account curve of each side gets three numbers from the C++ `summary`, plus a trade count per side:
-
-- **Sharpe ratio**: return per unit of risk. The curve is read at each UTC midnight. The daily returns' mean is divided by their sample standard deviation and multiplied by the square root of 365. It is minus infinity if the account ever hits 0, and empty under 30 days.
-- **Maximum drawdown**: the largest fall from a peak, as a fraction of that peak.
-- **Return**: the last value over the first, minus 1.
+- **Return**: the final ρ.
+- **Peak**: the highest ρ.
+- **Lowest**: the lowest ρ.
+- **Maximum drawdown**: the largest fall of 1 + ρ from its running high, over that high. A fall from +100% to +50% is a 25% drawdown: from 2 to 1.5.
+- **Sharpe ratio**: return per unit of risk. ρ is read at each UTC midnight. A day's return is its PnL change over the capital K at the day's end. Days with no capital yet are left out. The Sharpe ratio is the mean of the daily returns over their sample standard deviation, times the square root of 365. It is empty under 30 days.
 - **Trades**: positions opened and fully closed. A partial close is not a trade. A flip from long to short closes one trade and opens the next, which counts once it closes.
+
+The mimic also gets its **RMSE**: the square root of the MSE, in return points.
 
 ### 9. Save and report
 
-The tool prints both score sets for both sides, own capital first, the account second, and the winning settings. Then it prints the wallet's return at the end, its capital, and the checks from `docs/wallet_returns.md` that fail. On Hyperliquid it always prints "U >= -margin open" and "12 return >= -100%", pass or fail.
+The run prints one table for wallet and mimic: final, peak, lowest, max dd, sharpe, rmse, trades. Then it prints the winning settings, the wallet's return at the end, its capital, and the checks from `docs/wallet_returns.md` that fail. On Hyperliquid it also prints the wallet's total PnL, the missing-fills warning when it applies, and always "U >= -margin open" and "12 return >= -100%", pass or fail.
 
-It saves everything needed to rerun the result in `data/candles/mimic_<address>.json`, or `mimic_hl_<address>.json` on Hyperliquid: `"fit": "own"`, the venue, the strategy name, its settings (leverage among them), the markets, the covered share, the dates, the fees, the account settings, the engine version and the scores. The scores are under `wallet` and `mimic`, and each holds an `own` and an `account` set, with `trades` and the Hyperliquid checks (`gap_share`, `account_drift`, `net_flows`, `start_account`) beside them. The wallet's return curve is saved beside it, in `mimic_<address>_target.npz`, so a replay can score the RMSE.
+It saves everything needed to rerun the result in `data/candles/mimic_<address>.json`, or `mimic_hl_<address>.json` on Hyperliquid: `"fit": "own"`, the venue, the strategy name, its settings (leverage among them), the markets, the covered share, the dates, the engine version and the scores. The scores are under `wallet` and `mimic`. Each is one flat score set with `trades`. The wallet also has `short_share`; a Hyperliquid wallet also has `gap_share` and `pnl`. The wallet's return curve is saved beside it, in `mimic_<address>_target.npz`, so a replay can score the RMSE.
 
-`--replay` reruns this file with its saved fees and settings and should give the same numbers exactly. It warns when the engine version differs from the saved one. A file without `fit` was fitted on the old return on deployed capital: the replay warns, then reruns it and scores it on own capital. Its saved own scores show as empty, and its old account scores still show.
+`--replay` reruns this file with its saved settings and should give the same numbers exactly. It warns when the engine version differs from the saved one. A file without `fit` was fitted on the old return on deployed capital: the replay warns, then reruns it and scores it on own capital. A file saved before the single score set kept an `own` set beside an `account` set. Pages show its own final, peak, lowest and RMSE. Its max drawdown and Sharpe stay empty until it is fitted again.
 
 The same strategy name and settings also work with `avbt_cpp.Live` and `decide` for live trading.
 
 ## Example result
 
-The Avantis wallet `0xFFB7…268F` opened 596 positions from November 2025 to June 2026, nearly all shorts. Its saved fit was made on the old return on deployed capital, before the fit moved to the return on peak own capital. Its numbers come once it is fitted again.
-
-On the account:
-
-| | Sharpe | Max drawdown | Return |
-|---|---|---|---|
-| Wallet ($10,000 at its busiest margin) | 1.84 | 34.6% | 60.3% |
-
-The wallet's account drawdown is real. On 1 February 2026 it held 21 ZK shorts that were about 28% under water for a few hours. They closed in profit. An earlier version of this tool counted realized profit only, so that fall never showed. The marked-to-market curve shows it, but the MSE averages over every hour of seven months, so a few bad hours barely move the score.
+The Avantis wallet `0xFFB7…268F` opened 596 positions from November 2025 to June 2026, nearly all shorts. Its saved fit was made before the single score set. Its numbers come once it is fitted again.
 
 ## Know the limits
 
@@ -187,12 +169,11 @@ The wallet's account drawdown is real. On 1 February 2026 it held 21 ZK shorts t
 - **Hyperliquid margin is estimated.** It comes from the current leverage setting, so ρ can read too high. Check "U >= -margin open".
 - **Early hours are jumpy.** While K is small, ρ swings, and those hours weigh as much as any other.
 - **The mimic's opening fee shows at the close.** The engine reports a trade's open and close fees together, so the mimic's curve takes both at the close. The error is one fee for the length of each hold.
-- **The account return rests on the ledger.** On Hyperliquid, `account_drift` says how far the computed account strays from Hyperliquid's snapshots. Spot token prices, funding and unreported flows all add to it. Treat the account scores of a wallet above 25% as unreliable.
-- **MSE ignores short spikes.** A deep fall that lasts hours weighs almost nothing against months of curve. The wallet's drawdown can be far worse than the mimic's with a good score.
+- **MSE ignores short spikes.** A deep fall that lasts hours weighs almost nothing against months of curve. The drawdown of the wallet's return line can be far worse than the mimic's with a good score.
 - **Overfit by design.** The settings are chosen to fit this history.
 - **Only the top markets.** Trades in other markets count toward the wallet's curve but can't be copied. The covered share says how much.
 - **Missing fills.** The Hyperliquid service drops a few fills. Their gaps trade at the next fill's price. Check `gap_share`.
-- **The mimic pays a fixed 0.05% per round trip and no funding.** An Avantis wallet pays its real closing fees and funding by default, so a wallet that holds for days carries a cost the mimic does not. Funding shows at the close, not as it builds up.
+- **The mimic pays a fixed 0.05% per round trip and no funding.** An Avantis wallet pays its real closing fees and funding, so a wallet that holds for days carries a cost the mimic does not. Funding shows at the close, not as it builds up.
 
 ## Files
 
@@ -200,6 +181,7 @@ The wallet's account drawdown is real. On 1 February 2026 it held 21 ZK shorts t
 |---|---|
 | `cpp/include/avbt/library/mimic.hpp` | The `mimic` strategy |
 | `cpp/tests/test_mimic.cpp` | Its C++ test |
+| `examples/clickhouse_data.py` | Loads minute candles; picks the front futures contract |
 | `examples/mimic.py` | Downloads, builds the curves, fits, saves and replays |
 | `examples/wallet_returns.py` | `ledger()`: the return on peak own capital, for wallet and mimic |
 | `examples/mimic_chart.py` | Draws a saved fit as a web page |

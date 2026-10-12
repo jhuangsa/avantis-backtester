@@ -1,7 +1,7 @@
 """Load 2025 and 2026 crypto bars and states from ClickHouse, cached small.
 
-Minute candles are pulled a month at a time, deduped (pyth_lazer wins) and
-kept as 15-minute, 1-hour and 4-hour bars. States are kept as minute codes.
+Minute candles are pulled a month at a time, one row a minute (see
+clickhouse_data.minutes_sql), and kept as 15-minute, 1-hour and 4-hour bars. States are kept as minute codes.
 Both go to data/candles/hunt_<coin>.npz, a few MB each.
 
 Run: python3 examples/sharpe_hunt/data.py
@@ -33,7 +33,7 @@ TF = avbt_cpp.Timeframe
 COINS = {"BTC": 1, "ETH": 0, "SOL": 2, "DOGE": 5, "AVAX": 6}
 START, END = "2025-01-01", "2026-10-01"
 # The .env keys that hold the table names; .env is not committed.
-CANDLES, STATES = "CLICKHOUSE_CANDLES_TABLE", "CLICKHOUSE_STATES_TABLE"
+CANDLES, STATES = ch.CANDLES, ch.STATES
 RULES = {TF.Min15: "15min", TF.Hour1: "1h", TF.Hour4: "4h"}
 BAR_COLS = ["ts", "open", "high", "low", "close", "minutes_with_data"]
 
@@ -44,17 +44,7 @@ def months():
 
 
 def _minutes(pid, a, b):
-    sql = f"""
-    SELECT toUnixTimestamp(timestamp) AS ts,
-           argMin(open, r) AS open, argMin(high, r) AS high,
-           argMin(low, r) AS low, argMin(close, r) AS close
-    FROM (SELECT *, if(source = 'pyth_lazer', 0, 1) AS r
-          FROM {ch._env(CANDLES)}
-          WHERE pair_id = {pid} AND timestamp >= toDateTime('{a}', 'UTC')
-            AND timestamp < toDateTime('{b}', 'UTC'))
-    GROUP BY timestamp ORDER BY timestamp
-    SETTINGS max_execution_time = 120 FORMAT CSVWithNames"""
-    return pd.read_csv(io.BytesIO(ch._query(ch.ORIGINAL, sql)))
+    return pd.read_csv(io.BytesIO(ch._query(ch.ORIGINAL, ch.minutes_sql(pid, a, b, timeout=120))))
 
 
 def _states(pid, a, b):

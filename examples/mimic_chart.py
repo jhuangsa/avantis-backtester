@@ -3,8 +3,8 @@
 Both curves are the return on peak own capital (the curve the fit
 minimizes): total PnL, realized plus unrealized, over the peak of the
 trader's own money in positions, marked to market each hour and drawn
-every 4 hours and at the last hour, so the line ends on the final. The tiles
-show both score sets: on peak own capital, and on the account.
+every 4 hours and at the last hour, so the line ends on the final. Every
+tile is a score on that return.
 
 Run from the repository root, after examples/mimic.py:
 
@@ -135,15 +135,12 @@ document.getElementById("sub").textContent=`${S.address} · ${S.markets.join(", 
   `MSE ${S.mse.toFixed(5)} (RMSE ${pct(Math.sqrt(S.mse))} in return points)`+
   " · both curves are the return on peak own capital: total PnL, realized plus unrealized, over the most of the trader's own money ever in positions at once"+
   (S.fit==="own"?"":" · this fit was made on the old return on deployed capital")+
-  (S.venue==="hyperliquid"?" · the wallet's margin is estimated from its current leverage setting, so its return can read high"+
-  " · the account scores are a time-weighted return on the whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out":"");
+  (S.venue==="hyperliquid"?" · the wallet's margin is estimated from its current leverage setting, so its return can read high":"");
 const num=(fmt)=>x=>x==null?"–":fmt(x);
-const own=[["Final return","final",num(pct)],["Peak return","peak",num(pct)],["Lowest return","lowest",num(pct)]];
-const acct=[["Sharpe","sharpe",num(x=>x.toFixed(2))],["Max drawdown","max_drawdown",num(pct)],["Return","return",num(pct)]];
-const sets=[["own","On peak own capital (the fit)",own],["account","On the account: the wallet's own, the mimic's $10,000",acct]];
-document.getElementById("tiles").innerHTML=sets.map(([set,title,tiles])=>`<h3>${title}</h3>`+tiles.map(([k,f,fmt])=>
-  `<div class="tile"><div class="k">${k}</div><div class="v">${fmt(S.mimic[set][f])}</div><div class="w">wallet ${fmt(S.wallet[set][f])}</div></div>`).join("")).join("")+
-  `<div class="tile"><div class="k">Trades</div><div class="v">${S.mimic.trades}</div><div class="w">wallet ${S.wallet.trades}</div></div>`;
+const tiles=[["Return","final",num(pct)],["Peak","peak",num(pct)],["Lowest","lowest",num(pct)],
+  ["Max drawdown","max_drawdown",num(pct)],["Sharpe","sharpe",num(x=>x.toFixed(2))],["Trades","trades",num(x=>x)]];
+document.getElementById("tiles").innerHTML=tiles.map(([k,f,fmt])=>
+  `<div class="tile"><div class="k">${k} (mimic)</div><div class="v">${fmt(S.mimic[f])}</div><div class="w">wallet ${fmt(S.wallet[f])}</div></div>`).join("");
 const NS="http://www.w3.org/2000/svg";
 function chart(id,series,fmt){
   const W=960,H=300,L=52,R=12,T=10,B=26,el=document.getElementById(id),t=D.t;

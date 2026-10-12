@@ -5,23 +5,21 @@ capital, marked to market, loads bars for its busiest markets, then tunes
 the mimic strategy two knobs at a time to minimize the MSE between the
 two curves. It fits the whole history on purpose: no test period.
 
-The curve fitted and scored first, "own", is wallet_returns.ledger's
-return: total PnL (realized plus unrealized) over the peak of the
-trader's own money in positions. Nothing is compounded. Wallet and mimic
+The curve fitted and scored is wallet_returns.ledger's return: total
+PnL (realized plus unrealized) over the peak of the trader's own money
+in positions. Nothing is compounded. Wallet and mimic
 are measured the same way: the mimic's trades become Avantis close rows
 (mimic_rows). Account size does not change it, but leverage does, so
 leverage is a knob that starts at the wallet's median. Every hour where
 the wallet's return is defined counts the same; the mimic counts 0
 before its first open. See docs/mimic.md for the accepted limits.
 
-A second score set, "account", is the return on the account: the
-wallet's whole Hyperliquid account or its peak Avantis margin, and the
-mimic's $10,000, scored by the C++ rules through curve_stats.
+Every score comes from that one return (own_scores): final, peak,
+lowest, max drawdown and Sharpe.
 
 The mimic pays FEE of notional at each open and each close, 0.05% per
 round trip, and no funding. The wallet's return uses its real fees and
-funding; --fees and --funding set an Avantis wallet's costs in its
-account scores only. A trade is one position from open to full close.
+funding. A trade is one position from open to full close.
 
 Run from the repository root:
 
@@ -32,10 +30,6 @@ markets, dates, costs and settings, and the scores, and beside it
 mimic_<address>_target.npz, the wallet's curve. To rerun it:
 
     python3 examples/mimic.py --replay data/candles/mimic_<address>.json
-
-An Avantis wallet with the flat FEE and no funding, as before:
-
-    python3 examples/mimic.py --fees flat --no-funding <address>
 
 A Hyperliquid wallet (1-hour and 4-hour bars, the last 200 days), from its
 fills and hourly closes:
@@ -114,39 +108,22 @@ def checksum(address):
     return "0x" + "".join(c.upper() if int(h[i], 16) >= 8 else c for i, c in enumerate(a))
 
 
-def curve_stats(eq):
-    """sharpe, max_drawdown and return of hourly equity, by the C++ rules.
-
-    eq: a Series on a regular hourly grid; the index is the unix second the
-    value is known, the close of the hour.
-    """
-    r = avbt_cpp.Result(list(eq), TF.Hour1, list(eq.index - HOUR))
-    s = avbt_cpp.summary(r)
-    return {"sharpe": s["sharpe"], "max_drawdown": s["max_drawdown"], "return": s["total_return"]}
-
-
-def mimic_equity(r):
-    """A backtest's equity, indexed by the close of each bar."""
-    return pd.Series(r.equity, index=np.asarray(r.clock) + avbt_cpp.timeframe_seconds(r.timeframe))
-
-
-OWN_KEYS = ("final", "peak", "lowest", "rmse")
-SCORE_KEYS = ("sharpe", "max_drawdown", "return")
+SCORE_KEYS = ("final", "peak", "lowest", "max_drawdown", "sharpe", "rmse")
+OLD_KEYS = ("own", "account", "deployed", "return", *SCORE_KEYS)
 
 
 def score_sets(s):
-    """A side's scores as {"own": {...}, "account": {...}, "trades": n}.
+    """A side's saved scores as one flat set: SCORE_KEYS and "trades".
 
-    An old file has no "own" set: its own scores are NaN, its account
-    scores are its "account" set, or its top-level scores in the oldest
-    files. A "deployed" set is dropped.
+    An older file kept an "own" set beside an "account" set: its own
+    final, peak, lowest and rmse carry over, the rest are NaN until it is
+    fitted again.
     """
-    if "own" in s:
+    if "own" not in s and "final" in s:
         return s
-    out = {k: v for k, v in s.items() if k != "deployed"}
-    out["own"] = dict.fromkeys(OWN_KEYS, float("nan"))
-    out["account"] = s["account"] if "account" in s else {k: s[k] for k in SCORE_KEYS}
-    return out
+    own = s.get("own") or {}
+    return {**{k: v for k, v in s.items() if k not in OLD_KEYS},
+            **{k: own.get(k, float("nan")) for k in SCORE_KEYS}}
 
 
 def closed_positions(before, after):
@@ -238,20 +215,11 @@ def day_bounds(first, last):
 PAIR_IDS = {}  # symbol -> Avantis pair id, from the wallet's rows
 
 
-def avantis_curve(address, fees="real", funding=True):
-    """The wallet's hourly PnL on Avantis, its scores, its orders per symbol, start, end, and its account curve.
+def avantis_curve(address):
+    """The wallet's stats, its orders per symbol, start and end on Avantis.
 
     An order is one position: symbol, side, index, open price and open
-    minute; its margin is the sum of its closes' positionSize. Each hour's
-    PnL is wallet_returns.ledger's pnl: the realized PnL of the closes so
-    far, plus each open close's price PnL since the open, less fees and
-    funding. fees "real" charges each close's closingFee at the close (the
-    rows carry no opening fee); "flat" charges FEE of notional at the open
-    and at each close instead. funding True spreads each close's funding
-    evenly over its hold; False leaves it out. The dollar PnL is returned
-    first; the account curve, the PnL scaled so the peak open margin is
-    the $10,000 account, last. A symbol with no candles counts realized
-    PnL only.
+    minute. stats: "trades", the orders, and "short_share".
     """
     rows = json.loads(download(address).read_text())["trades"]
     whole = [r for r in rows if all(r.get(k) is not None for k in ("positionSize", "gross", "leverage"))
@@ -259,54 +227,19 @@ def avantis_curve(address, fees="real", funding=True):
     if len(whole) < len(rows):
         print(f"  {len(rows) - len(whole)} rows without size, gross or leverage skipped")
     rows = whole
-    orders = {}
+    orders, last = set(), 0
     for r in rows:
-        key = (r["symbol"], bool(r["buy"]), r["index"], round(float(r["openPrice"]), 6), r["openedAt"] // 60)
-        orders.setdefault(key, []).append(r)
+        orders.add((r["symbol"], bool(r["buy"]), r["index"], round(float(r["openPrice"]), 6), r["openedAt"] // 60))
         PAIR_IDS[r["symbol"]] = r["pairIndex"]
-    closed_at = {k: [int(pd.Timestamp(r["time"]).timestamp()) for r in v] for k, v in orders.items()}
-    start, end, lo, hi = day_bounds(min(r["openedAt"] for r in rows), max(max(v) for v in closed_at.values()))
-    grid = np.arange(lo, hi, HOUR, dtype="int64")
-    closes, missing = {}, []
-    for symbol in sorted({k[0] for k in orders}):
-        b = bars(PAIR_IDS[symbol], start, end)
-        if b is None or not len(b[1].ts):
-            missing.append(symbol)
-            continue
-        closes[symbol] = pd.Series(b[1].close, index=b[1].ts + HOUR)  # known at the bar's end
-    if missing:
-        print(f"  no candles, realized PnL only: {', '.join(missing)}")
-    book = W.ledger("avantis", rows, closes, times=grid)
-    pnl = book["pnl"].to_numpy()
-    if not funding:  # take out the funding, realized and spread
-        pnl = pnl + book["funding"].to_numpy() - book["unrealized_funding"].to_numpy()
-    if fees == "flat":  # FEE of notional at the open and at each close, not the closingFee
-        pnl = pnl + book["fees"].to_numpy()
-    shorts, events = [], []  # events: (time, change in open margin)
-    for key, group in orders.items():
-        t0, lever = group[0]["openedAt"], float(group[0]["leverage"])
-        size = np.array([float(r["positionSize"]) for r in group])
-        t = np.array(closed_at[key])
-        if fees == "flat":
-            order = np.argsort(t, kind="stable")
-            k = np.searchsorted(t[order], grid, side="right")  # closes up to each hour
-            done = np.concatenate([[0.0], np.cumsum(size[order])])[k]
-            pnl = pnl - FEE * lever * (size.sum() * (grid >= t0) + done)
-        events += [(t0, size.sum()), *zip(t, -size)]
-        shorts.append(not key[1])
-    events.sort(key=lambda e: (e[0], e[1] < 0))  # opens before closes at one time
-    scale = vt.ACCOUNT / np.cumsum([m for _, m in events]).max()  # peak open margin
-    pnl = pd.Series(pnl, index=grid)
-    eq = vt.ACCOUNT + scale * pnl
-    eq[(eq <= 0).cummax()] = 0.0  # a blown account stays at zero
+        last = max(last, int(pd.Timestamp(r["time"]).timestamp()))
+    start, end = day_bounds(min(r["openedAt"] for r in rows), last)[:2]
     counts = pd.Series([k[0] for k in orders]).value_counts()
-    stats = {"account": curve_stats(eq), "trades": len(orders), "short_share": float(np.mean(shorts))}
-    return pnl, stats, counts, start, end, eq
+    stats = {"trades": len(orders), "short_share": float(np.mean([not k[1] for k in orders]))}
+    return stats, counts, start, end
 
 
 HL = "https://api.hyperliquid.xyz/info"
 HL_DAYS = 200  # Hyperliquid serves the last 5000 candles: about 208 days of 1-hour bars
-HL_MAX_LEVERAGE = 50  # an account holds at most 50 times its value in notional
 HL_KEEP = ("coin", "px", "sz", "side", "time", "startPosition", "fee", "tid", "dir", "hash", "closedPnl")
 # What a fill cache holds: hl_spot's fills, with HL_KEEP; a cache of anything else is refetched.
 HL_KEEPS = "perps and outcome markets, with closedPnl"
@@ -548,11 +481,10 @@ def hl_leverage(address, coins):
 
 
 def hl_curve(address, since, end=None):
-    """The wallet's hourly PnL, its scores, its fills per coin, start, end, and its account curve.
+    """The wallet's hourly dollar PnL, its stats, its fills per coin, start and end.
 
-    The dollar PnL is returned first. The account curve, a time-weighted
-    return on the whole account, is last.
-    Total PnL is realized plus unrealized: each fill pays its price and FEE
+    stats: "trades", "short_share", "pnl", the PnL at the end, and
+    "gap_share". Total PnL is realized plus unrealized: each fill pays its price and FEE
     of its notional in cash, and each open position is worth its size times
     the hour's price, less the positions held at the start. A few fills are
     missing from the API; the position they move is still right, from each
@@ -561,21 +493,6 @@ def hl_curve(address, since, end=None):
     window, gaps included: above a few percent the curve is unreliable.
     The hour's price is the close of the bar that ends on it, else the open
     of the bar that starts on it, else the last fill price.
-
-    The account is the whole Hyperliquid account, perp plus spot: its value
-    at the start (the portfolio snapshot), plus the perp PnL since, plus the
-    net USDC that entered it from outside since (the ledger: HL_FLOWS;
-    moves between perp and spot are internal), at least the open notional
-    over HL_MAX_LEVERAGE. A flow counts from the hour it lands in. Each
-    hour's return is its PnL over the account at the hour before (0 when
-    that is not positive); the equity compounds them from $10,000.
-    `start_account` is the account at the start, `net_flows` the net inflow in
-    the window, and `account_drift` the largest gap between a snapshot
-    inside the window and the account computed at it, as a share of the
-    account: spot token prices, funding, and anything else not modelled.
-    When the ledger cannot be fetched the account re-anchors at each
-    snapshot instead, `net_flows` comes from the snapshots, and
-    `account_drift` is None.
     The curve starts at `since`, or later when the fills start later.
     """
     fills = hl_fills(address)
@@ -588,7 +505,7 @@ def hl_curve(address, since, end=None):
     by_coin = {}
     for f in fills:
         by_coin.setdefault(f["coin"], []).append(f)
-    cash, value, gross = (np.zeros(len(grid)) for _ in range(3))
+    cash, value = np.zeros(len(grid)), np.zeros(len(grid))
     counts, closes, missing, traded = {}, [], 0.0, 0.0  # notional of the gaps, and of fills plus gaps
     for coin, fs in by_coin.items():
         fs = hl_order(fs)
@@ -627,135 +544,10 @@ def hl_curve(address, since, end=None):
         fee = FEE * np.abs(size + gap) * px
         cash += np.concatenate([[0], np.cumsum(np.where(inside, -(size + gap) * px - fee, 0))])[k]
         value += pos * price - held * price[0]
-        gross += np.abs(pos) * price
     pnl = cash + value  # P(h): the dollar PnL known at each hour
-    snaps, snap_flows = hl_snapshots(address)
-    st, sv = snaps.index.to_numpy(), snaps.to_numpy()
-    s = max(int(np.searchsorted(st, lo, side="right")) - 1, 0)  # the last snapshot at or before lo, else the first
-    try:
-        flows = hl_flows(address)
-    except OSError as e:
-        print(f"note: the ledger is unavailable ({e}); the account re-anchors at each snapshot")
-        flows = None
-    if flows is None:
-        j = np.maximum(np.searchsorted(st, grid, side="right") - 1, 0)
-        at = np.clip(np.searchsorted(grid, st[j], side="right") - 1, 0, len(grid) - 1)  # the hour each snapshot's PnL is known
-        account = sv[j] + pnl - pnl[at]
-        net, drift = net_flows(snap_flows, lo, hi), None
-    else:
-        between = flows[(flows.index > min(st[s], lo)) & (flows.index <= max(st[s], lo))].sum()
-        at = min(int(np.searchsorted(grid, st[s], side="right")) - 1, len(grid) - 1)  # the hour the snapshot's PnL is known
-        # The snapshot carried to lo: forward by the flows between, or back by the PnL and flows between.
-        a0 = sv[s] + between if st[s] <= lo else sv[s] - (pnl[at] - pnl[0]) - between
-        inflow = flows[(flows.index > lo) & (flows.index < hi)]
-        f = np.concatenate([[0.0], np.cumsum(inflow.to_numpy())])[np.searchsorted(inflow.index.to_numpy(), grid, side="right")]
-        account = a0 + pnl - pnl[0] + f  # A(h) = A(lo) + P(h) - P(lo) + F(h)
-        net = float(f[-1])
-    account = np.maximum(account, gross / HL_MAX_LEVERAGE)
-    if flows is not None:
-        inside = (st > lo) & (st < hi)
-        at = np.searchsorted(grid, st[inside], side="right") - 1
-        d = (sv[inside] - account[at]) / np.where(account[at] > 0, account[at], np.nan)
-        drift = float(np.nanmax(np.abs(d))) if inside.any() and np.isfinite(d).any() else 0.0
-    if not (account > 0).any():
-        raise SystemExit(f"{address} holds nothing from {start} to {end}")
-    held = account[:-1]
-    r = np.where(held > 0, np.diff(pnl) / np.where(held > 0, held, 1.0), 0.0)
-    eq = pd.Series(vt.ACCOUNT * np.concatenate([[1.0], np.cumprod(1 + r)]), index=grid)
-    eq[(eq <= 0).cummax()] = 0.0  # a blown account stays at zero
-    stats = {"account": curve_stats(eq),
-             "trades": len(closes), "short_share": float(np.mean(closes)) if closes else 0.0,
-             "pnl": float(pnl[-1]), "start_account": float(account[0]), "net_flows": net, "account_drift": drift,
-             "gap_share": float(missing / traded) if traded else 0.0}
-    return pd.Series(pnl, index=grid), stats, pd.Series(counts).sort_values(ascending=False), start, end, eq
-
-
-HL_FLOWS = """\
-External flows, money entering or leaving the wallet's whole Hyperliquid account:
-deposit (+usdc); withdraw (-usdc - fee);
-internalTransfer and subAccountTransfer (+usdc as destination, -usdc - fee as user);
-vaultCreate (-usdc - fee), vaultDeposit (-usdc), vaultWithdraw (+netWithdrawnUsd), vaultDistribution (+usdc);
-send and spotTransfer of USDC with another address (+amount as destination, -amount - fee as user).
-Internal moves are 0: accountClassTransfer (perp and spot) and a send between the wallet's own dexes.
-Transfers of other tokens are 0 (hl_flows prints how many); spotGenesis, rewardsClaim and the rest are 0."""
-
-
-def hl_flow(d, me):
-    """The USDC a ledger delta moves into (+) or out of (-) the wallet's whole account; see HL_FLOWS."""
-    t, usd, fee = d["type"], float(d.get("usdc") or 0), float(d.get("fee") or 0)
-    is_user, is_dest = d.get("user", "").lower() == me, d.get("destination", "").lower() == me
-    if t == "deposit":
-        return usd
-    if t == "withdraw":
-        return -usd - fee
-    if t in ("internalTransfer", "subAccountTransfer"):
-        return usd * is_dest - (usd + fee) * is_user
-    if t in ("vaultCreate", "vaultDeposit"):
-        return -usd - fee
-    if t == "vaultWithdraw":
-        return float(d.get("netWithdrawnUsd") or 0)
-    if t == "vaultDistribution":
-        return usd
-    if t in ("send", "spotTransfer") and d.get("token") == "USDC" and is_user != is_dest:
-        amount = float(d.get("amount") or 0)
-        return amount * is_dest - (amount + fee) * is_user
-    return 0.0
-
-
-def hl_token_transfer(d):
-    """True for a send or spotTransfer of a token other than USDC: left out of the flows."""
-    return d["type"] in ("send", "spotTransfer") and d.get("token") != "USDC"
-
-
-def hl_ledger(address):
-    """The wallet's non-funding ledger updates (deposits, withdrawals, transfers), cached like its fills."""
-    path = CACHE / f"wallet_hl_ledger_{address.lower()}.json.gz"
-    cache = load_json_gz(path) if path.exists() else None
-    if hl_stale(cache):
-        items = {hl_ledger_key(x): x for x in cache["updates"]} if cache else {}
-        now = int(time.time() * 1000)
-        since = cache["fetched"] - DAY * 1000 if cache else 0
-        while True:
-            page = hl_post({"type": "userNonFundingLedgerUpdates", "user": address.lower(), "startTime": since})
-            items.update((hl_ledger_key(x), x) for x in page)
-            if len(page) < 2000:
-                break
-            last = page[-1]["time"]
-            since = last if last > since else since + 1
-            time.sleep(1)
-        cache = {"fetched": now, "updates": sorted(items.values(), key=lambda x: x["time"])}
-        save_json_gz(path, cache)
-    return cache["updates"]
-
-
-def hl_ledger_key(x):
-    return (x.get("hash"), x["time"], json.dumps(x["delta"], sort_keys=True))
-
-
-def hl_flows(address):
-    """Net USDC into the wallet's whole account per unix second, from its ledger; see HL_FLOWS."""
-    me = address.lower()
-    flows, tokens = {}, 0
-    for x in hl_ledger(address):
-        usd = hl_flow(x["delta"], me)
-        tokens += hl_token_transfer(x["delta"])
-        if usd:
-            flows[x["time"] // 1000] = flows.get(x["time"] // 1000, 0.0) + usd
-    if tokens:
-        print(f"note: {tokens} transfers of tokens other than USDC are left out of the flows")
-    return pd.Series(flows, dtype=float).sort_index()
-
-
-def net_flows(flows, lo, hi):
-    """Net deposits from lo to hi: the change in a wallet's deposits-so-far series between the two."""
-    if flows.empty:
-        return 0.0
-    before, inside = flows[flows.index <= lo], flows[flows.index < hi]
-    base = before.iloc[-1] if len(before) else flows.iloc[0]
-    return float((inside.iloc[-1] if len(inside) else base) - base)
-
-
-HL_HISTORIES = ("AllTime", "Month", "Week", "Day")
+    stats = {"trades": len(closes), "short_share": float(np.mean(closes)) if closes else 0.0,
+             "pnl": float(pnl[-1]), "gap_share": float(missing / traded) if traded else 0.0}
+    return pd.Series(pnl, index=grid), stats, pd.Series(counts).sort_values(ascending=False), start, end
 
 
 def hl_portfolio(address):
@@ -766,48 +558,6 @@ def hl_portfolio(address):
         cache = {"fetched": int(time.time() * 1000), "portfolio": hl_post({"type": "portfolio", "user": address.lower()})}
         save_json(path, cache)
     return dict(cache["portfolio"])
-
-
-def hl_history(portfolio, perp):
-    """Account value at every snapshot of the perp (or whole-account) histories, and deposits so far.
-
-    The value is the union of the all-time, month, week and day histories,
-    one point per second. Deposits so far are value less pnl along the
-    all-time history: a deposit moves the value and not the pnl.
-    """
-    names = [("perp" + n) if perp else (n[0].lower() + n[1:]) for n in HL_HISTORIES]
-    value, flows = {}, {}
-    for name in names:
-        h = portfolio.get(name)
-        if not h:
-            continue
-        for t, v in h["accountValueHistory"]:
-            value.setdefault(t // 1000, float(v))
-        if name == names[0]:
-            pnl = {t // 1000: float(v) for t, v in h["pnlHistory"]}
-            flows = {t: value[t] - p for t, p in pnl.items() if t in value}
-    return pd.Series(value, dtype=float).sort_index(), pd.Series(flows, dtype=float).sort_index()
-
-
-def hl_snapshots(address):
-    """The wallet's whole-account value (perp plus spot) at each snapshot (unix seconds), and its deposits so far.
-
-    A wallet with no whole-account history uses the perp one.
-    """
-    portfolio = hl_portfolio(address)
-    value, flows = hl_history(portfolio, False)
-    if value.empty:
-        value, flows = hl_history(portfolio, True)
-    if value.empty:
-        raise SystemExit(f"{address} has no Hyperliquid account history")
-    return value, flows
-
-
-def hl_account(address, at):
-    """The wallet's whole-account value at a unix time: the last snapshot at or before it, else the first."""
-    value, _ = hl_snapshots(address)
-    before = value[value.index <= at]
-    return float(before.iloc[-1] if len(before) else value.iloc[0])
 
 
 HL_COLS = ("ts", "open", "high", "low", "close")
@@ -1047,14 +797,17 @@ def mimic_rows(r, grid, leverage=None):
     return rows
 
 
-def mimic_own(r, markets, grid, leverage=None):
-    """The mimic's return on peak own capital (ledger "return") on `grid`; NaN before its first open."""
+def mimic_book(r, markets, grid, leverage=None):
+    """The mimic's wallet_returns.ledger table on `grid`; None when it never trades."""
     grid = np.asarray(grid, dtype="int64")
     rows = mimic_rows(r, grid, leverage)
-    if not rows:
-        return pd.Series(np.nan, index=grid)
-    book = W.ledger("avantis", rows, market_prices(markets), times=grid)
-    return pd.Series(book["return"].to_numpy(), index=grid)
+    return W.ledger("avantis", rows, market_prices(markets), times=grid) if rows else None
+
+
+def mimic_own(r, markets, grid, leverage=None):
+    """The mimic's return on peak own capital (ledger "return") on `grid`; NaN before its first open."""
+    book = mimic_book(r, markets, grid, leverage)
+    return pd.Series(np.nan if book is None else book["return"].to_numpy(), index=np.asarray(grid, dtype="int64"))
 
 
 def own_mse(mimic, target):
@@ -1066,23 +819,48 @@ def own_mse(mimic, target):
     return float(np.mean((np.where(np.isnan(m[ok]), 0.0, m[ok]) - t[ok]) ** 2))
 
 
-def own_scores(rho, target=None):
-    """The final, peak and lowest return over hours where rho is defined, and the RMSE of the fit to target."""
-    v = np.asarray(rho, float)
-    v = v[np.isfinite(v)]
+def own_scores(book, target=None):
+    """The scores of a return on peak own capital: SCORE_KEYS.
+
+    book: wallet_returns.ledger's table on the hourly grid, or None. Final,
+    peak and lowest are its return over the hours where it is defined.
+    Max drawdown is the largest fall of 1 + return from a high, over the
+    high. Sharpe is daily_sharpe's. rmse is the fit's against target, NaN
+    without one.
+    """
     nan = float("nan")
+    empty = book is None or not len(book)
+    rho = np.full(0 if target is None else len(target), nan) if empty else book["return"].to_numpy(float)
     rmse = own_mse(rho, target) ** 0.5 if target is not None else nan
+    v = rho[np.isfinite(rho)]
     if not len(v):
-        return {"final": nan, "peak": nan, "lowest": nan, "rmse": rmse}
-    return {"final": float(v[-1]), "peak": float(v.max()), "lowest": float(v.min()), "rmse": rmse}
+        return {**dict.fromkeys(SCORE_KEYS, nan), "rmse": rmse}
+    line = 1 + v
+    high = np.maximum.accumulate(line)
+    fall = np.where(high > 0, (high - line) / np.where(high > 0, high, 1.0), 0.0)
+    return {"final": float(v[-1]), "peak": float(v.max()), "lowest": float(v.min()),
+            "max_drawdown": float(fall.max()), "sharpe": daily_sharpe(book), "rmse": rmse}
+
+
+def daily_sharpe(book):
+    """Sharpe of the return on peak own capital, read at each UTC midnight.
+
+    A day's return is its PnL change over the capital at its end; days
+    with no capital yet are left out. The mean over the sample standard
+    deviation, times sqrt(365); NaN under 30 days or with no spread
+    beyond float noise.
+    """
+    day = book[book["time"] % DAY == 0]
+    pnl, cap = day["pnl"].to_numpy(float), day["capital"].to_numpy(float)[1:]
+    r = (np.diff(pnl) / np.where(cap > 0, cap, 1.0))[cap > 0]
+    if len(r) < 30 or not r.std(ddof=1) > 1e-12 * abs(r.mean()):
+        return float("nan")
+    return float(r.mean() / r.std(ddof=1) * np.sqrt(365))
 
 
 def mimic_scores(r, markets, grid, target=None, leverage=None):
-    """Both score sets of a backtest: on its peak own capital, and on its $10,000 account."""
-    s = avbt_cpp.summary(r)
-    return {"own": own_scores(mimic_own(r, markets, grid, leverage), target),
-            "account": {"sharpe": s["sharpe"], "max_drawdown": s["max_drawdown"], "return": s["total_return"]},
-            "trades": s["trades"]}
+    """A backtest's scores on its return on peak own capital, and its trades."""
+    return {**own_scores(mimic_book(r, markets, grid, leverage), target), "trades": avbt_cpp.summary(r)["trades"]}
 
 
 def effective(p):
@@ -1144,14 +922,13 @@ def pct(v):
 
 
 def table(pairs):
-    """Both score sets per side: on peak own capital first, on the account second."""
-    print(f"{'':10}{'on peak own capital':>36}{'on the account':>26}")
-    print(f"{'':10}{'final':>9}{'peak':>9}{'lowest':>9}{'rmse':>9}{'sharpe':>8}{'max dd':>9}{'return':>9}{'trades':>8}")
+    """Each side's scores, all on its return on peak own capital."""
+    print(f"{'':10}{'final':>9}{'peak':>9}{'lowest':>9}{'max dd':>9}{'sharpe':>8}{'rmse':>9}{'trades':>8}")
     for name, s in pairs:
         s = score_sets(s)
-        own = "".join(pct(s["own"][k]) for k in OWN_KEYS)
-        a = s["account"]
-        print(f"{name:10}{own}{a['sharpe']:8.2f}{a['max_drawdown']:9.1%}{a['return']:9.1%}{s['trades']:8d}")
+        sharpe = f"{s['sharpe']:8.2f}" if np.isfinite(s["sharpe"]) else f"{'-':>8}"
+        print(f"{name:10}{pct(s['final'])}{pct(s['peak'])}{pct(s['lowest'])}{pct(s['max_drawdown'])}"
+              f"{sharpe}{pct(s['rmse'])}{s['trades']:8d}")
 
 
 def report(out):
@@ -1177,26 +954,23 @@ def wallet_note(w):
             print(f"  {'ok  ' if ok else 'FAIL'} {name}: {detail}")
 
 
-def setup(address, top, fees="real", funding=True):
+def setup(address, top):
     """The wallet's scores, its return on peak own capital, and markets for its `top` busiest symbols.
 
-    Besides the scores and markets: "target", the wallet's return on the
-    hourly grid from start to end (wallet_returns.ledger), NaN before its
-    first open; "capital", its capital at the end; "leverage", its median
+    Besides the scores and markets: "book", the wallet's
+    wallet_returns.ledger table on the hourly grid from start to end;
+    "target", its return, NaN before its first open; "capital", its capital at the end; "leverage", its median
     leverage; and "checks", the issue #15 checks on its table.
     """
     if VENUE == "hyperliquid":
         since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=HL_DAYS)).strftime("%Y-%m-%d")
-        _, wallet, counts, start, end, _ = hl_curve(address, since)
-        print(f"total pnl ${wallet['pnl']:,.0f}; whole account ${wallet['start_account']:,.0f} at the start, "
-              f"net deposits ${wallet['net_flows']:,.0f} since")
-        if wallet["account_drift"] is not None and wallet["account_drift"] > 0.1:
-            print(f"warning: the account snapshots are up to {wallet['account_drift']:.0%} off the computed account")
+        _, wallet, counts, start, end = hl_curve(address, since)
+        print(f"total pnl ${wallet['pnl']:,.0f}")
         if wallet["gap_share"] > 0.01:
             print(f"warning: the API is missing fills worth {wallet['gap_share']:.0%} of the traded notional; "
                   "the wallet's curve may be unreliable")
     else:
-        _, wallet, counts, start, end, _ = avantis_curve(address, fees, funding)
+        wallet, counts, start, end = avantis_curve(address)
     grid = hour_grid(start, end)
     me = sys.modules[__name__]
     if VENUE == "hyperliquid":
@@ -1212,7 +986,7 @@ def setup(address, top, fees="real", funding=True):
     markets = load_markets(symbols, start, end)
     covered = float(counts[symbols].sum() / counts.sum())
     print(f"{covered:.0%} of the wallet's trades are in the kept markets")
-    return {"wallet": wallet, "symbols": symbols, "start": start, "end": end,
+    return {"wallet": {**wallet, **own_scores(book if len(book) else None)}, "book": book, "symbols": symbols, "start": start, "end": end,
             "markets": markets, "covered_share": covered, "target": pd.Series(rho, index=grid),
             "capital": capital, "leverage": book.attrs.get("leverage", 1.0), "checks": checks}
 
@@ -1241,10 +1015,6 @@ def main():
     ap.add_argument("--restarts", type=int, default=4, help="random starts after the first")
     ap.add_argument("--venue", choices=["avantis", "hyperliquid"], default="avantis")
     ap.add_argument("--workers", type=int, help="backtest threads; default one per core")
-    ap.add_argument("--fees", choices=["real", "flat"], default="real",
-                    help="Avantis wallet fees in its account scores: its real closing fees, or FEE at each open and close")
-    ap.add_argument("--funding", action=argparse.BooleanOptionalAction, default=True,
-                    help="charge an Avantis wallet its real funding in its account scores")
     args = ap.parse_args()
 
     if args.replay:
@@ -1269,7 +1039,7 @@ def main():
         ap.error("give a wallet address or --replay")
     use_venue(args.venue)
     address = checksum(args.address)
-    w = setup(address, args.top, args.fees, args.funding)
+    w = setup(address, args.top)
     symbols, markets, start, end = w["symbols"], w["markets"], w["start"], w["end"]
     costs = {s: avbt_cpp.Costs(FEE, FEE) for s in symbols}
     grid = hour_grid(start, end)
@@ -1287,10 +1057,9 @@ def main():
            "fit": "own", "params": best,
            "markets": symbols, "covered_share": w["covered_share"], "start": start, "end": end,
            "costs": {"open_fee": FEE, "close_fee": FEE},
-           "wallet_costs": {"fees": args.fees, "funding": args.funding},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": RISK, "hard_stop": 1.0,
                         "scale_risk_with_leverage": True},
-           "mse": best_mse, "wallet": {**w["wallet"], "own": own_scores(target)}, "mimic": mimic}
+           "mse": best_mse, "wallet": w["wallet"], "mimic": mimic}
     path = CACHE / f"mimic_{'hl_' if VENUE == 'hyperliquid' else ''}{address}.json"
     save_npz(target_path(path), t=np.asarray(grid, dtype="int64"), rho=target.to_numpy(float))
     save_json(path, out, indent=1)

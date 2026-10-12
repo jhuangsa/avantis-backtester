@@ -1,6 +1,6 @@
 """Load BTC 1-minute candles and build hourly and daily bars.
 
-The minutes come from ClickHouse, table market_data.avantis_candles_1m, pair 1.
+The minutes come from ClickHouse, the candles table that .env names, pair 1.
 Two sources overlap. On a shared timestamp pyth_lazer wins over benchmarks.
 Broken candles are made flat by clean_candles and count as missing.
 Empty buckets are filled with the previous close and minutes_with_data = 0.
@@ -27,7 +27,7 @@ CACHE = Path(__file__).resolve().parents[1] / "data" / "candles" / "btc_1m.csv"
 
 SQL = """
 SELECT toUnixTimestamp(timestamp) AS ts, source, open, high, low, close
-FROM market_data.avantis_candles_1m
+FROM {table}
 WHERE pair_id = 1
 ORDER BY timestamp
 SETTINGS max_execution_time = 120
@@ -71,7 +71,7 @@ def fetch_minutes(refresh: bool = False) -> pd.DataFrame:
         url = clickhouse_url()
         token = base64.b64encode(f"{user}:{password}".encode()).decode()
         req = urllib.request.Request(
-            url, data=SQL.encode(), method="POST",
+            url, data=SQL.format(table=_env("CLICKHOUSE_CANDLES_TABLE")).encode(), method="POST",
             headers={"Authorization": f"Basic {token}"},
         )
         with urllib.request.urlopen(req, timeout=300) as resp:

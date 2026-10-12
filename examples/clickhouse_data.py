@@ -1,7 +1,7 @@
 """Load minute candles and minute market states from ClickHouse.
 
-Candles come from market_data.avantis_candles_1m on the original service.
-States come from market_data.market_context_1m on the enriched service.
+Candles come from the candles table on the original service, states from
+the states table on the enriched service; .env names both tables.
 Each query is cached in data/candles/ and reused when the file exists.
 clean_states turns the state text into small integer codes for the C++ engine.
 
@@ -27,6 +27,8 @@ CACHE = ROOT / "data" / "candles"
 # The .env keys that hold each ClickHouse service ID.
 ORIGINAL = "CLICKHOUSE_ORIGINAL_HOST"
 ENRICHED = "CLICKHOUSE_ENRICHED_HOST"
+# The .env keys that hold the table names; .env is not committed.
+CANDLES, STATES = "CLICKHOUSE_CANDLES_TABLE", "CLICKHOUSE_STATES_TABLE"
 NAMES = {0: "eth", 1: "btc"}
 
 # Code = index + 1. Code 0 means unknown. The C++ enums use the same order.
@@ -78,20 +80,35 @@ def cache_path(pair_id: int, kind: str, start: str, end: str) -> Path:
     return CACHE / f"{NAMES.get(pair_id, f'pair{pair_id}')}_{kind}_{start}_{end}.csv"
 
 
-def minutes(pair_id: int, start: str, end: str) -> pd.DataFrame:
-    """Minute candles in [start, end), UTC days. pyth_lazer wins over benchmarks."""
-    sql = f"""
+def minutes_sql(pair_id: int, start: str, end: str, timeout: int = 60) -> str:
+    """The query for minute candles in [start, end), UTC days, one row a minute.
+
+    pyth_lazer wins over benchmarks. A futures market (WTI, Brent) holds
+    one row a minute per contract; Avantis prices the oldest contract
+    still publishing, so the contract that started first wins.
+    """
+    table, pid = _env(CANDLES), int(pair_id)
+    return f"""
     SELECT toUnixTimestamp(timestamp) AS ts,
-           argMin(open, r) AS open, argMin(high, r) AS high,
-           argMin(low, r) AS low, argMin(close, r) AS close
-    FROM (SELECT *, if(source = 'pyth_lazer', 0, 1) AS r
-          FROM market_data.avantis_candles_1m
-          WHERE pair_id = {int(pair_id)}
-            AND timestamp >= toDateTime('{start}', 'UTC')
-            AND timestamp < toDateTime('{end}', 'UTC'))
+           argMin(open, k) AS open, argMin(high, k) AS high,
+           argMin(low, k) AS low, argMin(close, k) AS close
+    FROM (SELECT c.timestamp AS timestamp, c.open AS open, c.high AS high,
+                 c.low AS low, c.close AS close,
+                 (if(c.source = 'pyth_lazer', 0, 1), f.first) AS k
+          FROM {table} AS c
+          LEFT JOIN (SELECT symbol, min(timestamp) AS first FROM {table}
+                     WHERE pair_id = {pid} GROUP BY symbol) AS f USING symbol
+          WHERE c.pair_id = {pid}
+            AND c.timestamp >= toDateTime('{start}', 'UTC')
+            AND c.timestamp < toDateTime('{end}', 'UTC'))
     GROUP BY timestamp ORDER BY timestamp
-    SETTINGS max_execution_time = 60
+    SETTINGS max_execution_time = {timeout}
     FORMAT CSVWithNames"""
+
+
+def minutes(pair_id: int, start: str, end: str) -> pd.DataFrame:
+    """Minute candles in [start, end), UTC days; see minutes_sql."""
+    sql = minutes_sql(pair_id, start, end)
     return clean_candles(_cached(cache_path(pair_id, "1m", start, end), ORIGINAL, sql))[0]
 
 
@@ -100,7 +117,7 @@ def states(pair_id: int, start: str, end: str) -> pd.DataFrame:
     sql = f"""
     SELECT toUnixTimestamp(timestamp) AS ts, market_state AS market,
            trend_state AS trend, volatility_state AS volatility
-    FROM market_data.market_context_1m FINAL
+    FROM {_env(STATES)} FINAL
     WHERE pair_id = {int(pair_id)} AND timeframe = '1m'
       AND timestamp >= toDateTime('{start}', 'UTC')
       AND timestamp < toDateTime('{end}', 'UTC')

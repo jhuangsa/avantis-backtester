@@ -1,8 +1,6 @@
 """All saved Hyperliquid mimic fits on one page: stats and both returns on peak own capital.
 
-The table shows the scores on peak own capital first, on the account
-second, and flags a wallet whose account snapshots drift over 25% from
-the computed account.
+Every score and chart is the return on peak own capital.
 
 Run from the repository root, after examples/mimic.py --venue hyperliquid:
 
@@ -54,11 +52,44 @@ def main(argv=None):
                      "end": saved["end"], "mse": saved["mse"], "wallet_stats": C.clean(C.M.score_sets(saved["wallet"])),
                      "mimic_stats": C.clean(C.M.score_sets(saved["mimic"])), "params": saved["params"], "fit": saved.get("fit"),
                      "t": c["t"], "wallet": c["wallet"], "mimic": c["mimic"]})
-    rows.sort(key=lambda r: -(r["wallet_stats"]["own"]["final"] or 0))
+    rows.sort(key=lambda r: -(r["wallet_stats"]["final"] or 0))
     out = HERE / args.out
     out.write_text(PAGE.replace("/*DATA*/null", json.dumps(rows)))
     print(f"wrote {out}, {len(rows)} wallets")
 
+
+# The page script's helpers and score rows, shared with mimic_top.py.
+COMMON = r"""const pct=(x,d=0)=>x==null?"–":(x>0?"+":"")+(x*100).toFixed(d)+"%";
+const fix=(x,d)=>x==null?"–":x.toFixed(d);
+const dd=x=>x==null?"–":(x*100).toFixed(0)+"%";
+const cls=x=>x<0?' class="neg"':"";
+const short=a=>a.slice(0,6)+"…"+a.slice(-4);
+const usd=x=>(x<0?"−$":"$")+Math.abs(x).toLocaleString("en-US",{maximumFractionDigits:0});
+const ROWS=[["Return","final",pct,1],["Peak","peak",pct,0],["Lowest","lowest",pct,1],
+["Max drawdown","max_drawdown",dd,0],["Sharpe","sharpe",x=>fix(x,2),1],["Trades","trades",x=>x==null?"–":x,0]];
+const HEAD=ROWS.map(([n])=>`<th>Wallet ${n.toLowerCase()}</th><th>Mimic ${n.toLowerCase()}</th>`).join("");
+const cells=r=>ROWS.map(([,k,f,c])=>[r.wallet_stats,r.mimic_stats].map(s=>`<td${c?cls(s[k]):""}>${f(s[k])}</td>`).join("")).join("");
+"""
+
+# The cards: one chart and score list per wallet, from D.
+CARDS = r"""function chart(r){const W=320,H=150,L=44,B=16,T=6,w=r.wallet,m=r.mimic;
+const ys=w.concat(m).filter(v=>v!=null),lo=Math.min(0,...ys),hi=Math.max(0,...ys),n=r.t.length-1;
+const x=i=>L+(W-L-4)*i/n,y=v=>T+(H-T-B)*(1-(v-lo)/((hi-lo)||1));
+const path=a=>{let d="",up=false;a.forEach((v,i)=>{if(v==null){up=false;return}d+=(up?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1);up=true});return d};
+const d0=new Date(r.t[0]*1e3).toISOString().slice(0,10),d1=new Date(r.t[n]*1e3).toISOString().slice(0,10);
+return `<svg viewBox="0 0 ${W} ${H}"><line x1="${L}" x2="${W-4}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)"/>
+<text x="${L-4}" y="${y(hi)+8}" text-anchor="end">${pct(hi)}</text><text x="${L-4}" y="${y(lo)}" text-anchor="end">${pct(lo)}</text>
+<text x="${L}" y="${H-2}">${d0}</text><text x="${W-4}" y="${H-2}" text-anchor="end">${d1}</text>
+<path d="${path(w)}" fill="none" stroke="var(--s1)" stroke-width="1.6"/>
+<path d="${path(m)}" fill="none" stroke="var(--s2)" stroke-width="1.6"/></svg>`}
+document.getElementById("cards").innerHTML=D.map(r=>{const w=r.wallet_stats,m=r.mimic_stats;
+return `<div class="card" id="w${r.address}"><h3>${short(r.address)}</h3>
+<div class="m">${r.markets.join(", ")} · ${r.params.timeframe}</div>
+<div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
+<span><i style="background:var(--s2)"></i>Mimic</span></div>${chart(r)}
+<div class="s"><span></span><span style="color:var(--s1)">Wallet</span><span style="color:var(--s2)">Mimic</span>
+${ROWS.map(([n,k,f,c])=>`<span>${n}</span>`+[w,m].map(s=>`<span${c?cls(s[k]):""}>${f(s[k])}</span>`).join("")).join("")}</div></div>`}).join("");
+"""
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -106,54 +137,15 @@ svg{display:block;width:100%;height:auto}svg text{fill:var(--ink3);font-size:10p
 <script>
 const D=/*DATA*/null;
 document.getElementById("sub").textContent=`${D.length} wallets from OptimistFi, each fitted with the mimic strategy over its last 200 days. `+
-"Both curves are the return on peak own capital: total PnL over the most of the trader's own money ever in positions at once, not compounded: the curve the fit minimizes. "+
+"Every number is on the return on peak own capital: total PnL, realized plus unrealized, over the most of the trader's own money ever in positions at once, not compounded. "+
+"The fit makes the mimic's curve match the wallet's. "+
 "The wallet's margin is estimated from its current leverage setting, so its return can read high. "+
-"The account scores are a time-weighted return on the wallet's whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out, and the mimic's $10,000 account. "+
-"Both curves count PnL realized plus unrealized, open positions valued at each hour's close. "+
-"A flagged wallet's account snapshots drift over 25% from the computed account: its account scores are unreliable. "+
 "The mimic pays 0.05% of notional per round trip and no funding; the wallet its real fees and funding. "+
 "Copy error is the root of the MSE between the two curves.";
-const pct=(x,d=0)=>x==null?"–":(x>0?"+":"")+(x*100).toFixed(d)+"%";
-const fix=(x,d)=>x==null?"–":x.toFixed(d);
-const dd=x=>x==null?"–":(x*100).toFixed(0)+"%";
-const cls=x=>x<0?' class="neg"':"";
-const short=a=>a.slice(0,6)+"…"+a.slice(-4);
-const cols=s=>`<td${cls(s.sharpe)}>${fix(s.sharpe,2)}</td><td${cls(s.return)}>${pct(s.return)}</td><td>${dd(s.max_drawdown)}</td>`;
-const owns=s=>`<td${cls(s.final)}>${pct(s.final)}</td><td${cls(s.peak)}>${pct(s.peak)}</td><td${cls(s.lowest)}>${pct(s.lowest)}</td>`;
-const six="<th>Wallet Sharpe</th><th>Wallet return</th><th>Wallet max DD</th><th>Mimic Sharpe</th><th>Mimic return</th><th>Mimic max DD</th>";
-const sixo="<th>Wallet final</th><th>Wallet peak</th><th>Wallet lowest</th><th>Mimic final</th><th>Mimic peak</th><th>Mimic lowest</th>";
-let h=`<tr><th></th><th></th><th class="set" colspan="6">On peak own capital</th><th class="set" colspan="6">On the account</th><th></th><th></th><th></th></tr>`+
-`<tr><th>Wallet</th><th>Copy error</th>${sixo}${six}<th>Wallet trades</th><th>Mimic trades</th><th>Account drift</th></tr>`;
-for(const r of D){const w=r.wallet_stats,m=r.mimic_stats,drift=w.account_drift;
-const flag=drift!=null&&drift>0.25;
-h+=`<tr><td><a href="#w${r.address}">${short(r.address)}</a>${flag?' <span class="flag" title="the account snapshots drift over 25% from the computed account">!</span>':""}</td>
-<td>${(Math.sqrt(r.mse)*100).toFixed(1)}%</td>${owns(w.own)}${owns(m.own)}${cols(w.account)}${cols(m.account)}
-<td>${w.trades}</td><td>${m.trades}</td><td${flag?' class="flag"':""}>${drift==null?"–":(drift*100).toFixed(0)+"%"}</td></tr>`}
+""" + COMMON + r"""let h=`<tr><th>Wallet</th><th>Copy error</th>${HEAD}</tr>`;
+for(const r of D)h+=`<tr><td><a href="#w${r.address}">${short(r.address)}</a></td><td>${(Math.sqrt(r.mse)*100).toFixed(1)}%</td>${cells(r)}</tr>`;
 document.getElementById("stats").innerHTML=h;
-function chart(r){const W=320,H=150,L=34,B=16,T=6;
-const ys=r.wallet.concat(r.mimic).filter(v=>v!=null),lo=Math.min(0,...ys),hi=Math.max(0,...ys),n=r.t.length-1;
-const x=i=>L+(W-L-4)*i/n,y=v=>T+(H-T-B)*(1-(v-lo)/((hi-lo)||1));
-const path=a=>{let d="",up=false;a.forEach((v,i)=>{if(v==null){up=false;return}d+=(up?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1);up=true});return d};
-const d0=new Date(r.t[0]*1e3).toISOString().slice(0,10),d1=new Date(r.t[n]*1e3).toISOString().slice(0,10);
-return `<svg viewBox="0 0 ${W} ${H}"><line x1="${L}" x2="${W-4}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)"/>
-<text x="${L-4}" y="${y(hi)+8}" text-anchor="end">${pct(hi)}</text><text x="${L-4}" y="${y(lo)}" text-anchor="end">${pct(lo)}</text>
-<text x="${L}" y="${H-2}">${d0}</text><text x="${W-4}" y="${H-2}" text-anchor="end">${d1}</text>
-<path d="${path(r.wallet)}" fill="none" stroke="var(--s1)" stroke-width="1.6"/>
-<path d="${path(r.mimic)}" fill="none" stroke="var(--s2)" stroke-width="1.6"/></svg>`}
-document.getElementById("cards").innerHTML=D.map(r=>{const w=r.wallet_stats,m=r.mimic_stats;
-return `<div class="card" id="w${r.address}"><h3>${short(r.address)}</h3>
-<div class="m">${r.markets.join(", ")} · ${r.params.timeframe}</div>
-<div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
-<span><i style="background:var(--s2)"></i>Mimic</span></div>${chart(r)}
-<div class="s"><span></span><span style="color:var(--s1)">Wallet</span><span style="color:var(--s2)">Mimic</span>
-<span>Return (own, final)</span><span${cls(w.own.final)}>${pct(w.own.final)}</span><span${cls(m.own.final)}>${pct(m.own.final)}</span>
-<span>Peak (own)</span><span>${pct(w.own.peak)}</span><span>${pct(m.own.peak)}</span>
-<span>Lowest (own)</span><span>${pct(w.own.lowest)}</span><span>${pct(m.own.lowest)}</span>
-<span>Return (account)</span><span${cls(w.account.return)}>${pct(w.account.return)}</span><span${cls(m.account.return)}>${pct(m.account.return)}</span>
-<span>Sharpe (account)</span><span>${fix(w.account.sharpe,2)}</span><span>${fix(m.account.sharpe,2)}</span>
-<span>Max DD (account)</span><span>${dd(w.account.max_drawdown)}</span><span>${dd(m.account.max_drawdown)}</span>
-<span>Trades</span><span>${w.trades}</span><span>${m.trades}</span></div></div>`}).join("");
-</script></body></html>
+""" + CARDS + r"""</script></body></html>
 """
 
 if __name__ == "__main__":
