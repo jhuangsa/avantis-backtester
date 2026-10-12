@@ -62,6 +62,9 @@ sys.path.insert(0, str(HERE / "sharpe_hunt"))
 import data as hd  # noqa: E402
 import veranta_top5 as vt  # noqa: E402
 
+sys.path.insert(0, str(HERE))
+import wallet_returns as W  # noqa: E402
+
 avbt_cpp, TF = hd.avbt_cpp, hd.TF
 CACHE = hd.ch.CACHE
 FEE = 0.00025  # 0.025% of notional at each open and each close: 0.05% per round trip
@@ -260,19 +263,19 @@ def avantis_curve(address, fees="real", funding=True):
     """The wallet's hourly deployed-capital curve on Avantis, its scores, its orders per symbol, start, end, and its account curve.
 
     An order is one position: symbol, side, index, open price and open
-    minute; its margin is the sum of its closes' positionSize. Each hour the
-    PnL is the realized price PnL of the closes so far, less fees and
-    funding, plus each open order's remaining notional times its price
-    change since the open. fees "real" charges each close's closingFee at
-    the close (the rows carry no opening fee); "flat" charges FEE of
-    notional at the open and at each close. funding True charges each
-    close's funding at the close. The deployed curve (deployed_curve) is returned first; the
+    minute; its margin is the sum of its closes' positionSize. Each hour's
+    PnL is wallet_returns.ledger's pnl: the realized PnL of the closes so
+    far, plus each open close's price PnL since the open, less fees and
+    funding. fees "real" charges each close's closingFee at the close (the
+    rows carry no opening fee); "flat" charges FEE of notional at the open
+    and at each close instead. funding True spreads each close's funding
+    evenly over its hold; False leaves it out. The deployed curve (deployed_curve) is returned first; the
     account curve, the PnL scaled so the peak open margin is the $10,000
     account, last. A symbol with no candles counts realized PnL only.
     """
     rows = json.loads(download(address).read_text())["trades"]
     whole = [r for r in rows if all(r.get(k) is not None for k in ("positionSize", "gross", "leverage"))
-             and float(r["leverage"]) > 0]
+             and float(r["leverage"]) > 0 and pd.Timestamp(r["time"]).timestamp() >= r["openedAt"]]
     if len(whole) < len(rows):
         print(f"  {len(rows) - len(whole)} rows without size, gross or leverage skipped")
     rows = whole
@@ -284,45 +287,45 @@ def avantis_curve(address, fees="real", funding=True):
     closed_at = {k: [int(pd.Timestamp(r["time"]).timestamp()) for r in v] for k, v in orders.items()}
     start, end, lo, hi = day_bounds(min(r["openedAt"] for r in rows), max(max(v) for v in closed_at.values()))
     grid = np.arange(lo, hi, HOUR, dtype="int64")
-    prices, missing = {}, []
+    closes, prices, missing = {}, {}, []
     for symbol in sorted({k[0] for k in orders}):
         b = bars(PAIR_IDS[symbol], start, end)
         if b is None or not len(b[1].ts):
             missing.append(symbol)
             continue
-        close = pd.Series(b[1].close, index=b[1].ts + HOUR)
-        prices[symbol] = close.reindex(close.index.union(grid)).ffill().loc[grid].to_numpy()
+        closes[symbol] = pd.Series(b[1].close, index=b[1].ts + HOUR)  # known at the bar's end
+        prices[symbol] = W.price_at(closes[symbol], grid, np.nan)
     if missing:
         print(f"  no candles, realized PnL only: {', '.join(missing)}")
-    realized, paid, unreal, notional, opening = (np.zeros(len(grid)) for _ in range(5))
+    book = W.ledger("avantis", rows, closes, times=grid)
+    pnl = book["pnl"].to_numpy()
+    if not funding:  # take out the funding, realized and spread
+        pnl = pnl + book["funding"].to_numpy() - book["unrealized_funding"].to_numpy()
+    if fees == "flat":  # FEE of notional at the open and at each close, not the closingFee
+        pnl = pnl + book["fees"].to_numpy()
+    notional, opening = np.zeros(len(grid)), np.zeros(len(grid))
     shorts, events = [], []  # events: (time, change in open margin)
     for key, group in orders.items():
         symbol, buy = key[:2]
         t0, lever = group[0]["openedAt"], float(group[0]["leverage"])
         size = np.array([float(r["positionSize"]) for r in group])
-        gross = np.array([float(r["gross"]) for r in group])
-        cost = np.array([float(r.get("closingFee") or 0) * (fees == "real")
-                         + float(r.get("funding") or 0) * funding for r in group])
         t = np.array(closed_at[key])
         order = sorted(range(len(group)), key=lambda i: t[i])
-        t, size, gross, cost = t[order], size[order], gross[order], cost[order]
+        t, size = t[order], size[order]
         opened = (grid >= t0).astype(float)
         k = np.searchsorted(t, grid, side="right")  # closes up to each hour
         done = np.concatenate([[0.0], np.cumsum(size)])[k]
-        realized += np.concatenate([[0.0], np.cumsum(gross)])[k]
-        paid += np.concatenate([[0.0], np.cumsum(cost)])[k]
         if fees == "flat":
-            paid += FEE * lever * (size.sum() * opened + done)
+            pnl = pnl - FEE * lever * (size.sum() * opened + done)
         events += [(t0, size.sum()), *zip(t, -size)]
         change = np.nan_to_num(prices[symbol] / float(group[0]["openPrice"]) - 1) if symbol in prices else 0.0
         remaining = (size.sum() * opened - done) * lever  # notional still open, at the open price
-        unreal += remaining * (1 if buy else -1) * change
         notional += remaining * (1 + change)
         opening[np.searchsorted(grid, t0)] += size.sum() * lever  # the hour the open is marked in
         shorts.append(not buy)
     events.sort(key=lambda e: (e[0], e[1] < 0))  # opens before closes at one time
     scale = vt.ACCOUNT / np.cumsum([m for _, m in events]).max()  # peak open margin
-    pnl = pd.Series(realized - paid + unreal, index=grid)
+    pnl = pd.Series(pnl, index=grid)
     eq = vt.ACCOUNT + scale * pnl
     eq[(eq <= 0).cummax()] = 0.0  # a blown account stays at zero
     deployed = deployed_curve(pnl, notional, opening)
@@ -337,8 +340,11 @@ def avantis_curve(address, fees="real", funding=True):
 HL = "https://api.hyperliquid.xyz/info"
 HL_DAYS = 200  # Hyperliquid serves the last 5000 candles: about 208 days of 1-hour bars
 HL_MAX_LEVERAGE = 50  # an account holds at most 50 times its value in notional
-HL_KEEP = ("coin", "px", "sz", "side", "time", "startPosition", "fee", "tid", "dir", "hash")
-HL_KEEPS = "perps and outcome markets"  # what hl_spot lets through; a fill cache of anything else is refetched
+HL_KEEP = ("coin", "px", "sz", "side", "time", "startPosition", "fee", "tid", "dir", "hash", "closedPnl")
+# What a fill cache holds: hl_spot's fills, with HL_KEEP; a cache of anything else is refetched.
+HL_KEEPS = "perps and outcome markets, with closedPnl"
+HL_FILL_LIMIT = 10_000  # the API serves only a wallet's 10,000 most recent fills
+HL_FUNDING_PAGE = 500  # funding items per userFunding call
 
 
 def hl_post(body):
@@ -484,8 +490,8 @@ def hl_fills(address):
     """A Hyperliquid wallet's perp fills, oldest first, cached gzipped and refreshed hourly.
 
     The cache keeps the fetch time; a refresh refetches from a day before it
-    and merges by tid. A cache without tid, or from before outcome markets
-    were kept (no "keeps"), is refetched in full.
+    and merges by tid. A cache without tid, or with another "keeps" (from
+    before outcome markets or closedPnl were kept), is refetched in full.
     """
     path = CACHE / f"wallet_hl_fills_{address.lower()}.json.gz"
     old = path.with_suffix("")  # the uncompressed cache of earlier versions; read once, then replaced
@@ -504,6 +510,74 @@ def hl_fills(address):
         save_json_gz(path, cache)
     old.unlink(missing_ok=True)
     return cache["fills"]
+
+
+def hl_fills_capped(fills, since_ms=None):
+    """True when `fills` may be cut at the start: the API serves only HL_FILL_LIMIT fills.
+
+    With `since_ms` (a window start), only when the oldest fill is after
+    it: the cache merges refreshes, so it can pass the limit with the
+    whole window still in it.
+    """
+    if len(fills) < HL_FILL_LIMIT:
+        return False
+    return since_ms is None or min(f["time"] for f in fills) > since_ms
+
+
+def hl_funding(address, since, end=None):
+    """The wallet's funding payments from `since` to before `end` (ms), oldest first.
+
+    Each is {"time": ms, "coin": str, "usdc": float}; usdc > 0 is received.
+    Cached gzipped with its fetch time and the earliest time it covers,
+    refreshed hourly from a day before the fetch, merged by (time, coin).
+    A `since` before the cache's start refetches in full.
+    """
+    path = CACHE / f"wallet_hl_funding_{address.lower()}.json.gz"
+    cache = load_json_gz(path) if path.exists() else None
+    if isinstance(cache, dict) and cache.get("from", 0) > since:
+        cache = None
+    if hl_stale(cache):
+        items = {(x["time"], x["coin"]): x for x in cache["funding"]} if cache else {}
+        now = int(time.time() * 1000)
+        start = cache["fetched"] - DAY * 1000 if cache else since
+        while True:
+            body = {"type": "userFunding", "user": address.lower(), "startTime": start}
+            page = hl_post(body) or []
+            for x in page:
+                d = x["delta"]
+                items[(x["time"], d["coin"])] = {"time": x["time"], "coin": d["coin"], "usdc": float(d["usdc"])}
+            if len(page) < HL_FUNDING_PAGE:
+                break
+            last = page[-1]["time"]
+            start = last if last > start else start + 1
+            time.sleep(1)
+        first = cache["from"] if cache else since
+        cache = {"fetched": now, "from": first, "funding": sorted(items.values(), key=lambda x: x["time"])}
+        save_json_gz(path, cache)
+    return [x for x in cache["funding"] if x["time"] >= since and (end is None or x["time"] < end)]
+
+
+def hl_leverage(address, coins):
+    """The wallet's leverage setting per coin, {coin: float}, from activeAssetData.
+
+    A coin whose request fails or has no leverage is None: the caller
+    decides what to use. Cached hourly; a coin not yet cached is fetched.
+    """
+    path = CACHE / f"wallet_hl_leverage_{address.lower()}.json"
+    cache = json.loads(path.read_text()) if path.exists() else None
+    if hl_stale(cache):
+        cache = {"fetched": int(time.time() * 1000), "leverage": {}}
+    got = cache["leverage"]
+    todo = [c for c in coins if c not in got]
+    for coin in todo:
+        try:
+            r = hl_post({"type": "activeAssetData", "user": address.lower(), "coin": coin})
+            got[coin] = float(r["leverage"]["value"])
+        except Exception:
+            got[coin] = None
+    if todo or not path.exists():
+        save_json(path, cache)
+    return {c: got[c] for c in coins}
 
 
 def hl_curve(address, since, end=None):

@@ -91,13 +91,15 @@ class HL:
     """A fake hl_post: fills by time (pages of 2000), a portfolio, flat candles."""
 
     def __init__(self, fills=(), price=100.0, empty=(), perp="1000.0", all_time="500.0", error=(), overlap=0,
-                 portfolio=None, ledger=()):
+                 portfolio=None, ledger=(), funding=(), leverage=None):
         self.fills = sorted(fills, key=lambda f: f["time"])
         self.ledger = sorted(ledger, key=lambda x: x["time"])  # userNonFundingLedgerUpdates items
         self.price, self.empty, self.calls = price, set(empty), []
         self.perp, self.all_time = perp, all_time
         self.error, self.overlap = set(error), overlap  # coins that answer 500; extra bars before startTime
         self.portfolio = portfolio  # a full portfolio response ([name, obj] pairs), else one point per history
+        self.funding = sorted(funding, key=lambda x: x["time"])  # userFunding items
+        self.leverage = leverage or {}  # coin -> activeAssetData response; a missing coin answers 500
 
     def __call__(self, body):
         self.calls.append(body)
@@ -119,6 +121,13 @@ class HL:
                     for t in range(lo, req["endTime"], step)][-5000:]  # the API serves the last 5000
         if body["type"] == "userNonFundingLedgerUpdates":
             return [x for x in self.ledger if x["time"] >= body["startTime"]][:2000]
+        if body["type"] == "userFunding":
+            return [x for x in self.funding if x["time"] >= body["startTime"]][:500]
+        if body["type"] == "activeAssetData":
+            if body["coin"] not in self.leverage:
+                import urllib.error
+                raise urllib.error.HTTPError(M.HL, 500, "Internal Server Error", {}, None)
+            return self.leverage[body["coin"]]
         if body["type"] == "portfolio":
             if self.portfolio is not None:
                 return self.portfolio
@@ -602,13 +611,14 @@ def test_avantis_curve_fees_use_notional_at_open_and_at_close(avantis_env):
     assert eq.iloc[-1] == pytest.approx(ACCOUNT - (ACCOUNT / 200) * FEE * 2000)
 
 
-def test_avantis_curve_charges_the_real_closing_fee_and_funding_at_the_close(avantis_env):
+def test_avantis_curve_spreads_funding_and_charges_the_closing_fee_at_the_close(avantis_env):
     # A long at 5x on 200 margin closed flat, with a 1.5 closing fee and 3.5 funding: only they show.
+    # Funding is spread evenly over the 90-hour hold, so the hour before the close carries 89/90 of it.
     t = BASE + 5 * D + 6 * 3600
     row = trade(t, 200, 0.0, buy=True, open_px=95.0, close_px=95.0, lev=5, closing_fee=1.5, funding=3.5)
     scale = ACCOUNT / 200
     eq = avantis_env([row], fees="real", funding=True)[-1]
-    assert eq.loc[t - 3600] == pytest.approx(ACCOUNT)
+    assert eq.loc[t - 3600] == pytest.approx(ACCOUNT - scale * 3.5 * 89 / 90)
     assert eq.iloc[-1] == pytest.approx(ACCOUNT - scale * 5.0)
     assert avantis_env([row], fees="real", funding=False)[-1].iloc[-1] == pytest.approx(ACCOUNT - scale * 1.5)
     flat = avantis_env([row], fees="flat", funding=True)[-1].iloc[-1]
@@ -1719,3 +1729,99 @@ def test_main_saves_deployed_and_account_scores_per_side(monkeypatch, tmp_path, 
     assert "risk" not in saved["params"] and saved["settings"]["risk_per_trade"] == 0.002
     assert saved["settings"]["scale_risk_with_leverage"] is True
     assert saved["mse"] == 0.5
+
+
+# ---- funding, leverage, the fill limit ---------------------------------------
+
+def funding_item(t_ms, coin, usdc):
+    """A userFunding item; usdc is a string as the API sends it."""
+    return {"time": t_ms, "hash": "0x0",
+            "delta": {"type": "funding", "coin": coin, "usdc": usdc, "szi": "1.0",
+                      "fundingRate": "0.0001", "nSamples": None}}
+
+
+def test_hl_fills_keep_closed_pnl(monkeypatch, hl):
+    fs = perp_fills([1000, 2000])
+    fs[1]["closedPnl"] = "12.5"
+    monkeypatch.setattr(M, "hl_post", HL(fs))
+    assert [f["closedPnl"] for f in M.hl_fills("0xabc")] == ["0", "12.5"]
+
+
+def test_hl_fills_cache_without_closed_pnl_is_refetched_in_full(monkeypatch, hl, tmp_path):
+    server = HL(perp_fills([1000, 2000]))
+    monkeypatch.setattr(M, "hl_post", server)
+    keep = [k for k in M.HL_KEEP if k != "closedPnl"]
+    old = {"fetched": int(time.time() * 1000), "keeps": "perps and outcome markets",
+           "fills": [{k: f[k] for k in keep} for f in server.fills]}
+    M.save_json_gz(tmp_path / "wallet_hl_fills_0xabc.json.gz", old)
+    out = M.hl_fills("0xabc")
+    assert server.calls[0]["startTime"] == 0
+    assert all("closedPnl" in f for f in out)
+
+
+def test_hl_fills_capped_at_the_limit():
+    assert M.HL_FILL_LIMIT == 10_000
+    assert not M.hl_fills_capped([{}] * 9_999)
+    assert M.hl_fills_capped([{}] * 10_000)
+
+
+def test_hl_fills_capped_with_a_window():
+    # Over the limit, but the oldest fill is at or before the window start: nothing lost.
+    fills = [{"time": 1000 + i} for i in range(10_001)]
+    assert not M.hl_fills_capped(fills, since_ms=1000)
+    assert M.hl_fills_capped(fills, since_ms=999)
+    assert not M.hl_fills_capped(fills[:9_999], since_ms=999)
+
+
+def test_hl_funding_pages_flattens_and_keeps_the_sign(monkeypatch):
+    items = [funding_item(1000 + i, "BTC", "-0.5") for i in range(500)]
+    items += [funding_item(5000, "ETH", "2.25"), funding_item(5000, "BTC", "-1")]
+    server = HL(funding=items)
+    monkeypatch.setattr(M, "hl_post", server)
+    out = M.hl_funding("0xABC", 0)
+    assert len(out) == 502
+    assert len(server.calls) == 2 and server.calls[1]["startTime"] == 1499
+    assert out[0] == {"time": 1000, "coin": "BTC", "usdc": -0.5}
+    assert {(x["coin"], x["usdc"]) for x in out[-2:]} == {("ETH", 2.25), ("BTC", -1.0)}
+    assert server.calls[0]["user"] == "0xabc"
+
+
+def test_hl_funding_window_and_cache(monkeypatch, tmp_path):
+    now = int(time.time() * 1000)
+    h = 3600 * 1000
+    server = HL(funding=[funding_item(now - 3 * h, "BTC", "1"), funding_item(now - 2 * h, "BTC", "2")])
+    monkeypatch.setattr(M, "hl_post", server)
+    assert [x["usdc"] for x in M.hl_funding("0xabc", now - 3 * h, now - 2 * h)] == [1.0]
+    path = tmp_path / "wallet_hl_funding_0xabc.json.gz"
+    assert path.exists()
+    n = len(server.calls)
+    assert [x["usdc"] for x in M.hl_funding("0xabc", now - 3 * h)] == [1.0, 2.0]
+    assert len(server.calls) == n, "fresh cache: no call"
+    # Stale: refetch from a day before the fetch and merge.
+    cache = M.load_json_gz(path)
+    cache["fetched"] -= 2 * h
+    M.save_json_gz(path, cache)
+    server.funding.append(funding_item(now - h // 2, "ETH", "-3"))
+    out = M.hl_funding("0xabc", now - 3 * h)
+    assert [x["usdc"] for x in out] == [1.0, 2.0, -3.0]
+    assert server.calls[-1]["startTime"] == cache["fetched"] - D * 1000
+    # An earlier since than the cache covers: a full refetch from it.
+    M.hl_funding("0xabc", 0)
+    assert server.calls[-1]["startTime"] == 0
+
+
+def test_hl_leverage_parses_value_and_records_none(monkeypatch, tmp_path):
+    lev = {"BTC": {"coin": "BTC", "leverage": {"type": "cross", "value": 20}},
+           "ETH": {"coin": "ETH", "leverage": {"type": "isolated", "value": 5, "rawUsd": "-10"}},
+           "SOL": {"coin": "SOL"}}
+    server = HL(leverage=lev)
+    monkeypatch.setattr(M, "hl_post", server)
+    out = M.hl_leverage("0xABC", ["BTC", "ETH", "SOL", "DOGE"])
+    assert out == {"BTC": 20.0, "ETH": 5.0, "SOL": None, "DOGE": None}
+    assert (tmp_path / "wallet_hl_leverage_0xabc.json").exists()
+    n = len(server.calls)
+    assert M.hl_leverage("0xabc", ["ETH"]) == {"ETH": 5.0}
+    assert len(server.calls) == n, "fresh cache: no call"
+    lev["XRP"] = {"leverage": {"value": 3}}
+    assert M.hl_leverage("0xabc", ["BTC", "XRP"]) == {"BTC": 20.0, "XRP": 3.0}
+    assert len(server.calls) == n + 1, "only the new coin is fetched"
