@@ -1,15 +1,22 @@
-"""Tune range_basket for the highest return under a max drawdown limit.
+"""Tune a library strategy for the highest return under a max drawdown limit.
 
 Three searches, at limits of 10%, 15% and 20%, on 2026 (TUNE). Each winner
-then runs unchanged on 2025 (TEST). Writes drawdown_limit.html: equity on
-both windows, every run's return against its drawdown, and a table; and
-results_drawdown/range_basket_dd<limit>.json, each winner's full parameters.
+then runs unchanged on 2025 (TEST). Writes drawdown_limit_<name>.html
+(drawdown_limit.html for range_basket): equity on both windows, every run's
+return against its drawdown, and a table; and
+results_drawdown/<name>_dd<limit>.json, each winner's full parameters.
 
-Run: python3 examples/sharpe_hunt/drawdown_limit.py
+The strategy is range_basket by default. Any other name takes its coins,
+START and KNOBS from run_<name>.py. Every leverage param is searched over
+1 to 10; every other number knob over more values around its first one.
+
+Run: python3 examples/sharpe_hunt/drawdown_limit.py [name]
 """
 
 from __future__ import annotations
 
+import argparse
+import importlib
 import json
 import math
 import sys
@@ -27,7 +34,6 @@ TFS = (TF.Min15, TF.Hour1, TF.Hour4)
 START = {"timeframe": TF.Hour1, "window": 100, "atr_period": 14, "max_bars": 96, "max_open": 3,
          "take": 1.0, "depth": 0.5, "atr_stops": 7.0, "max_stop": 0.07, "leverage": 4.0}
 KNOBS = {
-    "leverage": [2.0, 3.0, 4.0, 5.0, 6.0, 8.0],
     "max_open": [3, 2, 4],
     "depth": [0.5, 0.4, 0.7],
     "atr_stops": [7.0, 6.0, 8.0],
@@ -35,6 +41,33 @@ KNOBS = {
     "max_bars": [96, 72, 120],
 }
 COLORS = ["#2a6fdb", "#e08a1e", "#2e9e5b"]
+LEVERAGE = list(range(1, 11))
+SPREAD = [0.5, 0.67, 0.8, 0.9, 1.1, 1.25, 1.5, 2.0]
+
+
+def setup(name):
+    """Coins, start and knobs: range_basket's above, else run_<name>.py's."""
+    if name == "range_basket":
+        return COINS, START, KNOBS
+    run = importlib.import_module(f"run_{name}")
+    start = getattr(run, "START", {})
+    return getattr(run, "COINS", None) or [start["instrument"]], start, run.KNOBS
+
+
+def widen(name, knobs):
+    """Leverage 1 to 10; each other number knob: its values plus first * SPREAD, in range."""
+    info = {p.name: p for i in avbt_cpp.strategies() if i.name == name for p in i.params}
+    out = {k: LEVERAGE for k in info if "leverage" in k}
+    for k, vals in knobs.items():
+        base = vals[0]
+        if k in out or isinstance(base, bool) or not isinstance(base, (int, float)) or base <= 0:
+            out.setdefault(k, vals)
+            continue
+        more = {base * f for f in SPREAD}
+        more = {round(v) for v in more} if isinstance(base, int) else {round(v, 2) for v in more}
+        more = {v for v in more if info[k].min <= v <= info[k].max and v > 0}
+        out[k] = [base] + sorted((more | set(vals[1:])) - {base})
+    return out
 
 
 def curve(r):
@@ -44,39 +77,45 @@ def curve(r):
 
 
 def main():
-    tune, test = markets(COINS, TUNE, TFS), markets(COINS, TEST, TFS)
-    costs = {c: COSTS for c in COINS}
+    ap = argparse.ArgumentParser()
+    ap.add_argument("name", nargs="?", default="range_basket", help="a library strategy with a run_<name>.py")
+    name = ap.parse_args().name
+    coins, start, knobs = setup(name)
+    knobs = widen(name, knobs)
+    tune, test = markets(coins, TUNE, TFS), markets(coins, TEST, TFS)
+    costs = {c: COSTS for c in coins}
     rows = []
     for limit in LIMITS:
-        s = avbt_cpp.optimize("range_basket", START, KNOBS, tune, costs, settings(), rounds=60,
+        s = avbt_cpp.optimize(name, start, knobs, tune, costs, settings(), rounds=60,
                               max_drawdown=limit, min_gain=0.01)
-        best = {**START, **s["best"]}
-        held = avbt_cpp.run("range_basket", best, test, costs, settings())
-        fit = avbt_cpp.run("range_basket", best, tune, costs, settings())
+        best = {**start, **s["best"]}
+        held = avbt_cpp.run(name, best, test, costs, settings())
+        fit = avbt_cpp.run(name, best, tune, costs, settings())
         rows.append({"limit": limit, "feasible": not math.isnan(s["score"]), "best": best,
                      "tune": avbt_cpp.summary(fit), "test": avbt_cpp.summary(held),
                      "tune_curve": curve(fit), "test_curve": curve(held),
                      "runs": [(r["max_drawdown"], r["total_return"]) for r in s["runs"]]})
         print(f"limit {limit:.0%}: return {s['total_return']:.1%}, drawdown {s['max_drawdown']:.1%}, "
               f"{len(s['runs'])} runs; 2025 return {rows[-1]['test']['total_return']:.1%}, "
-              f"drawdown {rows[-1]['test']['max_drawdown']:.1%}")
-    save(rows)
-    (HERE / "drawdown_limit.html").write_text(page(rows))
+              f"drawdown {rows[-1]['test']['max_drawdown']:.1%}" + ("" if rows[-1]['feasible'] else "; no run under the limit"))
+    save(name, coins, knobs, rows)
+    html = "drawdown_limit.html" if name == "range_basket" else f"drawdown_limit_{name}.html"
+    (HERE / html).write_text(page(name, coins, list(knobs), rows))
 
 
-def save(rows):
+def save(name, coins, knobs, rows):
     """One strategy file per limit, in results_drawdown/."""
     out_dir = HERE / "results_drawdown"
     out_dir.mkdir(exist_ok=True)
     for r in rows:
-        out = {"strategy": "range_basket", "coins": COINS, "max_drawdown_limit": r["limit"],
+        out = {"strategy": name, "coins": coins, "max_drawdown_limit": r["limit"],
                "feasible": r["feasible"], "params": {k: plain(v) for k, v in r["best"].items()},
-               "tuned": r["tune"], "test_2025": r["test"], "runs": len(r["runs"])}
-        name = f"range_basket_dd{round(r['limit'] * 100)}.json"
-        (out_dir / name).write_text(json.dumps(out, indent=1))
+               "tuned": r["tune"], "test_2025": r["test"], "runs": len(r["runs"]),
+               "searched": {k: [plain(v) for v in vals] for k, vals in knobs.items()}}
+        (out_dir / f"{name}_dd{round(r['limit'] * 100)}.json").write_text(json.dumps(out, indent=1))
 
 
-def page(rows):
+def page(name, coins, keys, rows):
     def lines(key):
         return [{**r[key], "name": f"limit {r['limit']:.0%}", "line": {"color": c}} for r, c in zip(rows, COLORS)]
 
@@ -88,7 +127,6 @@ def page(rows):
                 for r, c in zip(rows, COLORS)]
     shapes = [{"type": "line", "x0": r["limit"], "x1": r["limit"], "yref": "paper", "y0": 0, "y1": 1,
                "line": {"color": c, "dash": "dot"}} for r, c in zip(rows, COLORS)]
-    keys = list(KNOBS)
     head = "".join(f"<th>{k}</th>" for k in keys)
     body = "".join(
         f"<tr><td>{r['limit']:.0%}</td>" + "".join(f"<td>{plain(r['best'][k])}</td>" for k in keys)
@@ -103,8 +141,8 @@ def page(rows):
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#222}}
 table{{border-collapse:collapse;font-size:14px;margin:12px 0}}td,th{{border:1px solid #ddd;padding:4px 8px;
 text-align:right}}.chart{{height:380px}}</style></head><body>
-<h1>range_basket: highest return under a drawdown limit</h1>
-<p>Five coins in one account, 1-hour signals. Each search keeps only runs whose max drawdown on
+<h1>{name}: highest return under a drawdown limit</h1>
+<p>{", ".join(coins)} in one account. Each search keeps only runs whose max drawdown on
 2026-01-01 to 2026-10-01 is within the limit, and picks the highest return. The winner then runs
 unchanged on 2025-03-25 to 2026-01-01, which the search never saw.</p>
 <div style="overflow-x:auto"><table><tr><th>limit</th>{head}<th>2026 return</th><th>2026 drawdown</th><th>2026 Sharpe</th>
