@@ -2,7 +2,8 @@
 
 Three searches, at limits of 10%, 15% and 20%, on 2026 (TUNE). Each winner
 then runs unchanged on 2025 (TEST). Writes drawdown_limit.html: equity on
-both windows, every run's return against its drawdown, and a table.
+both windows, every run's return against its drawdown, and a table; and
+results_drawdown/range_basket_dd<limit>.json, each winner's full parameters.
 
 Run: python3 examples/sharpe_hunt/drawdown_limit.py
 """
@@ -59,7 +60,20 @@ def main():
         print(f"limit {limit:.0%}: return {s['total_return']:.1%}, drawdown {s['max_drawdown']:.1%}, "
               f"{len(s['runs'])} runs; 2025 return {rows[-1]['test']['total_return']:.1%}, "
               f"drawdown {rows[-1]['test']['max_drawdown']:.1%}")
+    save(rows)
     (HERE / "drawdown_limit.html").write_text(page(rows))
+
+
+def save(rows):
+    """One strategy file per limit, in results_drawdown/."""
+    out_dir = HERE / "results_drawdown"
+    out_dir.mkdir(exist_ok=True)
+    for r in rows:
+        out = {"strategy": "range_basket", "coins": COINS, "max_drawdown_limit": r["limit"],
+               "feasible": r["feasible"], "params": {k: plain(v) for k, v in r["best"].items()},
+               "tuned": r["tune"], "test_2025": r["test"], "runs": len(r["runs"])}
+        name = f"range_basket_dd{round(r['limit'] * 100)}.json"
+        (out_dir / name).write_text(json.dumps(out, indent=1))
 
 
 def page(rows):

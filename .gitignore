@@ -27,3 +27,6 @@ docs/strategy_results.md
 
 # Strategy scores, local only
 examples/sharpe_hunt/results/*.json
+
+# Drawdown limit winners, local only
+examples/sharpe_hunt/results_drawdown/
