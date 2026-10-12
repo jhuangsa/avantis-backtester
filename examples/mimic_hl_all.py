@@ -1,6 +1,6 @@
-"""All saved Hyperliquid mimic fits on one page: stats and both deployed-capital curves.
+"""All saved Hyperliquid mimic fits on one page: stats and both returns on peak own capital.
 
-The table shows the scores on deployed capital first, on the account
+The table shows the scores on peak own capital first, on the account
 second, and flags a wallet whose account snapshots drift over 25% from
 the computed account.
 
@@ -8,11 +8,17 @@ Run from the repository root, after examples/mimic.py --venue hyperliquid:
 
     python3 examples/mimic_hl_all.py
 
-Writes examples/mimic_hl_all.html.
+Writes examples/mimic_hl_all.html. Only some wallets, to another page:
+
+    python3 examples/mimic_hl_all.py --out mimic_hl_top5.html 0xabc... 0xdef...
+
+The page is written in examples/; the table is sorted by the wallet's
+final return on peak own capital.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -22,17 +28,34 @@ sys.path.insert(0, str(HERE))
 import mimic_chart as C  # noqa: E402
 
 
-def main():
+def parse(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("addresses", nargs="*", help="wallets to show; default all saved")
+    ap.add_argument("--out", default="mimic_hl_all.html", help="page name in examples/")
+    return ap.parse_args(argv)
+
+
+def pick(saves, addresses):
+    """The saves whose address is in addresses (any case); all if none given."""
+    want = {a.lower() for a in addresses}
+    return [s for s in saves if not want or s["address"].lower() in want]
+
+
+def main(argv=None):
+    args = parse(argv)
+    saves = [json.loads(p.read_text()) for p in sorted(C.M.CACHE.glob("mimic_hl_0x*.json"))]
+    saves = pick(saves, args.addresses)
+    if len(saves) < len(set(a.lower() for a in args.addresses)):
+        raise SystemExit("some addresses have no saved fit")
     rows = []
-    for path in sorted(C.M.CACHE.glob("mimic_hl_0x*.json")):
-        saved = json.loads(path.read_text())
+    for saved in saves:
         c = C.curves(saved)
         rows.append({"address": saved["address"], "markets": saved["markets"], "start": saved["start"],
                      "end": saved["end"], "mse": saved["mse"], "wallet_stats": C.clean(C.M.score_sets(saved["wallet"])),
-                     "mimic_stats": C.clean(C.M.score_sets(saved["mimic"])), "params": saved["params"],
+                     "mimic_stats": C.clean(C.M.score_sets(saved["mimic"])), "params": saved["params"], "fit": saved.get("fit"),
                      "t": c["t"], "wallet": c["wallet"], "mimic": c["mimic"]})
-    rows.sort(key=lambda r: -(r["wallet_stats"]["deployed"]["return"] or 0))
-    out = HERE / "mimic_hl_all.html"
+    rows.sort(key=lambda r: -(r["wallet_stats"]["own"]["final"] or 0))
+    out = HERE / args.out
     out.write_text(PAGE.replace("/*DATA*/null", json.dumps(rows)))
     print(f"wrote {out}, {len(rows)} wallets")
 
@@ -83,11 +106,12 @@ svg{display:block;width:100%;height:auto}svg text{fill:var(--ink3);font-size:10p
 <script>
 const D=/*DATA*/null;
 document.getElementById("sub").textContent=`${D.length} wallets from OptimistFi, each fitted with the mimic strategy over its last 200 days. `+
-"Both curves are the return on deployed capital, each hour's PnL over the notional held the hour before or opened in it, compounded from $10,000: the curve the fit minimizes. "+
+"Both curves are the return on peak own capital: total PnL over the most of the trader's own money ever in positions at once, not compounded: the curve the fit minimizes. "+
+"The wallet's margin is estimated from its current leverage setting, so its return can read high. "+
 "The account scores are a time-weighted return on the wallet's whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out, and the mimic's $10,000 account. "+
-"Both curves are total PnL, realized plus unrealized, open positions valued at each hour's close. "+
+"Both curves count PnL realized plus unrealized, open positions valued at each hour's close. "+
 "A flagged wallet's account snapshots drift over 25% from the computed account: its account scores are unreliable. "+
-"Both curves pay 0.05% of notional per round trip and leave out funding. "+
+"The mimic pays 0.05% of notional per round trip and no funding; the wallet its real fees and funding. "+
 "Copy error is the root of the MSE between the two curves.";
 const pct=(x,d=0)=>x==null?"–":(x>0?"+":"")+(x*100).toFixed(d)+"%";
 const fix=(x,d)=>x==null?"–":x.toFixed(d);
@@ -95,19 +119,21 @@ const dd=x=>x==null?"–":(x*100).toFixed(0)+"%";
 const cls=x=>x<0?' class="neg"':"";
 const short=a=>a.slice(0,6)+"…"+a.slice(-4);
 const cols=s=>`<td${cls(s.sharpe)}>${fix(s.sharpe,2)}</td><td${cls(s.return)}>${pct(s.return)}</td><td>${dd(s.max_drawdown)}</td>`;
+const owns=s=>`<td${cls(s.final)}>${pct(s.final)}</td><td${cls(s.peak)}>${pct(s.peak)}</td><td${cls(s.lowest)}>${pct(s.lowest)}</td>`;
 const six="<th>Wallet Sharpe</th><th>Wallet return</th><th>Wallet max DD</th><th>Mimic Sharpe</th><th>Mimic return</th><th>Mimic max DD</th>";
-let h=`<tr><th></th><th></th><th class="set" colspan="6">On deployed capital</th><th class="set" colspan="6">On the account</th><th></th><th></th><th></th></tr>`+
-`<tr><th>Wallet</th><th>Copy error</th>${six}${six}<th>Wallet trades</th><th>Mimic trades</th><th>Account drift</th></tr>`;
+const sixo="<th>Wallet final</th><th>Wallet peak</th><th>Wallet lowest</th><th>Mimic final</th><th>Mimic peak</th><th>Mimic lowest</th>";
+let h=`<tr><th></th><th></th><th class="set" colspan="6">On peak own capital</th><th class="set" colspan="6">On the account</th><th></th><th></th><th></th></tr>`+
+`<tr><th>Wallet</th><th>Copy error</th>${sixo}${six}<th>Wallet trades</th><th>Mimic trades</th><th>Account drift</th></tr>`;
 for(const r of D){const w=r.wallet_stats,m=r.mimic_stats,drift=w.account_drift;
 const flag=drift!=null&&drift>0.25;
 h+=`<tr><td><a href="#w${r.address}">${short(r.address)}</a>${flag?' <span class="flag" title="the account snapshots drift over 25% from the computed account">!</span>':""}</td>
-<td>${(Math.sqrt(r.mse)*100).toFixed(1)}%</td>${cols(w.deployed)}${cols(m.deployed)}${cols(w.account)}${cols(m.account)}
+<td>${(Math.sqrt(r.mse)*100).toFixed(1)}%</td>${owns(w.own)}${owns(m.own)}${cols(w.account)}${cols(m.account)}
 <td>${w.trades}</td><td>${m.trades}</td><td${flag?' class="flag"':""}>${drift==null?"–":(drift*100).toFixed(0)+"%"}</td></tr>`}
 document.getElementById("stats").innerHTML=h;
 function chart(r){const W=320,H=150,L=34,B=16,T=6;
-const ys=r.wallet.concat(r.mimic),lo=Math.min(0,...ys),hi=Math.max(0,...ys),n=r.t.length-1;
+const ys=r.wallet.concat(r.mimic).filter(v=>v!=null),lo=Math.min(0,...ys),hi=Math.max(0,...ys),n=r.t.length-1;
 const x=i=>L+(W-L-4)*i/n,y=v=>T+(H-T-B)*(1-(v-lo)/((hi-lo)||1));
-const path=a=>a.map((v,i)=>(i?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1)).join("");
+const path=a=>{let d="",up=false;a.forEach((v,i)=>{if(v==null){up=false;return}d+=(up?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1);up=true});return d};
 const d0=new Date(r.t[0]*1e3).toISOString().slice(0,10),d1=new Date(r.t[n]*1e3).toISOString().slice(0,10);
 return `<svg viewBox="0 0 ${W} ${H}"><line x1="${L}" x2="${W-4}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)"/>
 <text x="${L-4}" y="${y(hi)+8}" text-anchor="end">${pct(hi)}</text><text x="${L-4}" y="${y(lo)}" text-anchor="end">${pct(lo)}</text>
@@ -120,9 +146,9 @@ return `<div class="card" id="w${r.address}"><h3>${short(r.address)}</h3>
 <div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span>
 <span><i style="background:var(--s2)"></i>Mimic</span></div>${chart(r)}
 <div class="s"><span></span><span style="color:var(--s1)">Wallet</span><span style="color:var(--s2)">Mimic</span>
-<span>Return (deployed)</span><span${cls(w.deployed.return)}>${pct(w.deployed.return)}</span><span${cls(m.deployed.return)}>${pct(m.deployed.return)}</span>
-<span>Sharpe (deployed)</span><span>${fix(w.deployed.sharpe,2)}</span><span>${fix(m.deployed.sharpe,2)}</span>
-<span>Max DD (deployed)</span><span>${dd(w.deployed.max_drawdown)}</span><span>${dd(m.deployed.max_drawdown)}</span>
+<span>Return (own, final)</span><span${cls(w.own.final)}>${pct(w.own.final)}</span><span${cls(m.own.final)}>${pct(m.own.final)}</span>
+<span>Peak (own)</span><span>${pct(w.own.peak)}</span><span>${pct(m.own.peak)}</span>
+<span>Lowest (own)</span><span>${pct(w.own.lowest)}</span><span>${pct(m.own.lowest)}</span>
 <span>Return (account)</span><span${cls(w.account.return)}>${pct(w.account.return)}</span><span${cls(m.account.return)}>${pct(m.account.return)}</span>
 <span>Sharpe (account)</span><span>${fix(w.account.sharpe,2)}</span><span>${fix(m.account.sharpe,2)}</span>
 <span>Max DD (account)</span><span>${dd(w.account.max_drawdown)}</span><span>${dd(m.account.max_drawdown)}</span>

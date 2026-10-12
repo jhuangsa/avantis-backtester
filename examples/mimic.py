@@ -1,30 +1,35 @@
-"""Fit the C++ mimic strategy to a wallet's PnL curve.
+"""Fit the C++ mimic strategy to a wallet's return on peak own capital.
 
-Downloads the wallet's trades, builds its hourly PnL, marked to market,
-loads bars for its busiest markets, then tunes the mimic strategy two knobs
-at a time to minimize the MSE between the two curves. It fits the whole
-history on purpose: no test period.
+Downloads the wallet's trades, builds its hourly return on peak own
+capital, marked to market, loads bars for its busiest markets, then tunes
+the mimic strategy two knobs at a time to minimize the MSE between the
+two curves. It fits the whole history on purpose: no test period.
 
-The curve fitted and scored first is the return on deployed capital
-(deployed_curve): each hour's PnL over the notional held the hour before,
-or opened in the hour, compounded from $10,000. Wallet and mimic are
-measured the same way, so the fit does not depend on account size, risk
-or leverage. A second score set, "account", is the return on the account:
-the wallet's whole Hyperliquid account or its peak Avantis margin, and
-the mimic's $10,000.
+The curve fitted and scored first, "own", is wallet_returns.ledger's
+return: total PnL (realized plus unrealized) over the peak of the
+trader's own money in positions. Nothing is compounded. Wallet and mimic
+are measured the same way: the mimic's trades become Avantis close rows
+(mimic_rows). Account size does not change it, but leverage does, so
+leverage is a knob that starts at the wallet's median. Every hour where
+the wallet's return is defined counts the same; the mimic counts 0
+before its first open. See docs/mimic.md for the accepted limits.
 
-The mimic and a Hyperliquid wallet pay FEE of notional at each open and
-each close, 0.05% per round trip, and leave out funding. An Avantis
-wallet's costs are set by --fees and --funding: by default its real
-closing fees and funding, from its trade history. Every curve is scored by the C++ rules
-through curve_stats. A trade is one position from open to full close.
+A second score set, "account", is the return on the account: the
+wallet's whole Hyperliquid account or its peak Avantis margin, and the
+mimic's $10,000, scored by the C++ rules through curve_stats.
+
+The mimic pays FEE of notional at each open and each close, 0.05% per
+round trip, and no funding. The wallet's return uses its real fees and
+funding; --fees and --funding set an Avantis wallet's costs in its
+account scores only. A trade is one position from open to full close.
 
 Run from the repository root:
 
     python3 examples/mimic.py 0xFFB7eF358cEe48DaFE15B63A625DFF9eA4E2268F
 
 Writes data/candles/mimic_<address>.json: the strategy, its params, the
-markets, dates, costs and settings, and the scores. To rerun it:
+markets, dates, costs and settings, and the scores, and beside it
+mimic_<address>_target.npz, the wallet's curve. To rerun it:
 
     python3 examples/mimic.py --replay data/candles/mimic_<address>.json
 
@@ -72,9 +77,10 @@ HOUR, DAY = 3600, 86400
 AV_TFS = TFS = (TF.Min15, TF.Hour1, TF.Hour4)
 TF_NAMES = {avbt_cpp.timeframe_name(t): t for t in TFS}
 
-# The fit measures the return on deployed capital, which risk and leverage do
-# not change, so both are fixed: risk per trade RISK times LEVERAGE of the
-# $10,000 account (scale_risk_with_leverage), at LEVERAGE times the margin.
+# Account size does not change the return on peak own capital, so risk per
+# trade is fixed: RISK times the leverage of the $10,000 account
+# (scale_risk_with_leverage). Leverage does change it, so it is a knob;
+# LEVERAGE is its value when a run has none.
 RISK, LEVERAGE = 0.002, 3
 
 # Each knob and the values a pass tries, all strategy params. A knob in a
@@ -89,13 +95,14 @@ KNOBS = {
     "hours_on": [False, True], "hour_from": [0, 3, 6, 9, 12, 15, 18, 21], "hour_to": [3, 6, 9, 12, 15, 18, 21, 24],
     "atr_period": [7, 14, 28], "hold": [1, 2, 4, 8, 12, 24, 48, 96, 168],
     "stop_atrs": [0.5, 1, 1.5, 2, 3, 4, 6, 8], "tp_atrs": [0.5, 1, 2, 3, 4, 6, 8, 12],
+    "leverage": [1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100],  # main adds the wallet's median to a copy
 }
 GROUPS = {"rsi_": "rsi_on", "trend_": "trend_on", "move_": "move_on", "break_": "break_on", "hour_": "hours_on"}
 START = {"timeframe": "1 hour", "side": 0, "rsi_on": False, "rsi_period": 14, "rsi_level": 30,
          "trend_on": False, "trend_period": 50, "trend_dir": 1, "move_on": False, "move_lag": 4,
          "move_size": 0.03, "move_dir": -1, "break_on": False, "break_period": 24, "break_dir": 1,
          "hours_on": False, "hour_from": 0, "hour_to": 24, "atr_period": 14, "hold": 24,
-         "stop_atrs": 3, "tp_atrs": 3}
+         "stop_atrs": 3, "tp_atrs": 3, "leverage": LEVERAGE}
 
 
 def checksum(address):
@@ -123,51 +130,23 @@ def mimic_equity(r):
     return pd.Series(r.equity, index=np.asarray(r.clock) + avbt_cpp.timeframe_seconds(r.timeframe))
 
 
-def deployed_curve(P, N, T):
-    """Equity on the return on deployed capital, from $10,000, on the hourly grid.
-
-    P: the dollar PnL known at each hour (a Series; its index is the grid);
-    N: the gross notional held at each hour; T: the notional opened inside
-    each hour. The hour's return is its PnL over the larger of the notional
-    held the hour before and the notional opened in it, 0 when both are 0.
-    Equity at or below 0 stays 0.
-    """
-    N, T = np.asarray(N, float), np.asarray(T, float)
-    d = np.maximum(N[:-1], T[1:])
-    r = np.where(d > 0, np.diff(np.asarray(P, float)) / np.where(d > 0, d, 1.0), 0.0)
-    eq = pd.Series(vt.ACCOUNT * np.concatenate([[1.0], np.cumprod(1 + r)]), index=P.index)
-    eq[(eq <= 0).cummax()] = 0.0
-    return eq
-
-
-def dropped_pnl(P, N, T):
-    """The PnL deployed_curve drops: the sum of |ΔP| on hours with PnL but no deployed capital, and its share of all |ΔP|.
-
-    P, N, T as in deployed_curve. A share above a few percent means the
-    fills are placed on the wrong hours.
-    """
-    N, T = np.asarray(N, float), np.asarray(T, float)
-    d = np.maximum(N[:-1], T[1:])
-    dp = np.abs(np.diff(np.asarray(P, float)))
-    lost, total = float(dp[d <= 0].sum()), float(dp.sum())
-    return lost, lost / total if total else 0.0
-
-
-def warn_dropped(name, stats):
-    """Prints a warning when a curve's deployed scores drop over 1% of its PnL moves."""
-    if stats.get("dropped_share", 0.0) > 0.01:
-        print(f"warning: {name}: ${stats['dropped_pnl']:,.0f} of PnL, {stats['dropped_share']:.0%} of its moves, "
-              "fell on hours with no deployed capital and is left out of the deployed scores")
-
-
+OWN_KEYS = ("final", "peak", "lowest", "rmse")
 SCORE_KEYS = ("sharpe", "max_drawdown", "return")
 
 
 def score_sets(s):
-    """A side's scores as {"deployed": {...}, "account": {...}, "trades": n}; an old file's scores are its account's."""
-    if "deployed" in s:
+    """A side's scores as {"own": {...}, "account": {...}, "trades": n}.
+
+    An old file has no "own" set: its own scores are NaN, its account
+    scores are its "account" set, or its top-level scores in the oldest
+    files. A "deployed" set is dropped.
+    """
+    if "own" in s:
         return s
-    return {**s, "deployed": dict.fromkeys(SCORE_KEYS, float("nan")), "account": {k: s[k] for k in SCORE_KEYS}}
+    out = {k: v for k, v in s.items() if k != "deployed"}
+    out["own"] = dict.fromkeys(OWN_KEYS, float("nan"))
+    out["account"] = s["account"] if "account" in s else {k: s[k] for k in SCORE_KEYS}
+    return out
 
 
 def closed_positions(before, after):
@@ -260,7 +239,7 @@ PAIR_IDS = {}  # symbol -> Avantis pair id, from the wallet's rows
 
 
 def avantis_curve(address, fees="real", funding=True):
-    """The wallet's hourly deployed-capital curve on Avantis, its scores, its orders per symbol, start, end, and its account curve.
+    """The wallet's hourly PnL on Avantis, its scores, its orders per symbol, start, end, and its account curve.
 
     An order is one position: symbol, side, index, open price and open
     minute; its margin is the sum of its closes' positionSize. Each hour's
@@ -269,9 +248,10 @@ def avantis_curve(address, fees="real", funding=True):
     funding. fees "real" charges each close's closingFee at the close (the
     rows carry no opening fee); "flat" charges FEE of notional at the open
     and at each close instead. funding True spreads each close's funding
-    evenly over its hold; False leaves it out. The deployed curve (deployed_curve) is returned first; the
-    account curve, the PnL scaled so the peak open margin is the $10,000
-    account, last. A symbol with no candles counts realized PnL only.
+    evenly over its hold; False leaves it out. The dollar PnL is returned
+    first; the account curve, the PnL scaled so the peak open margin is
+    the $10,000 account, last. A symbol with no candles counts realized
+    PnL only.
     """
     rows = json.loads(download(address).read_text())["trades"]
     whole = [r for r in rows if all(r.get(k) is not None for k in ("positionSize", "gross", "leverage"))
@@ -287,14 +267,13 @@ def avantis_curve(address, fees="real", funding=True):
     closed_at = {k: [int(pd.Timestamp(r["time"]).timestamp()) for r in v] for k, v in orders.items()}
     start, end, lo, hi = day_bounds(min(r["openedAt"] for r in rows), max(max(v) for v in closed_at.values()))
     grid = np.arange(lo, hi, HOUR, dtype="int64")
-    closes, prices, missing = {}, {}, []
+    closes, missing = {}, []
     for symbol in sorted({k[0] for k in orders}):
         b = bars(PAIR_IDS[symbol], start, end)
         if b is None or not len(b[1].ts):
             missing.append(symbol)
             continue
         closes[symbol] = pd.Series(b[1].close, index=b[1].ts + HOUR)  # known at the bar's end
-        prices[symbol] = W.price_at(closes[symbol], grid, np.nan)
     if missing:
         print(f"  no candles, realized PnL only: {', '.join(missing)}")
     book = W.ledger("avantis", rows, closes, times=grid)
@@ -303,38 +282,26 @@ def avantis_curve(address, fees="real", funding=True):
         pnl = pnl + book["funding"].to_numpy() - book["unrealized_funding"].to_numpy()
     if fees == "flat":  # FEE of notional at the open and at each close, not the closingFee
         pnl = pnl + book["fees"].to_numpy()
-    notional, opening = np.zeros(len(grid)), np.zeros(len(grid))
     shorts, events = [], []  # events: (time, change in open margin)
     for key, group in orders.items():
-        symbol, buy = key[:2]
         t0, lever = group[0]["openedAt"], float(group[0]["leverage"])
         size = np.array([float(r["positionSize"]) for r in group])
         t = np.array(closed_at[key])
-        order = sorted(range(len(group)), key=lambda i: t[i])
-        t, size = t[order], size[order]
-        opened = (grid >= t0).astype(float)
-        k = np.searchsorted(t, grid, side="right")  # closes up to each hour
-        done = np.concatenate([[0.0], np.cumsum(size)])[k]
         if fees == "flat":
-            pnl = pnl - FEE * lever * (size.sum() * opened + done)
+            order = np.argsort(t, kind="stable")
+            k = np.searchsorted(t[order], grid, side="right")  # closes up to each hour
+            done = np.concatenate([[0.0], np.cumsum(size[order])])[k]
+            pnl = pnl - FEE * lever * (size.sum() * (grid >= t0) + done)
         events += [(t0, size.sum()), *zip(t, -size)]
-        change = np.nan_to_num(prices[symbol] / float(group[0]["openPrice"]) - 1) if symbol in prices else 0.0
-        remaining = (size.sum() * opened - done) * lever  # notional still open, at the open price
-        notional += remaining * (1 + change)
-        opening[np.searchsorted(grid, t0)] += size.sum() * lever  # the hour the open is marked in
-        shorts.append(not buy)
+        shorts.append(not key[1])
     events.sort(key=lambda e: (e[0], e[1] < 0))  # opens before closes at one time
     scale = vt.ACCOUNT / np.cumsum([m for _, m in events]).max()  # peak open margin
     pnl = pd.Series(pnl, index=grid)
     eq = vt.ACCOUNT + scale * pnl
     eq[(eq <= 0).cummax()] = 0.0  # a blown account stays at zero
-    deployed = deployed_curve(pnl, notional, opening)
-    lost, lost_share = dropped_pnl(pnl, notional, opening)
     counts = pd.Series([k[0] for k in orders]).value_counts()
-    stats = {"deployed": curve_stats(deployed), "account": curve_stats(eq),
-             "trades": len(orders), "short_share": float(np.mean(shorts)),
-             "dropped_pnl": lost, "dropped_share": lost_share}
-    return deployed, stats, counts, start, end, eq
+    stats = {"account": curve_stats(eq), "trades": len(orders), "short_share": float(np.mean(shorts))}
+    return pnl, stats, counts, start, end, eq
 
 
 HL = "https://api.hyperliquid.xyz/info"
@@ -581,11 +548,10 @@ def hl_leverage(address, coins):
 
 
 def hl_curve(address, since, end=None):
-    """The wallet's hourly deployed-capital curve, its scores, its fills per coin, start, end, and its account curve.
+    """The wallet's hourly PnL, its scores, its fills per coin, start, end, and its account curve.
 
-    The deployed curve (deployed_curve) is returned first: each hour's PnL
-    over the notional held the hour before or opened in the hour. The
-    account curve, a time-weighted return on the whole account, is last.
+    The dollar PnL is returned first. The account curve, a time-weighted
+    return on the whole account, is last.
     Total PnL is realized plus unrealized: each fill pays its price and FEE
     of its notional in cash, and each open position is worth its size times
     the hour's price, less the positions held at the start. A few fills are
@@ -622,7 +588,7 @@ def hl_curve(address, since, end=None):
     by_coin = {}
     for f in fills:
         by_coin.setdefault(f["coin"], []).append(f)
-    cash, value, gross, opened = (np.zeros(len(grid)) for _ in range(4))
+    cash, value, gross = (np.zeros(len(grid)) for _ in range(3))
     counts, closes, missing, traded = {}, [], 0.0, 0.0  # notional of the gaps, and of fills plus gaps
     for coin, fs in by_coin.items():
         fs = hl_order(fs)
@@ -662,9 +628,6 @@ def hl_curve(address, since, end=None):
         cash += np.concatenate([[0], np.cumsum(np.where(inside, -(size + gap) * px - fee, 0))])[k]
         value += pos * price - held * price[0]
         gross += np.abs(pos) * price
-        # Notional that grew the position: the gap trade (from before - gap to before), then the fill.
-        grew = np.maximum(np.abs(before) - np.abs(before - gap), 0) + np.maximum(np.abs(after) - np.abs(before), 0)
-        opened += np.diff(np.concatenate([[0], np.cumsum(np.where(inside, grew * px, 0))])[k], prepend=0.0)
     pnl = cash + value  # P(h): the dollar PnL known at each hour
     snaps, snap_flows = hl_snapshots(address)
     st, sv = snaps.index.to_numpy(), snaps.to_numpy()
@@ -700,14 +663,11 @@ def hl_curve(address, since, end=None):
     r = np.where(held > 0, np.diff(pnl) / np.where(held > 0, held, 1.0), 0.0)
     eq = pd.Series(vt.ACCOUNT * np.concatenate([[1.0], np.cumprod(1 + r)]), index=grid)
     eq[(eq <= 0).cummax()] = 0.0  # a blown account stays at zero
-    deployed = deployed_curve(pd.Series(pnl, index=grid), gross, opened)
-    lost, lost_share = dropped_pnl(pnl, gross, opened)
-    stats = {"deployed": curve_stats(deployed), "account": curve_stats(eq),
+    stats = {"account": curve_stats(eq),
              "trades": len(closes), "short_share": float(np.mean(closes)) if closes else 0.0,
              "pnl": float(pnl[-1]), "start_account": float(account[0]), "net_flows": net, "account_drift": drift,
-             "gap_share": float(missing / traded) if traded else 0.0,
-             "dropped_pnl": lost, "dropped_share": lost_share}
-    return deployed, stats, pd.Series(counts).sort_values(ascending=False), start, end, eq
+             "gap_share": float(missing / traded) if traded else 0.0}
+    return pd.Series(pnl, index=grid), stats, pd.Series(counts).sort_values(ascending=False), start, end, eq
 
 
 HL_FLOWS = """\
@@ -1003,7 +963,7 @@ def settings(risk, scale=True):
 
 
 def backtest(p, markets, costs, scale=True):
-    """The mimic on `p`: the knobs, plus leverage and risk when p lacks them (LEVERAGE, RISK)."""
+    """The mimic on `p`: the knobs, with LEVERAGE and RISK when p lacks leverage or risk."""
     params = {k: v for k, v in p.items() if k != "risk"}
     params["timeframe"] = TF_NAMES[params["timeframe"]]
     params.setdefault("leverage", LEVERAGE)
@@ -1031,71 +991,98 @@ def hour_grid(start, end):
     return pd.Index(np.arange(lo, hi, HOUR, dtype="int64"))
 
 
-CLOSES = {}  # (id(markets), first hour, hours) -> (markets, {instrument: 1-hour closes on the grid})
+PRICES = {}  # id(markets) -> (markets, market_prices(markets))
 
 
-def market_closes(markets, grid):
-    """Each market's 1-hour close at each grid hour, carried forward; computed once per Markets."""
-    key = (id(markets), int(grid[0]), len(grid))
-    hit = CLOSES.get(key)
+def market_prices(markets):
+    """Each market's 1-hour closes, indexed by the second each is known: bar open plus an hour.
+
+    Computed once per Markets.
+    """
+    hit = PRICES.get(id(markets))
     if hit is None or hit[0] is not markets:
         out = {}
         for mk in markets.markets:
             b = next(b for b in mk.timeframes if b.timeframe == TF.Hour1)
-            close = pd.Series(b.close, index=b.ts + HOUR)
-            out[mk.instrument] = close.reindex(close.index.union(grid)).ffill().bfill().loc[grid].to_numpy()
-        hit = CLOSES[key] = (markets, out)
+            out[mk.instrument] = pd.Series(np.asarray(b.close, float), index=np.asarray(b.ts) + HOUR)
+        hit = PRICES[id(markets)] = (markets, out)
     return hit[1]
 
 
-def mimic_pnl(r, markets, grid):
-    """The mimic's P, N and T on the hourly grid (deployed_curve), from its equity and trades.
+def iso(t):
+    """A unix second as the ISO time an Avantis row carries."""
+    return pd.Timestamp(int(t), unit="s", tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    A fill at a bar's open, time t, first shows in the equity at the bar's
-    close, t plus the base timeframe (r.timeframe), so it belongs to the
-    hour that close falls on: the notional a trade opens, its size at its
-    entry price, counts in that hour, and its notional, its size times its
-    market's 1-hour close, is held from that hour up to the hour before
-    the exit shows. A position still open at the end (r.open_positions) is
-    not a trade, but its mark is in the equity: it is held from its entry
-    hour to the end of the grid.
+
+def mimic_rows(r, grid, leverage=None):
+    """A backtest's trades as Avantis close rows, for wallet_returns.ledger.
+
+    A fill at a bar's open, time t, first shows at the bar's close, t plus
+    the base timeframe (r.timeframe), so each row opens and closes one base
+    step after its trade's fills. The margin is size times entry price
+    over leverage; gross is the price PnL before costs, result plus fees
+    plus holding costs. Trade.fees holds the open and the close fee
+    together, so the ledger realizes the opening fee at the close, not at
+    the open: one fee off for the length of each hold, accepted. Holding
+    costs are the row's funding (+ is a cost), spread over the hold.
+
+    A position still open at the end (r.open_positions) is a row that
+    closes an hour after the last grid hour, so it is only marked, never
+    realized; its gross, fee and funding are 0. A Position carries no
+    leverage, so it takes `leverage`, the run's, else LEVERAGE.
     """
-    grid = np.asarray(grid, dtype="int64")
     step = avbt_cpp.timeframe_seconds(r.timeframe)
-    pnl = pd.Series(on_grid(mimic_equity(r), grid) * vt.ACCOUNT, index=grid)
-    units, opened = {}, np.zeros(len(grid))
-    held = [(t.instrument, t.side, t.size, t.entry_price, t.entry_time + step, t.exit_time + step) for t in r.trades]
-    held += [(p.instrument, p.side, p.size, p.entry_price, p.entry_time + step, grid[-1] + 1) for p in r.open_positions]
-    for instrument, side, size, entry_price, shows, ends in held:
-        a, b = np.searchsorted(grid, [shows, ends], side="left")
-        u = units.setdefault(instrument, np.zeros(len(grid) + 1))
-        u[a] += size * (1 if side.name == "Long" else -1)
-        u[b] -= size * (1 if side.name == "Long" else -1)
-        if a < len(grid):
-            opened[a] += size * entry_price
-    closes = market_closes(markets, grid) if units else {}
-    gross = sum((np.abs(np.cumsum(u)[:-1]) * closes[k] for k, u in units.items()), np.zeros(len(grid)))
-    return pnl, gross, opened
+
+    def row(x, lev, closes, gross, fees, funding):
+        return {"symbol": x.instrument, "buy": x.side.name == "Long", "leverage": lev,
+                "openPrice": x.entry_price, "openedAt": x.entry_time + step, "time": iso(closes),
+                "positionSize": x.size * x.entry_price / lev,
+                "gross": gross, "closingFee": fees, "funding": funding}
+
+    rows = [row(t, t.leverage, t.exit_time + step, t.result + t.fees + t.holding_costs, t.fees, t.holding_costs)
+            for t in r.trades]
+    end = int(grid[-1]) + HOUR
+    lev = leverage or LEVERAGE
+    rows += [row(p, getattr(p, "leverage", None) or lev, end, 0.0, 0.0, 0.0) for p in r.open_positions]
+    return rows
 
 
-def mimic_deployed(r, markets, grid):
-    """The mimic's deployed-capital curve on the hourly grid (deployed_curve on mimic_pnl)."""
-    return deployed_curve(*mimic_pnl(r, markets, grid))
+def mimic_own(r, markets, grid, leverage=None):
+    """The mimic's return on peak own capital (ledger "return") on `grid`; NaN before its first open."""
+    grid = np.asarray(grid, dtype="int64")
+    rows = mimic_rows(r, grid, leverage)
+    if not rows:
+        return pd.Series(np.nan, index=grid)
+    book = W.ledger("avantis", rows, market_prices(markets), times=grid)
+    return pd.Series(book["return"].to_numpy(), index=grid)
 
 
-def mimic_dropped(r, markets, grid):
-    """The PnL the mimic's deployed curve drops (dropped_pnl on mimic_pnl)."""
-    return dropped_pnl(*mimic_pnl(r, markets, grid))
+def own_mse(mimic, target):
+    """Mean of (mimic - target)^2 over hours where target is defined; the mimic counts 0 before its first open."""
+    m, t = np.asarray(mimic, float), np.asarray(target, float)
+    ok = ~np.isnan(t)
+    if not ok.any():
+        return float("nan")
+    return float(np.mean((np.where(np.isnan(m[ok]), 0.0, m[ok]) - t[ok]) ** 2))
 
 
-def mimic_scores(r, markets, grid):
-    """Both score sets of a backtest: on its deployed capital, and on its $10,000 account."""
+def own_scores(rho, target=None):
+    """The final, peak and lowest return over hours where rho is defined, and the RMSE of the fit to target."""
+    v = np.asarray(rho, float)
+    v = v[np.isfinite(v)]
+    nan = float("nan")
+    rmse = own_mse(rho, target) ** 0.5 if target is not None else nan
+    if not len(v):
+        return {"final": nan, "peak": nan, "lowest": nan, "rmse": rmse}
+    return {"final": float(v[-1]), "peak": float(v.max()), "lowest": float(v.min()), "rmse": rmse}
+
+
+def mimic_scores(r, markets, grid, target=None, leverage=None):
+    """Both score sets of a backtest: on its peak own capital, and on its $10,000 account."""
     s = avbt_cpp.summary(r)
-    P, N, T = mimic_pnl(r, markets, grid)
-    lost, lost_share = dropped_pnl(P, N, T)
-    return {"deployed": curve_stats(deployed_curve(P, N, T)),
+    return {"own": own_scores(mimic_own(r, markets, grid, leverage), target),
             "account": {"sharpe": s["sharpe"], "max_drawdown": s["max_drawdown"], "return": s["total_return"]},
-            "trades": s["trades"], "dropped_pnl": lost, "dropped_share": lost_share}
+            "trades": s["trades"]}
 
 
 def effective(p):
@@ -1109,8 +1096,10 @@ def effective(p):
     return tuple(sorted(out.items()))
 
 
-def fit(markets, costs, target, grid, first, restarts=4, passes=6, tol=0.01, workers=None, seed=0):
+def fit(markets, costs, target, grid, first, restarts=4, passes=6, tol=0.01, workers=None, seed=0, knobs=None):
     """Climbs from `first` and from `restarts` random starts, all at once; keeps the best.
+
+    knobs: the values each knob tries; default KNOBS.
 
     Each start climbs two knobs at a time, every pair per pass, until a pass
     gains tol of the MSE or less. All starts share one pool of backtest
@@ -1118,20 +1107,21 @@ def fit(markets, costs, target, grid, first, restarts=4, passes=6, tol=0.01, wor
     done so far.
     """
     seen = {}
+    knobs = knobs or KNOBS
 
     def mse(p):
         key = effective(p)
         if key not in seen:
             r = backtest(p, markets, costs)
-            seen[key] = float(np.mean((on_grid(mimic_deployed(r, markets, grid), grid) - target) ** 2))
+            seen[key] = own_mse(mimic_own(r, markets, grid, p.get("leverage")), target)
         return seen[key]
 
     def climb(i, best):
         best_mse = mse(best)
         for n in range(1, passes + 1):
             before = best_mse
-            for a, b in itertools.combinations(KNOBS, 2):
-                tries = [{**best, a: x, b: y} for x in KNOBS[a] for y in KNOBS[b]]
+            for a, b in itertools.combinations(knobs, 2):
+                tries = [{**best, a: x, b: y} for x in knobs[a] for y in knobs[b]]
                 for p, m in zip(tries, runs.map(mse, tries)):
                     if m < best_mse - 1e-12:
                         best, best_mse = p, m
@@ -1141,38 +1131,63 @@ def fit(markets, costs, target, grid, first, restarts=4, passes=6, tol=0.01, wor
         return best, best_mse
 
     rng = np.random.default_rng(seed)
-    starts = [first] + [{k: v[rng.integers(len(v))] for k, v in KNOBS.items()} for _ in range(restarts)]
+    starts = [first] + [{k: v[rng.integers(len(v))] for k, v in knobs.items()} for _ in range(restarts)]
     starts = [{k: v.item() if hasattr(v, "item") else v for k, v in p.items()} for p in starts]
     with ThreadPoolExecutor(workers or os.cpu_count()) as runs, ThreadPoolExecutor(len(starts)) as climbs:
         done = list(climbs.map(climb, range(len(starts)), starts))
     return min(done, key=lambda x: x[1])
 
 
+def pct(v):
+    """v as a percent 9 wide; "-" when it is NaN."""
+    return f"{v:9.1%}" if np.isfinite(v) else f"{'-':>9}"
+
+
 def table(pairs):
-    """Both score sets per side: on deployed capital first, on the account second."""
-    print(f"{'':10}{'on deployed capital':>26}{'on the account':>26}")
-    print(f"{'':10}{'sharpe':>8}{'max dd':>9}{'return':>9}" * 2 + f"{'trades':>8}")
+    """Both score sets per side: on peak own capital first, on the account second."""
+    print(f"{'':10}{'on peak own capital':>36}{'on the account':>26}")
+    print(f"{'':10}{'final':>9}{'peak':>9}{'lowest':>9}{'rmse':>9}{'sharpe':>8}{'max dd':>9}{'return':>9}{'trades':>8}")
     for name, s in pairs:
         s = score_sets(s)
-        row = "".join(f"{s[k]['sharpe']:8.2f}{s[k]['max_drawdown']:9.1%}{s[k]['return']:9.1%}" for k in ("deployed", "account"))
-        print(f"{name:10}{row}{s['trades']:8d}")
+        own = "".join(pct(s["own"][k]) for k in OWN_KEYS)
+        a = s["account"]
+        print(f"{name:10}{own}{a['sharpe']:8.2f}{a['max_drawdown']:9.1%}{a['return']:9.1%}{s['trades']:8d}")
 
 
 def report(out):
     print(f"\nwallet {out['address']}  markets {', '.join(out['markets'])}  {out['start']} to {out['end']}")
-    print(f"mse {out['mse']:.5f}  (rmse {out['mse'] ** 0.5:.1%} of deployed capital)")
+    print(f"mse {out['mse']:.5f}  (rmse {out['mse'] ** 0.5:.1%} in return points)")
     table((name, out[name]) for name in ("wallet", "mimic"))
-    warn_dropped("mimic", out["mimic"])
     print("strategy mimic, params:")
     for k, v in out["params"].items():
         print(f"  {k} = {v}")
 
 
+ALWAYS = ("U >= -margin open", "12 return >= -100%")  # printed on Hyperliquid, pass or fail
+
+
+def wallet_note(w):
+    """Prints the wallet's return at the end, its capital, and the issue #15 checks it fails."""
+    rho = w["target"].dropna()
+    final = f"{rho.iloc[-1]:.1%}" if len(rho) else "none"
+    capital = f"; capital ${w['capital']:,.0f}" if "capital" in w else ""
+    print(f"wallet return on peak own capital at the end {final}{capital}")
+    for name, ok, detail in w.get("checks", []):
+        if ok is False or VENUE == "hyperliquid" and name in ALWAYS:
+            print(f"  {'ok  ' if ok else 'FAIL'} {name}: {detail}")
+
+
 def setup(address, top, fees="real", funding=True):
-    """The wallet's curve and scores, and markets for its `top` busiest symbols that have candles."""
+    """The wallet's scores, its return on peak own capital, and markets for its `top` busiest symbols.
+
+    Besides the scores and markets: "target", the wallet's return on the
+    hourly grid from start to end (wallet_returns.ledger), NaN before its
+    first open; "capital", its capital at the end; "leverage", its median
+    leverage; and "checks", the issue #15 checks on its table.
+    """
     if VENUE == "hyperliquid":
         since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=HL_DAYS)).strftime("%Y-%m-%d")
-        eq, wallet, counts, start, end, _ = hl_curve(address, since)
+        _, wallet, counts, start, end, _ = hl_curve(address, since)
         print(f"total pnl ${wallet['pnl']:,.0f}; whole account ${wallet['start_account']:,.0f} at the start, "
               f"net deposits ${wallet['net_flows']:,.0f} since")
         if wallet["account_drift"] is not None and wallet["account_drift"] > 0.1:
@@ -1181,15 +1196,40 @@ def setup(address, top, fees="real", funding=True):
             print(f"warning: the API is missing fills worth {wallet['gap_share']:.0%} of the traded notional; "
                   "the wallet's curve may be unreliable")
     else:
-        eq, wallet, counts, start, end, _ = avantis_curve(address, fees, funding)
-    warn_dropped("wallet", wallet)
+        _, wallet, counts, start, end, _ = avantis_curve(address, fees, funding)
+    grid = hour_grid(start, end)
+    me = sys.modules[__name__]
+    if VENUE == "hyperliquid":
+        book, checks = W.run_hyperliquid(me, address, since=start, end=end, times=grid)
+    else:
+        book, checks = W.run_avantis(me, address, times=grid)
+    rho = book["return"].to_numpy(float) if len(book) else np.full(len(grid), np.nan)
+    if not np.isfinite(rho).any():
+        sys.exit(f"the wallet has no hour from {start} to {end} where its return is defined; nothing to fit")
+    capital = float(book["capital"].iloc[-1]) if len(book) else 0.0
     symbols = list(counts.index[:top])
     print(f"{counts.sum()} fills or orders, {start} to {end}; {counts.iloc[:top].sum()} of them in {', '.join(symbols)}")
     markets = load_markets(symbols, start, end)
     covered = float(counts[symbols].sum() / counts.sum())
     print(f"{covered:.0%} of the wallet's trades are in the kept markets")
-    return {"eq": eq, "wallet": wallet, "symbols": symbols, "start": start, "end": end,
-            "markets": markets, "covered_share": covered}
+    return {"wallet": wallet, "symbols": symbols, "start": start, "end": end,
+            "markets": markets, "covered_share": covered, "target": pd.Series(rho, index=grid),
+            "capital": capital, "leverage": book.attrs.get("leverage", 1.0), "checks": checks}
+
+
+def target_path(path):
+    """Where a saved fit's wallet curve is kept: beside it, <name>_target.npz."""
+    path = Path(path)
+    return path.with_name(path.stem + "_target.npz")
+
+
+def load_target(path, grid):
+    """A saved wallet curve on `grid`, or None when there is none."""
+    path = target_path(path)
+    if not path.exists():
+        return None
+    z = np.load(path)
+    return pd.Series(z["rho"], index=z["t"]).reindex(np.asarray(grid))
 
 
 def main():
@@ -1202,21 +1242,27 @@ def main():
     ap.add_argument("--venue", choices=["avantis", "hyperliquid"], default="avantis")
     ap.add_argument("--workers", type=int, help="backtest threads; default one per core")
     ap.add_argument("--fees", choices=["real", "flat"], default="real",
-                    help="Avantis wallet fees: its real closing fees, or FEE at each open and close")
+                    help="Avantis wallet fees in its account scores: its real closing fees, or FEE at each open and close")
     ap.add_argument("--funding", action=argparse.BooleanOptionalAction, default=True,
-                    help="charge an Avantis wallet its real funding")
+                    help="charge an Avantis wallet its real funding in its account scores")
     args = ap.parse_args()
 
     if args.replay:
         saved = json.loads(Path(args.replay).read_text())
         if saved.get("avbt_version") != avbt_cpp.version:
             print(f"warning: saved with avbt {saved.get('avbt_version')}, this is {avbt_cpp.version}")
+        if "fit" not in saved:
+            print("warning: this fit was made on the return on deployed capital, an old curve; "
+                  "it is rerun and scored on peak own capital")
         use_venue(saved.get("venue", "avantis"))
         markets = load_markets(list(saved["markets"]), saved["start"], saved["end"])
         grid = hour_grid(saved["start"], saved["end"])
-        rerun_scores = mimic_scores(rerun(saved, markets), markets, grid)
+        target = load_target(args.replay, grid)
+        if target is None:
+            print(f"the wallet curve file {target_path(args.replay).name} is missing, so the RMSE cannot be recomputed")
+        lever = saved["params"].get("leverage", LEVERAGE)
+        rerun_scores = mimic_scores(rerun(saved, markets), markets, grid, target, lever)
         table((("saved", saved["mimic"]), ("rerun", rerun_scores)))
-        warn_dropped("rerun", rerun_scores)
         return
 
     if not args.address:
@@ -1227,25 +1273,31 @@ def main():
     symbols, markets, start, end = w["symbols"], w["markets"], w["start"], w["end"]
     costs = {s: avbt_cpp.Costs(FEE, FEE) for s in symbols}
     grid = hour_grid(start, end)
-    target = on_grid(w["eq"], grid)
+    target = w["target"]
+    lever = float(np.clip(w["leverage"], 1, 100))
+    knobs = {**KNOBS, "leverage": sorted({*KNOBS["leverage"], lever})}
 
     t0 = time.time()
-    # Start on the wallet's usual side: with no filter on, both sides pass and it never opens.
-    first = {**START, "side": -1 if w["wallet"]["short_share"] > 0.5 else 1}
+    # Start on the wallet's usual side and leverage: with no filter on, both sides pass and it never opens.
+    first = {**START, "side": -1 if w["wallet"]["short_share"] > 0.5 else 1, "leverage": lever}
     best, best_mse = fit(markets, costs, target, grid, first, args.restarts, args.passes,
-                         workers=args.workers)
+                         workers=args.workers, knobs=knobs)
+    mimic = mimic_scores(backtest(best, markets, costs), markets, grid, target, best["leverage"])
     out = {"address": address, "venue": VENUE, "avbt_version": avbt_cpp.version, "strategy": "mimic",
-           "params": {**best, "leverage": LEVERAGE},
+           "fit": "own", "params": best,
            "markets": symbols, "covered_share": w["covered_share"], "start": start, "end": end,
            "costs": {"open_fee": FEE, "close_fee": FEE},
            "wallet_costs": {"fees": args.fees, "funding": args.funding},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": RISK, "hard_stop": 1.0,
                         "scale_risk_with_leverage": True},
-           "mse": best_mse, "wallet": w["wallet"], "mimic": mimic_scores(backtest(best, markets, costs), markets, grid)}
+           "mse": best_mse, "wallet": {**w["wallet"], "own": own_scores(target)}, "mimic": mimic}
     path = CACHE / f"mimic_{'hl_' if VENUE == 'hyperliquid' else ''}{address}.json"
+    save_npz(target_path(path), t=np.asarray(grid, dtype="int64"), rho=target.to_numpy(float))
     save_json(path, out, indent=1)
     report(out)
+    wallet_note(w)
     print(f"\n{time.time() - t0:.0f} s; saved {path}")
+
 
 if __name__ == "__main__":
     main()

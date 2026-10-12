@@ -1,8 +1,10 @@
-"""Chart a saved mimic fit: the wallet's and the mimic's deployed-capital curves and drawdown.
+"""Chart a saved mimic fit: the wallet's and the mimic's return on peak own capital.
 
-Both curves are the return on deployed capital (the curve the fit
-minimizes), marked to market each hour, paying 0.05% per round trip. The
-tiles show both score sets: on deployed capital, and on the account.
+Both curves are the return on peak own capital (the curve the fit
+minimizes): total PnL, realized plus unrealized, over the peak of the
+trader's own money in positions, marked to market each hour and drawn
+every 4 hours and at the last hour, so the line ends on the final. The tiles
+show both score sets: on peak own capital, and on the account.
 
 Run from the repository root, after examples/mimic.py:
 
@@ -24,27 +26,43 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import mimic as M  # noqa: E402
 
+W = M.W
+
+
+def wallet_own(saved, hours):
+    """The wallet's return on `hours`: the saved curve, else rebuilt from its history."""
+    hl = saved.get("venue") == "hyperliquid"
+    path = M.CACHE / f"mimic_{'hl_' if hl else ''}{saved['address']}.json"
+    rho = M.load_target(path, hours)
+    if rho is not None:
+        return rho
+    if hl:
+        book = W.run_hyperliquid(M, saved["address"], since=saved["start"], end=saved["end"], times=hours)[0]
+    else:
+        book = W.run_avantis(M, saved["address"], times=hours)[0]
+    return pd.Series(book["return"].to_numpy(float) if len(book) else np.nan, index=hours)
+
+
+def points(rho):
+    """A curve for the page: rounded, NaN as null."""
+    return [round(float(v), 4) if np.isfinite(v) else None for v in rho]
+
 
 def curves(saved):
-    """Both deployed-capital curves as returns on a 4-hour grid, and the mimic's trades."""
-    hl = saved.get("venue") == "hyperliquid"
+    """Both returns on peak own capital every 4 hours and at the last hour, and the mimic's trades."""
     M.use_venue(saved.get("venue", "avantis"))
-    if hl:
-        eq = M.hl_curve(saved["address"], saved["start"], saved["end"])[0]
-    else:
-        wc = saved.get("wallet_costs", {"fees": "flat", "funding": False})  # older files: the flat fee
-        eq = M.avantis_curve(saved["address"], wc["fees"], wc["funding"])[0]
+    hours = M.hour_grid(saved["start"], saved["end"])
+    wallet = wallet_own(saved, hours)
     symbols = list(saved["markets"])
     markets = M.load_markets(symbols, saved["start"], saved["end"])
     r = M.rerun(saved, markets)
-    hours = M.hour_grid(saved["start"], saved["end"])
-    grid = hours[::4]
-    wallet = M.on_grid(eq, grid)
-    mimic = M.on_grid(M.mimic_deployed(r, markets, hours), grid)
+    mimic = M.mimic_own(r, markets, hours, saved["params"].get("leverage", M.LEVERAGE))
+    keep = np.unique(np.r_[np.arange(0, len(hours), 4), len(hours) - 1])
+    grid = hours[keep]
     trades = [{"m": t.instrument.split("/")[0], "side": t.side.name.lower(), "in": t.entry_time,
                "out": t.exit_time, "r": round(t.result / M.vt.ACCOUNT, 4)} for t in r.trades]
-    return {"t": grid.tolist(), "wallet": np.round(wallet, 4).tolist(),
-            "mimic": np.round(mimic, 4).tolist(), "trades": trades}
+    return {"t": grid.tolist(), "wallet": points(wallet.to_numpy()[keep]),
+            "mimic": points(mimic.to_numpy()[keep]), "trades": trades}
 
 
 def clean(x):
@@ -101,11 +119,9 @@ td,th{text-align:left;padding:6px 8px;white-space:nowrap;border-bottom:1px solid
 <h1>Wallet mimic fit</h1>
 <p class="sub" id="sub"></p>
 <div class="tiles" id="tiles"></div>
-<h2>Equity, return on deployed capital, marked to market each hour</h2>
+<h2>Return on peak own capital, marked to market each hour, drawn every 4 hours and at the last</h2>
 <div class="legend"><span><i style="background:var(--s1)"></i>Wallet</span><span><i style="background:var(--s2)"></i>Mimic</span></div>
 <div class="chart" id="eq"></div>
-<h2>Drawdown from peak</h2>
-<div class="chart" id="dd"></div>
 <div class="cols">
 <div><h2>Strategy params</h2><p class="sub" style="margin:0 0 8px">Grey rows belong to a filter that is off.</p>
 <table id="params"></table></div>
@@ -116,27 +132,31 @@ td,th{text-align:left;padding:6px 8px;white-space:nowrap;border-bottom:1px solid
 const D=/*DATA*/null, S=D.saved;
 const pct=(x,d=1)=>(x*100).toFixed(d)+"%", day=t=>new Date(t*1000).toISOString().slice(0,10);
 document.getElementById("sub").textContent=`${S.address} · ${S.markets.join(", ")} · ${S.start} to ${S.end} · `+
-  `MSE ${S.mse.toFixed(5)} (RMSE ${pct(Math.sqrt(S.mse))} of deployed capital)`+
-  " · both curves are the return on deployed capital: each hour's PnL over the notional held the hour before or opened in it"+
-  (S.venue==="hyperliquid"?" · the account scores are a time-weighted return on the whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out":"");
+  `MSE ${S.mse.toFixed(5)} (RMSE ${pct(Math.sqrt(S.mse))} in return points)`+
+  " · both curves are the return on peak own capital: total PnL, realized plus unrealized, over the most of the trader's own money ever in positions at once"+
+  (S.fit==="own"?"":" · this fit was made on the old return on deployed capital")+
+  (S.venue==="hyperliquid"?" · the wallet's margin is estimated from its current leverage setting, so its return can read high"+
+  " · the account scores are a time-weighted return on the whole Hyperliquid account, perp plus spot, with deposits and withdrawals taken out":"");
 const num=(fmt)=>x=>x==null?"–":fmt(x);
-const tiles=[["Sharpe","sharpe",num(x=>x.toFixed(2))],["Max drawdown","max_drawdown",num(pct)],["Return","return",num(pct)]];
-const sets=[["deployed","On deployed capital (the fit)"],["account","On the account: the wallet's own, the mimic's $10,000"]];
-document.getElementById("tiles").innerHTML=sets.map(([set,title])=>`<h3>${title}</h3>`+tiles.map(([k,f,fmt])=>
+const own=[["Final return","final",num(pct)],["Peak return","peak",num(pct)],["Lowest return","lowest",num(pct)]];
+const acct=[["Sharpe","sharpe",num(x=>x.toFixed(2))],["Max drawdown","max_drawdown",num(pct)],["Return","return",num(pct)]];
+const sets=[["own","On peak own capital (the fit)",own],["account","On the account: the wallet's own, the mimic's $10,000",acct]];
+document.getElementById("tiles").innerHTML=sets.map(([set,title,tiles])=>`<h3>${title}</h3>`+tiles.map(([k,f,fmt])=>
   `<div class="tile"><div class="k">${k}</div><div class="v">${fmt(S.mimic[set][f])}</div><div class="w">wallet ${fmt(S.wallet[set][f])}</div></div>`).join("")).join("")+
   `<div class="tile"><div class="k">Trades</div><div class="v">${S.mimic.trades}</div><div class="w">wallet ${S.wallet.trades}</div></div>`;
-const dd=a=>{let p=-1e9;return a.map(r=>{const e=1+r;p=Math.max(p,e);return e/p-1})};
 const NS="http://www.w3.org/2000/svg";
 function chart(id,series,fmt){
   const W=960,H=300,L=52,R=12,T=10,B=26,el=document.getElementById(id),t=D.t;
-  const all=series.flatMap(s=>s.v),lo=Math.min(0,...all),hi=Math.max(0,...all),pad=(hi-lo)*.06||.01;
+  const all=series.flatMap(s=>s.v).filter(v=>v!=null),lo=Math.min(0,...all),hi=Math.max(0,...all),pad=(hi-lo)*.06||.01;
   const y0=lo-pad,y1=hi+pad,x=i=>L+(W-L-R)*i/(t.length-1),y=v=>T+(H-T-B)*(1-(v-y0)/(y1-y0));
   let g=`<g class="grid">`,ax=`<g class="axis">`;
   for(let k=0;k<=4;k++){const v=y0+(y1-y0)*k/4;g+=`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}"/>`;
     ax+=`<text x="${L-6}" y="${y(v)+4}" text-anchor="end">${fmt(v)}</text>`}
   for(let k=0;k<=5;k++){const i=Math.round((t.length-1)*k/5);ax+=`<text x="${x(i)}" y="${H-6}" text-anchor="middle">${day(t[i])}</text>`}
   let p=g+`</g>`+ax+`</g>`;
-  for(const s of series)p+=`<path d="${s.v.map((v,i)=>(i?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1)).join("")}" fill="none" stroke="var(${s.c})" stroke-width="2" stroke-linejoin="round"/>`;
+  for(const s of series){let d="",up=false;
+    s.v.forEach((v,i)=>{if(v==null){up=false;return}d+=(up?"L":"M")+x(i).toFixed(1)+","+y(v).toFixed(1);up=true});
+    p+=`<path d="${d}" fill="none" stroke="var(${s.c})" stroke-width="2" stroke-linejoin="round"/>`}
   p+=`<line id="${id}x" y1="${T}" y2="${H-B}" stroke="var(--ink3)" stroke-dasharray="3 3" visibility="hidden"/>`;
   p+=series.map((s,j)=>`<circle id="${id}d${j}" r="4" fill="var(${s.c})" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`).join("");
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${id}">${p}<rect x="${L}" y="0" width="${W-L-R}" height="${H}" fill="transparent"/></svg><div class="tip"></div>`;
@@ -145,15 +165,15 @@ function chart(id,series,fmt){
     const b=svg.getBoundingClientRect(),sx=(ev.clientX-b.left)*W/b.width;
     const i=Math.max(0,Math.min(t.length-1,Math.round((sx-L)/(W-L-R)*(t.length-1))));
     cx.setAttribute("x1",x(i));cx.setAttribute("x2",x(i));cx.setAttribute("visibility","visible");
-    series.forEach((s,j)=>{const d=el.querySelector(`#${id}d${j}`);d.setAttribute("cx",x(i));d.setAttribute("cy",y(s.v[i]));d.setAttribute("visibility","visible")});
-    tip.innerHTML=`<b>${day(t[i])}</b><br>`+series.map(s=>`<span style="color:var(${s.c})">●</span> ${s.n} ${fmt(s.v[i])}`).join("<br>");
+    series.forEach((s,j)=>{const d=el.querySelector(`#${id}d${j}`);if(s.v[i]==null){d.setAttribute("visibility","hidden");return}
+      d.setAttribute("cx",x(i));d.setAttribute("cy",y(s.v[i]));d.setAttribute("visibility","visible")});
+    tip.innerHTML=`<b>${day(t[i])}</b><br>`+series.map(s=>`<span style="color:var(${s.c})">●</span> ${s.n} ${s.v[i]==null?"–":fmt(s.v[i])}`).join("<br>");
     tip.style.display="block";const px=x(i)*b.width/W;
     tip.style.left=(px>b.width*.6?px-tip.offsetWidth-12:px+12)+"px";tip.style.top="8px";
   });
   svg.addEventListener("pointerleave",()=>{tip.style.display="none";el.querySelectorAll("[visibility]").forEach(n=>n.setAttribute("visibility","hidden"))});
 }
 chart("eq",[{n:"Wallet",v:D.wallet,c:"--s1"},{n:"Mimic",v:D.mimic,c:"--s2"}],v=>pct(v,0));
-chart("dd",[{n:"Wallet",v:dd(D.wallet),c:"--s1"},{n:"Mimic",v:dd(D.mimic),c:"--s2"}],v=>pct(v,0));
 const groups={rsi_:"rsi_on",trend_:"trend_on",move_:"move_on",break_:"break_on",hour_:"hours_on"};
 document.getElementById("params").innerHTML="<tr><th>Param</th><th>Value</th></tr>"+Object.entries(S.params).map(([k,v])=>{
   const g=Object.keys(groups).find(p=>k.startsWith(p)),off=(g&&k!==groups[g]&&!S.params[groups[g]])||(k.endsWith("_on")&&!v);
