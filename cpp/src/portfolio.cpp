@@ -12,6 +12,16 @@ double direction(Side side) { return side == Side::Long ? 1.0 : -1.0; }
 
 }
 
+double profit_share(const std::vector<Tier>& tiers, double gross, double collateral) {
+    if (tiers.empty() || gross <= 0.0) return 0.0;
+    double roi = gross / collateral;
+    for (const Tier& t : tiers) {
+        // 1e-9 keeps a ROI on a boundary, such as 5.0, in its tier.
+        if (roi <= t.max_roi + 1e-9) return t.share * gross;
+    }
+    return tiers.back().share * gross;
+}
+
 bool Portfolio::open(const std::string& instrument, Side side, double entry_price,
                      double stop_price, double leverage,
                      double take_profit_price, Fees fees,
@@ -67,13 +77,17 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
     double open_fee = it->fees.open * size * it->entry_price;
     double holding = it->holding * fraction;
     double gross = direction(it->side) * (price - it->entry_price) * size;
+    // Priced on this part's own ROI, before holding costs; 0 with no tiers. ADR 0019.
+    double share = profit_share(it->fees.profit_share, gross, it->collateral * fraction);
     // The open fee left the balance at the open; the close fee and holding costs leave now.
     balance_ += gross - close_fee - holding;
+    // Apart, so the size-fee sums above keep their exact form.
+    balance_ -= share;
     it->holding -= holding;
     Closed closed{.instrument = it->instrument, .side = it->side,
                   .entry_price = it->entry_price, .exit_price = price, .size = size,
-                  .leverage = it->leverage, .fees = open_fee + close_fee, .holding = holding,
-                  .result = gross - close_fee - open_fee - holding, .cause = cause};
+                  .leverage = it->leverage, .fees = open_fee + close_fee + share, .holding = holding,
+                  .result = gross - close_fee - open_fee - holding - share, .cause = cause};
     if (fraction >= 1.0) {
         positions_.erase(it);
     } else {
@@ -159,7 +173,12 @@ Report Portfolio::report() const {
 }
 
 double Portfolio::unrealized(const Position& p) const {
-    return direction(p.side) * (p.mark_price - p.entry_price) * p.size - p.holding;
+    // No tiers: the size-fee form, unchanged, so equity stays bit for bit.
+    if (p.fees.profit_share.empty()) {
+        return direction(p.side) * (p.mark_price - p.entry_price) * p.size - p.holding;
+    }
+    double gross = direction(p.side) * (p.mark_price - p.entry_price) * p.size;
+    return gross - profit_share(p.fees.profit_share, gross, p.collateral) - p.holding;
 }
 
 }

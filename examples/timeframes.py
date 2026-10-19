@@ -35,6 +35,8 @@ RULES = [
 
 
 FEES = avbt_cpp.Costs(0.0001, 0.0001)  # the old default: 0.01% at open and at close
+# Upside Perps: a share of each winning close by ROI; docs.veranta.xyz/trading/upside-perps/profit-sharing
+UPSIDE = avbt_cpp.Costs(profit_share=[(2.5, 0.25), (5.0, 0.20), (15.0, 0.10), (25.0, 0.05)])
 
 
 def run(name, frames, params=None, states=None, settings=None):

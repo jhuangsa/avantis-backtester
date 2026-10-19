@@ -428,6 +428,22 @@ void test_open_and_close_fees() {
     check_value("result after fees", r.trades.at(0).result, -size - r.trades.at(0).fees);
 }
 
+void test_profit_share_fees() {
+    // Opens at 102, closes at 140 at 1x: ROI 38/102, under 250%, so 25%.
+    Bars b = flat_bars({100, 101, 102, 150, 140, 140});
+    UpDown s;
+    Markets m = one(b);
+    Costs c{.profit_share = {{2.5, 0.25}, {5.0, 0.20}}};
+    Result r = avbt::backtest(s, m, {{"X", c}}, PortfolioSettings{});
+    const auto& t = r.trades.at(0);
+    check_value("share fees", t.fees, 0.25 * t.size * 38);
+    check_value("share result", t.result, 0.75 * t.size * 38);
+    c.open_fee = 0.001;
+    bool threw = false;
+    try { avbt::backtest(s, m, {{"X", c}}, PortfolioSettings{}); } catch (const std::invalid_argument&) { threw = true; }
+    check_true("share and size fees throw", threw);
+}
+
 void test_missing_costs_throws() {
     UpDown s;
     Markets m = one(flat_bars({100, 101, 102}));
@@ -487,6 +503,7 @@ int main() {
     test_holding_costs();
     test_short_receives();
     test_open_and_close_fees();
+    test_profit_share_fees();
     test_missing_costs_throws();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;

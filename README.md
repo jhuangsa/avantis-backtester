@@ -99,7 +99,7 @@ import avbt_cpp as avbt
 | `States(start, market, trend, volatility)` | Market state labels, one row per minute from `start`. Only `state_trend` uses them. |
 | `Market(instrument, timeframes, states=None)` | One instrument, such as `"BTC"`, with its `Bars` on one or more timeframes. |
 | `Markets(markets)` | Every market, on one clock. Read `.clock`, `.timeframe`, `.instruments`. |
-| `Costs(open_fee, close_fee, hold_long=None, hold_short=None)` | Fees as fractions of the position's value, charged at the open and at the close. `hold_long` and `hold_short` give the cost of holding through each base bar, also as a fraction (positive pays, negative receives). Every market needs one. |
+| `Costs(open_fee, close_fee, hold_long=None, hold_short=None, profit_share=None)` | Fees as fractions of the position's value, charged at the open and at the close. `hold_long` and `hold_short` give the cost of holding through each base bar, also as a fraction (positive pays, negative receives). `profit_share` is a list of `(max_roi, share)` tiers: a winning close pays `share` of its profit, from the first tier whose `max_roi` reaches its ROI (2.5 is 250%); it cannot mix with size fees (ADR 0019). Every market needs one. |
 | `PortfolioSettings(starting_balance=10000, risk_per_trade=0.01, hard_stop=0.30, scale_risk_with_leverage=False, state_delay=60)` | The account. `risk_per_trade` is the fraction of the balance lost if a stop is hit. `hard_stop`: once equity falls this fraction below the starting balance, every position closes and trading stops for good. `state_delay` is how many seconds back a strategy reads state labels (a whole number of minutes, at least 60); it counts back to the label's timestamp (the start of its minute), so for labels that arrive 7 minutes after their minute closes, set 480. |
 
 Prices must have no NaN. The engine does not check, and one NaN gives wrong levels, a dead ATR, or a NaN position. Pass minute candles through `clean_candles` in `examples/candles.py` before you resample them.
@@ -194,6 +194,10 @@ The version has three numbers, such as 0.4.2. The engine and every result carry 
 - Renaming or removing anything, or changing what a result means, raises the middle number: 0.2 to 0.3.
 - Adding something new raises the last number: 0.2.0 to 0.2.1.
 - Names stay stable within a version.
+
+Version 0.4.3:
+
+- `Costs` has a `profit_share` argument: a list of `(max_roi, share)` tiers, for venues such as Upside Perps that take a share of each winning close instead of a fee on size (ADR 0019). It defaults to none, and then results are the same as in 0.4.2. `Trade.fees` includes the profit share, and equity subtracts the share an open position would owe at its mark. `ValueError` is raised for tiers beside a non-zero `open_fee` or `close_fee`, a `max_roi` of 0 or less or not strictly increasing, a `share` outside [0, 1], or a value that is not finite.
 
 Version 0.4.2:
 

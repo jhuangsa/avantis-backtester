@@ -275,7 +275,7 @@ def test_param_type():
 
 def test_old_optimize_gone_and_version():
     assert not hasattr(avbt, "optimize_state_trend")
-    assert avbt.version == "0.4.2"
+    assert avbt.version == "0.4.3"
 
 
 def test_walk_forward(setup):

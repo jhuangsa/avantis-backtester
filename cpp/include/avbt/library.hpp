@@ -7,6 +7,7 @@
 // the strategy and a detail::<name>_info() that names its params. To add a
 // strategy, add its file, include it here, and list its info in library().
 #include "avbt/library/band_scalper.hpp"
+#include "avbt/library/buy_hold.hpp"
 #include "avbt/library/dip_basket.hpp"
 #include "avbt/library/dip_buyer.hpp"
 #include "avbt/library/failed_breakout_fade.hpp"
@@ -23,6 +24,7 @@ namespace avbt {
 inline std::vector<StrategyInfo> library() {
     return {
         detail::band_scalper_info(),
+        detail::buy_hold_info(),
         detail::dip_basket_info(),
         detail::dip_buyer_info(),
         detail::failed_breakout_fade_info(),

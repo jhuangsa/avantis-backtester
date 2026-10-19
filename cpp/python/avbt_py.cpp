@@ -442,16 +442,27 @@ PYBIND11_MODULE(avbt_cpp, m) {
 
     py::class_<avbt::Costs>(m, "Costs")
         .def(py::init([](double open_fee, double close_fee, const std::optional<InArray>& hold_long,
-                         const std::optional<InArray>& hold_short) {
-                 return avbt::Costs{open_fee, close_fee, hold_long ? to_vector(*hold_long) : std::vector<double>{},
-                                    hold_short ? to_vector(*hold_short) : std::vector<double>{}};
+                         const std::optional<InArray>& hold_short,
+                         const std::optional<std::vector<std::pair<double, double>>>& profit_share) {
+                 avbt::Costs c{open_fee, close_fee, hold_long ? to_vector(*hold_long) : std::vector<double>{},
+                               hold_short ? to_vector(*hold_short) : std::vector<double>{}, {}};
+                 if (profit_share) {
+                     for (auto [roi, share] : *profit_share) c.profit_share.push_back({roi, share});
+                 }
+                 avbt::check_profit_share(c);
+                 return c;
              }),
              py::arg("open_fee") = 0.0, py::arg("close_fee") = 0.0, py::arg("hold_long") = py::none(),
-             py::arg("hold_short") = py::none())
+             py::arg("hold_short") = py::none(), py::arg("profit_share") = py::none())
         .def_readonly("open_fee", &avbt::Costs::open_fee)
         .def_readonly("close_fee", &avbt::Costs::close_fee)
         .def_property_readonly("hold_long", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_long)); })
-        .def_property_readonly("hold_short", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_short)); });
+        .def_property_readonly("hold_short", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_short)); })
+        .def_property_readonly("profit_share", [](const avbt::Costs& c) {
+            std::vector<std::tuple<double, double>> out;
+            for (const avbt::Tier& t : c.profit_share) out.emplace_back(t.max_roi, t.share);
+            return out;
+        });
 
     py::class_<avbt::Trade>(m, "Trade")
         .def_readonly("instrument", &avbt::Trade::instrument)

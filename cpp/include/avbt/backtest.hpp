@@ -51,7 +51,7 @@ struct Trade {
     double exit_price = 0.0;
     double size = 0.0;
     double leverage = 1.0;
-    // Open plus close fee, and holding costs, in account money.
+    // Open, close and profit-share fee, and holding costs, in account money.
     double fees = 0.0;
     double holding_costs = 0.0;
     // Account money, after fees and holding costs.
@@ -172,7 +172,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
             // A refused open (no free cash, halted, a position already) records nothing.
             const Costs& cost = costs.at(o.instrument);
             if (portfolio.open(o.instrument, o.side, open, stop, o.leverage, take,
-                               Fees{cost.open_fee, cost.close_fee},
+                               Fees{cost.open_fee, cost.close_fee, cost.profit_share},
                                o.trail_distance * open, o.take_profit_fraction, clock[t])) {
                 entry_bar[o.instrument] = t;
             }
