@@ -38,10 +38,24 @@ struct PortfolioSettings {
     int64_t state_delay = 60;
 };
 
-// Fractions of notional charged at the open fill and at the close fill.
+// One profit-share tier: closes with ROI up to max_roi pay share of the
+// profit. ROI is profit over collateral, a fraction: 2.5 is 250%. ADR 0019.
+struct Tier {
+    double max_roi = 0.0;
+    double share = 0.0;
+};
+
+// The profit share owed on a close: 0 for a loss, else the share of the
+// first tier whose max_roi reaches the ROI (the last tier above them all),
+// times the whole profit. Empty tiers owe nothing.
+double profit_share(const std::vector<Tier>& tiers, double gross, double collateral);
+
+// Fractions of notional charged at the open fill and at the close fill, and
+// the profit-share tiers; a market uses one model or the other. ADR 0016, 0019.
 struct Fees {
     double open = 0.0;
     double close = 0.0;
+    std::vector<Tier> profit_share;
 };
 
 // One open trade. A portfolio holds at most one per instrument.
@@ -91,7 +105,7 @@ struct Closed {
     double exit_price = 0.0;
     double size = 0.0;
     double leverage = 1.0;
-    // Open plus close fee on this size, and its share of the holding costs.
+    // Open, close and profit-share fee on this size, and its share of the holding costs.
     double fees = 0.0;
     double holding = 0.0;
     // Price result minus fees and holding costs.
@@ -109,7 +123,8 @@ struct Quote {
 struct Report {
     // Realized money.
     double balance = 0.0;
-    // Balance plus the unrealized result of every open position.
+    // Balance plus the unrealized result of every open position, less the
+    // profit share each would owe if closed at its mark.
     double equity = 0.0;
     // Balance not locked as collateral; what a new trade can use.
     double free_cash = 0.0;
@@ -145,7 +160,8 @@ public:
     void hold(const std::string& instrument, double rate, double price);
 
     // Closes `fraction` (0 to 1] of the instrument's position at `price`,
-    // charges the close fee and that fraction of the holding costs, and returns what closed. Returns nothing when
+    // charges the close fee, the profit share on that part's own ROI, and that
+    // fraction of the holding costs, and returns what closed. Returns nothing when
     // there is no position.
     std::optional<Closed> close(const std::string& instrument, double price,
                                 double fraction = 1.0, Cause cause = Cause::Order);

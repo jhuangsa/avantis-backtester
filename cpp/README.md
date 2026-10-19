@@ -335,7 +335,7 @@ A **state label** names the condition of a market in one minute. It is computed 
 
 ## costs.hpp: what a market charges
 
-File: `include/avbt/costs.hpp`. Decision: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md). It has no `.cpp` file.
+File: `include/avbt/costs.hpp`. Decisions: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0019](../docs/adr/0019-upside-perps-profit-share.md). It has no `.cpp` file.
 
 Costs belong to the market, not the strategy. The caller gives one `Costs` for each market.
 
@@ -347,10 +347,17 @@ Costs belong to the market, not the strategy. The caller gives one `Costs` for e
 | `close_fee` | Fraction of notional charged at the close fill. Default 0. |
 | `hold_long` | Holding cost of a long, one value per base bar: the cost of holding through that bar, as a fraction of notional. Empty means none. |
 | `hold_short` | The same for a short. |
+| `profit_share` | Profit-share tiers, each a `Tier{max_roi, share}`. Empty (the default) means none. |
 
 Holding costs are signed: positive means the position pays, negative means it receives. NaN means zero, so a holding cost never blocks a trade. Example: `hold_long` of 0.0001 on a bar charges a long 0.01% of its notional for that bar.
 
+A profit share replaces size fees on a venue such as Upside Perps. ROI is a close's gross profit over the collateral of the part closed, as a fraction: 2.5 is 250%. A loss pays 0. A win pays the share of the first tier whose `max_roi` is at least its ROI (with 1e-9 of tolerance, so a boundary is in its tier), or the last tier's share above them all, times the whole profit. Example: tiers `{{2.5, 0.25}, {5.0, 0.20}}` and a close that makes 300 on 100 of collateral (ROI 3.0) pay 20% of 300, which is 60.
+
 `MarketCosts` is `std::map<std::string, Costs>`, from instrument to costs.
+
+### `void check_profit_share(const Costs& c)`
+
+Throws `std::invalid_argument` when the tiers are not empty and `open_fee` or `close_fee` is not 0 (the two models do not mix), a `max_roi` is not positive or not strictly increasing, a `share` is outside [0, 1], or a value is not finite. The Python `Costs` constructor calls it, so bad tiers fail at once.
 
 ### `void check_costs(const Markets& markets, const MarketCosts& costs)`
 
@@ -358,7 +365,8 @@ Throws `std::invalid_argument`, naming the market, when:
 
 - a market has no `Costs`;
 - a `Costs` names an instrument that is not a market;
-- a holding list is neither empty nor one value per base bar of its market.
+- a holding list is neither empty nor one value per base bar of its market;
+- the profit share fails `check_profit_share`.
 
 A missing `Costs` is an error and not zero cost, because a backtest with no costs looks better than reality. `backtest` calls this before the first step.
 
@@ -393,7 +401,11 @@ Chosen once, fixed for the run.
 
 ### `struct Fees`
 
-The two fees of one position, as fractions of notional: `open` and `close`. Both default to 0. The backtest fills them from the market's `Costs`.
+The fees of one position: `open` and `close`, as fractions of notional, both 0 by default, and `profit_share`, the tiers, empty by default. The backtest fills them from the market's `Costs`.
+
+### `double profit_share(const std::vector<Tier>& tiers, double gross, double collateral)`
+
+The profit share owed by a close with price result `gross` on `collateral`, by the rule under `Costs`. 0 for empty tiers or `gross` of 0 or less.
 
 ### `struct Position`
 
@@ -443,7 +455,7 @@ What `close` and `check` return for each closed position.
 | `entry_price`, `exit_price` | The two fill prices. |
 | `size` | Units closed. |
 | `leverage` | The position's leverage. |
-| `fees` | The open fee and the close fee on this size. |
+| `fees` | The open fee, the close fee, and the profit share on this size. |
 | `holding` | This size's share of the holding costs. |
 | `result` | Price result minus `fees` and `holding`, in account money. |
 | `cause` | Why it closed. |
@@ -459,7 +471,7 @@ A snapshot of the account.
 | Field | Meaning |
 |---|---|
 | `balance` | Realized money. |
-| `equity` | Balance plus every open position's unrealized result, minus its holding costs so far. |
+| `equity` | Balance plus every open position's unrealized result, minus its holding costs so far and the profit share it would owe if closed at its mark. |
 | `free_cash` | Balance minus all collateral. |
 | `open_positions` | Number of open positions. |
 | `halted` | True once the hard stop has fired. |
@@ -496,7 +508,7 @@ It refuses the open (returns false) when:
 - the collateral is more than the free cash;
 - `trail` is negative, or `take_profit_fraction` is not above 0 and at most 1.
 
-On success, the open fee (`fees.open × notional`) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
+On success, the open fee (`fees.open × notional`, 0 under a profit share) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
 
 **`void hold(instrument, rate, price)`**
 
@@ -504,7 +516,7 @@ Adds `rate × size × price` to the instrument's holding costs. A NaN rate adds 
 
 **`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
+Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
@@ -569,7 +581,7 @@ One closed trade.
 | `entry_price`, `exit_price` | The fill prices. |
 | `size` | Units closed in this trade. |
 | `leverage` | The position's leverage. |
-| `fees` | The open fee plus the close fee, in account money. |
+| `fees` | The open fee, the close fee, and the profit share, in account money. Price result = `result` + `fees` + `holding_costs`. |
 | `holding_costs` | The holding costs paid, in account money. Negative when the position received. |
 | `result` | Account money gained or lost, after fees and holding costs. |
 | `cause` | Why it closed (see `Cause`). |
@@ -732,6 +744,7 @@ The table. It has eight entries:
 | `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | The five Veranta strategies. Each has a `side` param, a string: `"long"` or `"short"`. Any other value throws. |
 | `state_trend` | `StateTrend`. |
 | `campaign_and_spike`, `late_day_and_rally` | `Combined` pairs. Their params start with `a.` or `b.`: `a.lag` is the first strategy's `lag`. |
+| `buy_hold` (library) | `BuyHold`, in `library/buy_hold.hpp`: one open at the first closed bar, never a close, no re-entry after a stop. Params `instrument`, `timeframe`, `side` (`"long"` or `"short"`), `stop_loss` (the fraction of collateral the stop loses, at most 0.8; the stop sits `stop_loss / leverage` from the fill), `leverage`. `test_buy_hold.cpp` tests it. |
 
 ### `Result run(name, params, markets, costs, settings)`
 
@@ -826,7 +839,7 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
-| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None)` | One market's costs. `Costs()` is zero cost. The two holding lists are numpy arrays with one value per base bar, or empty. |
+| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None)` | One market's costs. `Costs()` is zero cost. The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
 | `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
 | `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; numpy numbers and booleans work as values, and an integer too big for a C++ `int` is taken as a float; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
 | `Result`, `Trade` | The result and its trades, with the fields in the tables above, as attributes: `result.trades`, `trade.entry_time`. |
@@ -848,6 +861,12 @@ Costs are required. To run without costs, pass `Costs()` for each market.
 markets = avbt_cpp.Markets([avbt_cpp.Market("ZORA", [bars_1h])])
 costs = {"ZORA": avbt_cpp.Costs(open_fee=0.0001, close_fee=0.0001)}
 result = avbt_cpp.run("late_day_short", {"stop": 0.05}, markets, costs, avbt_cpp.PortfolioSettings())
+```
+
+Upside Perps take a share of each winning close instead:
+
+```python
+upside = avbt_cpp.Costs(profit_share=[(2.5, 0.25), (5.0, 0.20), (15.0, 0.10), (25.0, 0.05)])
 ```
 
 A new strategy needs a row in the table in `run.hpp`, and no change to the bridge.
@@ -929,6 +948,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_stop_wins_over_take_profit` | the stop fills when a bar reaches both |
 | `test_take_profit_wrong_side` | a take profit on the losing side is refused |
 | `test_fees` | the fee is charged at the open and at the close |
+| `test_profit_share`, `test_profit_share_loss` | each part of a partial close pays its own tier's share; equity subtracts the share owed at the mark; a loss pays none |
 | `test_trailing_stop`, `test_trailing_stop_short` | a trailing stop follows the best price, never moves back, and fills at its level |
 | `test_unmoved_trail_is_a_stop` | a stop-out with a trail that never moved the stop is a `Stop`, not a `TrailingStop` |
 | `test_partial_take_profit` | a partial take profit closes its fraction, and the rest has no take profit and stays open |
@@ -953,6 +973,9 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_market_ends_early` | a position in a market whose data ends is closed at its last close with `EndOfData` |
 | `test_coarser_timeframe` | a strategy on 4-hour bars acts once per 4-hour bar and fills at the open after the bar closes, never earlier |
 | `test_partial_close_keeps_entry_bar` | both parts of a partly closed trade keep the trade's entry step |
+| `test_profit_share_fees` | a trade's `fees` hold the profit share from its market's `Costs`; tiers beside a size fee throw |
+
+**`test_profit_share.cpp`**: the profit share (ADR 0019): each tier and its boundary, a short, a partial take profit and a partial close each priced on its own ROI, a liquidation paying nothing, holding costs leaving the tier unchanged, equity subtracting the share owed, a hard stop charging a winner, empty tiers giving the old fees bit for bit, the `check_profit_share` errors, and a backtest's `Trade.fees`.
 
 **`test_states.cpp`**:
 

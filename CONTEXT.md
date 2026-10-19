@@ -18,8 +18,12 @@ _Avoid_: fit, reconstruction
 One entry and the way out that closes it. It records its instrument, entry bar, exit bar, cause, and result in account money.
 
 **Fee**:
-A flat charge on every fill, as a fraction of notional, including a take profit and a stop loss. The order names the rate.
-_Avoid_: a maker and taker schedule, funding
+What the venue charges a trade. A market's `Costs` names it, never the order or the strategy. By default it is a fraction of notional at the open fill and at the close fill, including a take profit and a stop loss. On a market with a profit share, the profit share is its only fee. See ADR 0016.
+_Avoid_: a maker and taker schedule, funding, fee rate on an order
+
+**Profit share**:
+The fee a winning close pays on a venue such as Upside Perps: a share of its profit, set by the close's ROI (profit over the collateral of the part closed) and a list of tiers. A losing close pays nothing. See ADR 0019.
+_Avoid_: performance fee, profit fee, a marginal or sliced rate
 
 ### Getting in and out
 
@@ -126,7 +130,7 @@ The C++ form of a trading idea: a struct that computes its lines once and, at th
 _Avoid_: hypothesis, a rule tree
 
 **Order**:
-What a strategy returns at the close of a bar: open or close, the instrument, the side, the stop and take-profit distances, the leverage, and the fee rate. It fills at the next open. Distances are fractions of the fill price, because the strategy does not know that price yet.
+What a strategy returns at the close of a bar: open or close, the instrument, the side, the stop and take-profit distances, and the leverage. It fills at the next open. Distances are fractions of the fill price, because the strategy does not know that price yet.
 _Avoid_: signal, a fill
 
 **Market**:

@@ -65,7 +65,8 @@ def cut(costs, keep):
     hl, hs = costs.hold_long, costs.hold_short
     return avbt_cpp.Costs(costs.open_fee, costs.close_fee,
                           hl[keep] if len(hl) else None,
-                          hs[keep] if len(hs) else None)
+                          hs[keep] if len(hs) else None,
+                          costs.profit_share)
 
 
 def window(data, costs, lo: int, hi: int):

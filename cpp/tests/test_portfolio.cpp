@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -194,11 +195,37 @@ void test_take_profit_wrong_side() {
 // 0.001 * 20 * 110 = 2.2. Result 200 - 2 - 2.2 = 195.8; balance 9,998 + 200 - 2.2.
 void test_fees() {
     Portfolio p(PortfolioSettings{});
-    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), Fees{0.001, 0.001});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), Fees{0.001, 0.001, {}});
     check_value("fee at open", p.report().balance, 9998.0);
     auto closed = p.close("BTC", 110.0);
     check_value("fee result", closed->result, 195.8);
     check_value("fee balance", p.report().balance, 10195.8);
+}
+
+// Upside Perps tiers on the 20-unit long, 200 of collateral. Half closed at
+// 120: gross 200 on 100 of collateral, ROI 2.0, 25% = 50. The rest at 130:
+// gross 300, ROI 3.0, 20% = 60. A mark at 110 owes 25% of 200 = 50.
+const std::vector<avbt::Tier> upside{{2.5, 0.25}, {5.0, 0.20}, {15.0, 0.10}, {25.0, 0.05}};
+
+void test_profit_share() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), Fees{0.0, 0.0, upside});
+    p.check({Quote{"BTC", 110.0, 110.0, 110.0, 110.0}});
+    check_value("share pending", p.report().equity, 10150.0);
+    auto half = p.close("BTC", 120.0, 0.5);
+    check_value("share half fee", half->fees, 50.0);
+    check_value("share half result", half->result, 150.0);
+    auto rest = p.close("BTC", 130.0);
+    check_value("share rest fee", rest->fees, 60.0);
+    check_value("share balance", p.report().balance, 10390.0);
+}
+
+void test_profit_share_loss() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), Fees{0.0, 0.0, upside});
+    auto closed = p.close("BTC", 97.0);
+    check_value("share loss fee", closed->fees, 0.0);
+    check_value("share loss result", closed->result, -60.0);
 }
 
 // A 5 trail on the 100 long: a bar to 110 lifts the stop to 105; a bar to
@@ -287,6 +314,8 @@ int main() {
     test_short_open_past_take_profit_beats_stop();
     test_take_profit_wrong_side();
     test_fees();
+    test_profit_share();
+    test_profit_share_loss();
     test_trailing_stop();
     test_unmoved_trail_is_a_stop();
     test_trailing_stop_short();

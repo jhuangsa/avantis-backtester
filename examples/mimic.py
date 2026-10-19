@@ -724,10 +724,14 @@ def rerun(saved, markets):
     """A saved fit's backtest with its saved fees and settings, which it prints."""
     c, s = saved.get("costs", {}), saved.get("settings", {})
     fees = (c.get("open_fee", FEE), c.get("close_fee", FEE))
+    # Fits saved before profit share have no "profit_share": none.
+    share = c.get("profit_share") or None
     scale = s.get("scale_risk_with_leverage", False)
     params = {**saved["params"], "risk": s.get("risk_per_trade", saved["params"].get("risk", RISK))}
-    print(f"fees {fees[0]:.3%} open, {fees[1]:.3%} close; risk {params['risk']}; scale_risk_with_leverage {scale}")
-    return backtest(params, markets, {m: avbt_cpp.Costs(*fees) for m in saved["markets"]}, scale)
+    print(f"fees {fees[0]:.3%} open, {fees[1]:.3%} close; profit share {share}; risk {params['risk']}; "
+          f"scale_risk_with_leverage {scale}")
+    costs = {m: avbt_cpp.Costs(*fees, profit_share=share) for m in saved["markets"]}
+    return backtest(params, markets, costs, scale)
 
 
 def on_grid(series, grid):
@@ -771,8 +775,8 @@ def mimic_rows(r, grid, leverage=None):
     the base timeframe (r.timeframe), so each row opens and closes one base
     step after its trade's fills. The margin is size times entry price
     over leverage; gross is the price PnL before costs, result plus fees
-    plus holding costs. Trade.fees holds the open and the close fee
-    together, so the ledger realizes the opening fee at the close, not at
+    plus holding costs. Trade.fees holds the open, close and profit-share
+    fee together, so the ledger realizes the opening fee at the close, not at
     the open: one fee off for the length of each hold, accepted. Holding
     costs are the row's funding (+ is a cost), spread over the hold.
 
@@ -1053,10 +1057,12 @@ def main():
     best, best_mse = fit(markets, costs, target, grid, first, args.restarts, args.passes,
                          workers=args.workers, knobs=knobs)
     mimic = mimic_scores(backtest(best, markets, costs), markets, grid, target, best["leverage"])
+    used = costs[symbols[0]]  # every market has the same Costs
     out = {"address": address, "venue": VENUE, "avbt_version": avbt_cpp.version, "strategy": "mimic",
            "fit": "own", "params": best,
            "markets": symbols, "covered_share": w["covered_share"], "start": start, "end": end,
-           "costs": {"open_fee": FEE, "close_fee": FEE},
+           "costs": {"open_fee": used.open_fee, "close_fee": used.close_fee,
+                     "profit_share": used.profit_share},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": RISK, "hard_stop": 1.0,
                         "scale_risk_with_leverage": True},
            "mse": best_mse, "wallet": w["wallet"], "mimic": mimic}

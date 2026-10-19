@@ -40,3 +40,4 @@ Costs are not a strategy param, so the strategy table (`run.hpp`) has no fee ent
 - Every caller must pass costs. Code that used the default `fee_rate = 0.0001` now passes `Costs(open_fee=0.0001, close_fee=0.0001)` for each market and gets the same trades as before.
 - Holding costs add to the open position's loss, so they count toward the hard stop through equity. The liquidation price does not move.
 - The costs are the caller's data, like the bars: the library never reads them from a file or a network.
+- ADR 0019 adds a fifth field, `profit_share`, for venues that charge a share of profit instead of a fee on size.
