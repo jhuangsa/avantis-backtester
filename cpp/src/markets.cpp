@@ -10,8 +10,11 @@ namespace avbt {
 namespace {
 
 // True when a bar opening at ts starts on its timeframe's grid: a whole multiple of
-// its length, or for Month1 the first second of a UTC month.
+// its length, for Week1 a Monday 00:00 UTC, or for Month1 the first second of a
+// UTC month.
 bool on_grid(Timeframe tf, int64_t ts) {
+    // 1970-01-01 was a Thursday; the first Monday is 4 days later.
+    if (tf == Timeframe::Week1) return (ts - 4 * 86400) % seconds(tf) == 0;
     if (tf != Timeframe::Month1) return ts % seconds(tf) == 0;
     std::time_t t = static_cast<std::time_t>(ts);
     std::tm u{};

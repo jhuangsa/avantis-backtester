@@ -201,6 +201,13 @@ void test_markets_refuse_misaligned() {
     sparse_four.ts = {0, 8 * 3600};
     check_true("missing coarser bar passes", !refused({{"X", {a, sparse_four}}}));
     check_true("ragged columns refused", refused({{"X", {ragged}}}));
+    // Weeks start on Monday: 1970-01-05 is a Monday, 1970-01-01 a Thursday.
+    Bars weeks = flat_bars({100, 101});
+    weeks.timeframe = Timeframe::Week1;
+    weeks.ts = {4 * 86400, 11 * 86400};
+    check_true("Monday weeks pass", !refused({{"X", {weeks}}}));
+    weeks.ts = {0, 7 * 86400};
+    check_true("Thursday weeks refused", refused({{"X", {weeks}}}));
 }
 
 // Returns the orders listed for each clock step, and nothing on other steps.
