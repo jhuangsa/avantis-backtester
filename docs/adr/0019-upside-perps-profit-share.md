@@ -50,3 +50,5 @@ The rules:
 - The engine does not cap ROI at 2,500%, the venue's maximum take profit. A strategy that wants that cap sets its take profit.
 - The liquidation price does not move: it depends on loss, and a loss pays no profit share.
 - Examples keep their size fees, since they model other venues. A caller on Upside Perps passes `UPSIDE` or its own tiers.
+
+Note (ADR 0020): entry and exit prices are now fill prices, after the spread, so the ROI and the gross above count the spread.

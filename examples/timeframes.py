@@ -35,22 +35,27 @@ RULES = [
 
 
 FEES = avbt_cpp.Costs(0.0001, 0.0001)  # the old default: 0.01% at open and at close
+# For a market with no Veranta spread (spreads.hpp), such as DYM: no spread.
+FEES_NO_SPREAD = avbt_cpp.Costs(0.0001, 0.0001, spread=0)
 # Upside Perps: a share of each winning close by ROI; docs.veranta.xyz/trading/upside-perps/profit-sharing
 UPSIDE = avbt_cpp.Costs(profit_share=[(2.5, 0.25), (5.0, 0.20), (15.0, 0.10), (25.0, 0.05)])
 
 
 def run(name, frames, params=None, states=None, settings=None):
-    """Run strategy `name` on {instrument: [Bars]} (states: {instrument: States}), fees FEES on each."""
+    """Run strategy `name` on {instrument: [Bars]} (states: {instrument: States}), fees FEES on each.
+
+    A market with no Veranta spread runs with none (FEES_NO_SPREAD)."""
     states = states or {}
     markets = avbt_cpp.Markets([avbt_cpp.Market(k, v, states.get(k)) for k, v in frames.items()])
-    return avbt_cpp.run(name, params or {}, markets, {k: FEES for k in frames},
-                        settings or avbt_cpp.PortfolioSettings())
+    rows = avbt_cpp.veranta_spreads()
+    costs = {k: FEES if k in rows or f"{k}/USD" in rows else FEES_NO_SPREAD for k in frames}
+    return avbt_cpp.run(name, params or {}, markets, costs, settings or avbt_cpp.PortfolioSettings())
 
 
 def trade_rows(r) -> list[dict]:
     """A Result's trades as dicts; side "long"/"short", cause in snake case ("take_profit")."""
     fields = ["instrument", "entry_bar", "exit_bar", "entry_time", "exit_time", "entry_price",
-              "exit_price", "size", "leverage", "fees", "holding_costs", "result"]
+              "exit_price", "size", "leverage", "fees", "holding_costs", "spread_cost", "result"]
     return [{**{f: getattr(t, f) for f in fields}, "side": t.side.name.lower(),
              "cause": re.sub(r"(?<!^)([A-Z])", r"_\1", t.cause.name).lower()} for t in r.trades]
 

@@ -69,20 +69,23 @@ def bars(tf, n, seed):
     return avbt.Bars(tf, ts, open_, high, low, close, m, volume=np.ones(n))
 
 
-def test_run_charges_share_per_trade():
+# With a spread, ROI counts the fill prices (ADR 0020).
+@pytest.mark.parametrize("spread", [0.0, 0.002])
+def test_run_charges_share_per_trade(spread):
     n = 6000
     m1 = bars(avbt.Timeframe.Min1, n, 3)
     h1 = bars(avbt.Timeframe.Hour1, n // 60, 4)
     codes = np.zeros(n, dtype=np.uint8)
     market = avbt.Market("DYM", [m1, h1], avbt.States(START, codes, codes, codes))
     hold = np.full(n, 1e-6)
-    costs = {"DYM": avbt.Costs(hold_long=hold, hold_short=hold, profit_share=UPSIDE)}
+    costs = {"DYM": avbt.Costs(hold_long=hold, hold_short=hold, profit_share=UPSIDE, spread=spread)}
     r = avbt.run("spike_short", {"spike": 0.0}, avbt.Markets([market]), costs)
     wins = losses = 0
     for t in r.trades:
         gross = t.result + t.fees + t.holding_costs
         sign = 1 if t.side == avbt.Side.Long else -1
         assert gross == pytest.approx(sign * (t.exit_price - t.entry_price) * t.size)
+        assert t.spread_cost >= 0 and (t.spread_cost > 0) == (spread > 0)
         if gross <= 0:
             losses += 1
             assert t.fees == 0

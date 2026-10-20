@@ -45,7 +45,7 @@ int main() {
     s.prepare(m);
     check("no order on undefined lines", s.decide(5 * 3600, Report{}, {}).empty());
 
-    Result r = backtest(s, m, MarketCosts{{"ETH", Costs{}}}, PortfolioSettings{});
+    Result r = backtest(s, m, MarketCosts{{"ETH", Costs{.spread = no_spread}}}, PortfolioSettings{});
     check("it trades", !r.trades.empty());
     if (r.trades.empty()) return 1;
     const Trade& t = r.trades[0];

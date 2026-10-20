@@ -50,7 +50,7 @@ int main() {
     s.params.window = 20;
     std::vector<int> open_steps;
     bool bad = false, wrong_side = false;
-    Result r = backtest(s, m, {{"A", Costs{}}, {"B", Costs{}}}, PortfolioSettings{},
+    Result r = backtest(s, m, {{"A", Costs{.spread = no_spread}}, {"B", Costs{.spread = no_spread}}}, PortfolioSettings{},
                         [&](int t, const std::vector<Position>&, const std::vector<Order>& orders) {
         for (const Order& o : orders) {
             if (o.kind != Order::Kind::Open) continue;

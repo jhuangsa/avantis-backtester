@@ -62,6 +62,7 @@ struct Fees {
 struct Position {
     std::string instrument;
     Side side = Side::Long;
+    // The fill price, after the spread.
     double entry_price = 0.0;
     // Units of the instrument; notional is size * entry_price.
     double size = 0.0;
@@ -74,9 +75,9 @@ struct Position {
     double leverage = 1.0;
     // Holding costs so far, account money; positive means the position pays.
     double holding = 0.0;
-    // Where the loss reaches liquidation_loss of the collateral.
+    // Where the oracle loss reaches liquidation_loss of the collateral.
     double liquidation_price = 0.0;
-    // The last close seen for the instrument; values the unrealized result.
+    // The last oracle close seen for the instrument; values the unrealized result.
     double mark_price = 0.0;
     // Price gap the stop keeps behind the best high (low for a short); 0 for
     // a stop that never moves.
@@ -89,6 +90,11 @@ struct Position {
     // UTC seconds of the entry fill; unknown_time when unknown. A strategy
     // restarted live reads it to find the signal bar of a time exit.
     int64_t entry_time = unknown_time;
+    // The last half-spread seen for the instrument: the entry bar's, then
+    // each quote's. The hard stop closes with it. ADR 0020.
+    double spread = 0.0;
+    // The spread paid at the entry fill on the size still open, account money.
+    double spread_cost = 0.0;
 };
 
 // What closed a position. Order is a strategy's close order; EndOfData is
@@ -101,6 +107,7 @@ enum class Cause { Stop, TakeProfit, Liquidation, HardStop, Order, EndOfData,
 struct Closed {
     std::string instrument;
     Side side = Side::Long;
+    // Fill prices, after the spread.
     double entry_price = 0.0;
     double exit_price = 0.0;
     double size = 0.0;
@@ -108,15 +115,20 @@ struct Closed {
     // Open, close and profit-share fee on this size, and its share of the holding costs.
     double fees = 0.0;
     double holding = 0.0;
+    // Spread paid at both fills on this size; already inside the price
+    // result. ADR 0020.
+    double spread_cost = 0.0;
     // Price result minus fees and holding costs.
     double result = 0.0;
     Cause cause = Cause::Order;
 };
 
-// One instrument's bar, handed to Portfolio::check.
+// One instrument's bar, handed to Portfolio::check, with the half-spread
+// its fills pay. ADR 0020.
 struct Quote {
     std::string instrument;
     double open = 0.0, high = 0.0, low = 0.0, close = 0.0;
+    double spread = 0.0;
 };
 
 // A snapshot of the account.
@@ -141,7 +153,10 @@ public:
 
     // Opens a position sized so a fill at the stop loses risk_per_trade of
     // the balance (times leverage with scale_risk_with_leverage); the fee is not part of the sizing. The open fee comes out
-    // of the balance. A NaN take profit means none: NaN, not std::optional,
+    // of the balance. entry_price is the oracle price; the fill is
+    // entry_price * (1 + spread) for a long, (1 - spread) for a short. The
+    // stop, take profit and trail stay on oracle prices; the size counts
+    // the spread at both fills, the entry bar's spread at the stop. ADR 0020. A NaN take profit means none: NaN, not std::optional,
     // because the indicators already use NaN for "no value" and Position
     // stays a plain struct of doubles. Returns false, and opens nothing,
     // when the portfolio has halted, the instrument already has a position,
@@ -153,18 +168,19 @@ public:
               double stop_price, double leverage,
               double take_profit_price = std::nan(""), Fees fees = {},
               double trail = 0.0, double take_profit_fraction = 1.0,
-              int64_t entry_time = unknown_time);
+              int64_t entry_time = unknown_time, double spread = 0.0);
 
     // Adds rate * size * price to the position's holding costs. NaN adds
     // nothing; no position does nothing.
     void hold(const std::string& instrument, double rate, double price);
 
-    // Closes `fraction` (0 to 1] of the instrument's position at `price`,
-    // charges the close fee, the profit share on that part's own ROI, and that
+    // Closes `fraction` (0 to 1] of the instrument's position at the oracle
+    // `price` moved against it by `spread`, charges the close fee, the profit share on that part's own ROI, and that
     // fraction of the holding costs, and returns what closed. Returns nothing when
     // there is no position.
     std::optional<Closed> close(const std::string& instrument, double price,
-                                double fraction = 1.0, Cause cause = Cause::Order);
+                                double fraction = 1.0, Cause cause = Cause::Order,
+                                double spread = 0.0);
 
     // Applies one bar per instrument, in this order: each position's stop
     // and take profit (at the level, or at the open when the bar gaps past
@@ -173,7 +189,9 @@ public:
     // the hard stop on equity at the closes. A position the bar left open
     // then trails its stop toward the bar's best price, never back, so the
     // new stop counts from the next bar. Instruments without a quote keep
-    // their last mark. Returns every position it closed.
+    // their last mark. Levels trigger on the oracle prices; fills pay the
+    // quote's spread, except liquidation; the hard stop pays each
+    // position's last spread. Returns every position it closed.
     std::vector<Closed> check(const std::vector<Quote>& quotes);
 
     Report report() const;

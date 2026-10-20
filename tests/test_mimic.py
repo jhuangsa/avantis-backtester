@@ -1096,7 +1096,7 @@ P_LONG = {**M.START, "side": 1, "hold": 4, "stop_atrs": 8, "tp_atrs": 12, "timef
 
 def test_fit_moves_leverage_toward_the_wallets(monkeypatch, hl):
     markets, grid = sine_markets(ts(LO))
-    costs = {"BTC": avbt_cpp.Costs(FEE, FEE)}
+    costs = {"BTC": avbt_cpp.Costs(FEE, FEE, spread=0)}
     target = M.mimic_own(M.backtest({**P_LONG, "leverage": 10}, markets, costs), markets, grid, 10)
     monkeypatch.setattr(M, "KNOBS", {"leverage": [1, 3, 10, 30], "hold": [4]})
     best, mse = M.fit(markets, costs, target, grid, {**P_LONG, "leverage": 1}, restarts=0, passes=2, workers=1)
@@ -1212,7 +1212,7 @@ def test_wallet_note_prints_the_return_capital_and_hyperliquid_checks(hl, capsys
 
 def own_main(monkeypatch, tmp_path, leverage=7.0):
     markets, grid = sine_markets(ts(LO))
-    costs = {"BTC": avbt_cpp.Costs(FEE, FEE)}
+    costs = {"BTC": avbt_cpp.Costs(FEE, FEE, spread=0)}
     target = M.mimic_own(M.backtest({**P_LONG, "leverage": 10}, markets, costs), markets, grid, 10) * 1.1
     rho = target.to_numpy()
     scores = M.own_scores(book(rho, 100 * np.nan_to_num(rho), np.full(len(rho), 100.0), int(grid[0])))
@@ -1501,7 +1501,7 @@ def test_mimic_book_is_the_ledger_of_the_mimic_rows(hl):
 
 def test_mimic_scores_are_flat_own_scores_and_trades(hl):
     markets, grid = sine_markets(ts(LO))
-    r = M.backtest({**P_LONG, "leverage": 10}, markets, {"BTC": avbt_cpp.Costs(FEE, FEE)})
+    r = M.backtest({**P_LONG, "leverage": 10}, markets, {"BTC": avbt_cpp.Costs(FEE, FEE, spread=0)})
     target = M.mimic_own(r, markets, grid, 10)
     s = M.mimic_scores(r, markets, grid, target.to_numpy(), 10)
     assert set(s) == set(M.SCORE_KEYS) | {"trades"}

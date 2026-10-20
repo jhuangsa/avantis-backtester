@@ -101,7 +101,8 @@ cpp/
 │   ├── indicators.hpp        Timeframe, Bars, last_closed, Side, Field, and the indicators
 │   ├── states.hpp            state labels and state_at
 │   ├── markets.hpp           Market and Markets
-│   ├── costs.hpp             Costs, MarketCosts, check_costs
+│   ├── costs.hpp             Costs, MarketCosts, Spread, check_costs
+│   ├── spreads.hpp           Veranta's default spread per market
 │   ├── portfolio.hpp         the account: positions, levels, fees, holding costs, liquidation, hard stop
 │   ├── backtest.hpp          Order, Trade, Result, the Strategy concept, the backtest loop
 │   ├── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
@@ -122,6 +123,7 @@ Each header includes the ones below it:
 optimize.hpp ───► backtest.hpp
 run.hpp ────────► strategies.hpp ─► backtest.hpp
 backtest.hpp ───► costs.hpp ─────► markets.hpp
+              │               └─► spreads.hpp
               └─► version.hpp
 strategies.hpp ─► backtest.hpp ─► portfolio.hpp ─► indicators.hpp
                               └─► markets.hpp ───► indicators.hpp
@@ -172,14 +174,17 @@ Everything happens in clock order. The **clock** is every base bar open of every
 for each step t of the clock, from the first to the last:
 
   1. FILL      Orders the strategy returned at step t-1 fill at the open of
-               their own market's base bar. Closes fill before opens. An order
-               for a market with no bar at step t is dropped.
+               their own market's base bar, moved against the trade by the
+               bar's spread. Closes fill before opens. An order for a market
+               with no bar at step t is dropped.
   2. CHECK     The portfolio checks every open position against its own
                market's base bar: stop, take profit, liquidation, then the
-               hard stop. This includes the bar a position opened on.
+               hard stop. This includes the bar a position opened on. Levels
+               trigger on the oracle prices; fills pay the bar's spread,
+               except liquidation.
   3. END       A market whose data ends at step t, before the run's last step,
-               has its position closed at its last close. The cause is
-               EndOfData.
+               has its position closed at its last close, less the spread.
+               The cause is EndOfData.
   4. RECORD    Equity at the close of step t is saved.
   5. DECIDE    The strategy gets `now`, the UTC second at the close of step t,
                and returns orders. They wait for step 1 of the next step.
@@ -335,7 +340,7 @@ A **state label** names the condition of a market in one minute. It is computed 
 
 ## costs.hpp: what a market charges
 
-File: `include/avbt/costs.hpp`. Decisions: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0019](../docs/adr/0019-upside-perps-profit-share.md). It has no `.cpp` file.
+Files: `include/avbt/costs.hpp`, `include/avbt/spreads.hpp`. Decisions: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0019](../docs/adr/0019-upside-perps-profit-share.md), [ADR 0020](../docs/adr/0020-every-fill-pays-the-spread.md). They have no `.cpp` file.
 
 Costs belong to the market, not the strategy. The caller gives one `Costs` for each market.
 
@@ -348,12 +353,28 @@ Costs belong to the market, not the strategy. The caller gives one `Costs` for e
 | `hold_long` | Holding cost of a long, one value per base bar: the cost of holding through that bar, as a fraction of notional. Empty means none. |
 | `hold_short` | The same for a short. |
 | `profit_share` | Profit-share tiers, each a `Tier{max_roi, share}`. Empty (the default) means none. |
+| `spread` | The half-spread each fill pays, as a fraction of price. `nullopt` (the default): Veranta's row for the market. Otherwise the caller's: empty for none, one value for every bar, or one value per base bar. |
+| `max_spread` | A cap on the half-spread. NaN (the default): no cap, or the row's cap when `spread` is `nullopt`. |
 
 Holding costs are signed: positive means the position pays, negative means it receives. NaN means zero, so a holding cost never blocks a trade. Example: `hold_long` of 0.0001 on a bar charges a long 0.01% of its notional for that bar.
 
 A profit share replaces size fees on a venue such as Upside Perps. ROI is a close's gross profit over the collateral of the part closed, as a fraction: 2.5 is 250%. A loss pays 0. A win pays the share of the first tier whose `max_roi` is at least its ROI (with 1e-9 of tolerance, so a boundary is in its tier), or the last tier's share above them all, times the whole profit. Example: tiers `{{2.5, 0.25}, {5.0, 0.20}}` and a close that makes 300 on 100 of collateral (ROI 3.0) pay 20% of 300, which is 60.
 
+The spread moves every fill against the trade: a long opens at `P × (1 + s)` and closes at `P × (1 − s)`, a short the other way, where `P` is the oracle price and `s` the bar's half-spread, `min(value, max_spread)`. Example: `spread = {0.0005}` opens a long at 100 at 100.05. Write `.spread = avbt::no_spread` for none. `.spread = {}` is `nullopt`, the table, not none.
+
 `MarketCosts` is `std::map<std::string, Costs>`, from instrument to costs.
+
+### `struct Spread`, `Spread spread_of(const std::string& market, const Costs& c)`
+
+`spread_of` reads a market's spread from its `Costs`, or from the table when `spread` is `nullopt`, and throws `std::invalid_argument` when the market has no row. `Spread::at(i)` is the half-spread on base bar `i`. The backtest builds one per market before the first step.
+
+### `void check_spread(const Costs& c)`
+
+Throws `std::invalid_argument` when a spread value is not finite and in [0, 1), or `max_spread` is neither NaN nor finite and at least 0. NaN is an error here, unlike in the holding costs. The Python `Costs` constructor calls it.
+
+### spreads.hpp: `SpreadRow`, `veranta_spreads()`, `veranta_spread(instrument)`
+
+The table of Veranta's default spreads, one `SpreadRow{market, spread, max_spread, read_on}` per market. `market` is the pair name, such as `"BTC/USD"` or `"USD/JPY"`. `veranta_spread` finds the row named `instrument`, then `instrument + "/USD"`, so `"BTC"` finds `"BTC/USD"`. The rows come from Veranta's risk API with a small order; markets closed when it was read have no row. `examples/veranta_spreads.py` reads the API again and rewrites the rows.
 
 ### `void check_profit_share(const Costs& c)`
 
@@ -366,7 +387,9 @@ Throws `std::invalid_argument`, naming the market, when:
 - a market has no `Costs`;
 - a `Costs` names an instrument that is not a market;
 - a holding list is neither empty nor one value per base bar of its market;
-- the profit share fails `check_profit_share`.
+- the profit share fails `check_profit_share`;
+- the spread fails `check_spread`, or its column is not of size 0, 1, or one per base bar;
+- `spread` is `nullopt` and the market has no row in the table.
 
 A missing `Costs` is an error and not zero cost, because a backtest with no costs looks better than reality. `backtest` calls this before the first step.
 
@@ -374,7 +397,7 @@ A missing `Costs` is an error and not zero cost, because a backtest with no cost
 
 ## portfolio.hpp: the account
 
-Files: `include/avbt/portfolio.hpp`, `src/portfolio.cpp`. Decisions: [ADR 0008](../docs/adr/0008-a-portfolio-scores-in-account-terms.md), [ADR 0014](../docs/adr/0014-a-stop-may-trail-and-a-take-profit-may-close-part.md), [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md).
+Files: `include/avbt/portfolio.hpp`, `src/portfolio.cpp`. Decisions: [ADR 0008](../docs/adr/0008-a-portfolio-scores-in-account-terms.md), [ADR 0014](../docs/adr/0014-a-stop-may-trail-and-a-take-profit-may-close-part.md), [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0020](../docs/adr/0020-every-fill-pays-the-spread.md).
 
 The portfolio is the trading account. It holds the balance and the open positions, and it applies the rules of Veranta, the exchange whose rules this backtester copies. Strategies never call it. Only the backtest loop does.
 
@@ -415,7 +438,7 @@ One open trade. The portfolio holds at most one per instrument.
 |---|---|
 | `instrument` | Which market. |
 | `side` | Long or short. |
-| `entry_price` | The fill price. |
+| `entry_price` | The fill price, after the spread. |
 | `size` | Units of the instrument. Notional = `size × entry_price`. |
 | `collateral` | Balance locked: `notional / leverage`. |
 | `stop_price` | The stop level. |
@@ -423,12 +446,14 @@ One open trade. The portfolio holds at most one per instrument.
 | `fees` | The `Fees` charged at the open and at the close. |
 | `leverage` | The leverage the position opened with. |
 | `holding` | Holding costs so far, in account money. Positive means the position has paid. |
-| `liquidation_price` | Where the loss reaches 85% of the collateral. |
-| `mark_price` | The last close seen; it values the unrealized result. |
+| `liquidation_price` | Where the loss reaches 85% of the collateral, counted from the fill price. |
+| `mark_price` | The last oracle close seen; it values the unrealized result. |
 | `trail` | The price gap the stop keeps behind the best high (low for a short). 0: the stop never moves. |
 | `trailed` | True once the trail has moved the stop. Only then is a stop-out a `TrailingStop`; otherwise it is a `Stop`. |
 | `take_profit_fraction` | The fraction of the position the take profit closes. Below 1, the take profit fires once and the rest runs on its stop. |
 | `entry_time` | UTC second of the entry fill, or `unknown_time` (the lowest `int64_t`) when it is not known. 0 is a real time. |
+| `spread` | The last half-spread seen for the market: the entry bar's, then each quote's. The hard stop closes with it. |
+| `spread_cost` | The spread paid at the entry fill on the size still open, in account money. |
 
 ### `enum class Cause`
 
@@ -452,17 +477,18 @@ What `close` and `check` return for each closed position.
 | Field | Meaning |
 |---|---|
 | `instrument`, `side` | As in `Position`. |
-| `entry_price`, `exit_price` | The two fill prices. |
+| `entry_price`, `exit_price` | The two fill prices, after the spread. |
 | `size` | Units closed. |
 | `leverage` | The position's leverage. |
 | `fees` | The open fee, the close fee, and the profit share on this size. |
 | `holding` | This size's share of the holding costs. |
+| `spread_cost` | The spread paid at both fills on this size: the entry part times the fraction closed, plus size × oracle exit × spread. 0 at the exit for a liquidation. Already inside the price result. |
 | `result` | Price result minus `fees` and `holding`, in account money. |
 | `cause` | Why it closed. |
 
 ### `struct Quote`
 
-One instrument's bar, handed to `check`: `instrument`, `open`, `high`, `low`, `close`.
+One instrument's bar, handed to `check`: `instrument`, `open`, `high`, `low`, `close`, and `spread`, the bar's half-spread (0 by default).
 
 ### `struct Report`
 
@@ -482,7 +508,7 @@ Its state is private: `settings_`, `balance_`, `positions_`, and `halted_`. Only
 
 **`Portfolio(PortfolioSettings settings)`**: the constructor. The balance starts at `starting_balance`.
 
-**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1)`**
+**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1, entry_time = unknown_time, spread = 0)`**
 
 Opens a position and returns true, or opens nothing and returns false.
 
@@ -490,12 +516,15 @@ It sizes the position so that a fill at the stop loses `risk_per_trade` of the b
 
 ```
 risk       = risk_per_trade × balance
-distance   = the gap between entry and stop, on the losing side
+fill       = entry_price × (1 + dir × spread)        dir: +1 long, -1 short
+distance   = dir × (fill − stop_price × (1 − dir × spread))
 size       = risk / distance
-collateral = size × entry_price / leverage
+collateral = size × fill / leverage
 ```
 
-Example: balance 10,000, risk 1%, a short at 1.00 with a stop at 1.05. Risk = 100, distance = 0.05, size = 2,000 units, notional = 2,000, collateral at leverage 1 = 2,000. The fee is not part of the sizing.
+`entry_price` is the oracle price. With no spread, `distance` is the gap between entry and stop. With a spread, it is the loss per unit if the stop fills at its level on a bar with the same spread, so that fill still loses exactly the risk.
+
+Example: balance 10,000, risk 1%, a short at 1.00 with a stop at 1.05, no spread. Risk = 100, distance = 0.05, size = 2,000 units, notional = 2,000, collateral at leverage 1 = 2,000. The fee is not part of the sizing.
 
 It refuses the open (returns false) when:
 
@@ -508,15 +537,15 @@ It refuses the open (returns false) when:
 - the collateral is more than the free cash;
 - `trail` is negative, or `take_profit_fraction` is not above 0 and at most 1.
 
-On success, the open fee (`fees.open × notional`, 0 under a profit share) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
+The stop, take profit and trail stay on oracle prices; the checks above use the fill. On success, the open fee (`fees.open × notional` at the fill, 0 under a profit share) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the fill. At leverage 1 that is an 85% price move.
 
 **`void hold(instrument, rate, price)`**
 
 Adds `rate × size × price` to the instrument's holding costs. A NaN rate adds nothing, and so does an instrument with no position. The backtest calls it once per base bar for each open position, with the bar's close as the price.
 
-**`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order)`**
+**`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order, spread = 0)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
+Closes `fraction` (from 0 to 1) of the instrument's position at the oracle `price` moved against it by `spread`: `price × (1 − dir × spread)`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
@@ -527,9 +556,11 @@ Applies one bar to every position that has a quote. For each position:
 3. **Neither.** Mark the position at the close. With a `trail`, move the stop to the bar's high minus the trail (low plus the trail for a short), if that is better than the stop. The stop never moves back, and the new stop counts from the next bar.
 4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the trail had moved the stop, otherwise `Stop`. If that price is at or past the liquidation price, close at the liquidation price instead, with cause `Liquidation`.
 
+Levels trigger on the quote's oracle prices. The take-profit and stop fills pay the quote's `spread`; a liquidation fills at its level with none. Each position with a quote stores the quote's spread.
+
 If a bar reaches both the stop and the take profit, the stop fills. A bar does not show which price came first, so the backtest assumes the worse one ([ADR 0003](../docs/adr/0003-a-bar-with-both-levels-exits-at-the-stop.md)).
 
-After every position, it checks the **hard stop**: if equity is at or below `starting_balance × (1 - hard_stop)`, it closes every position at its mark with cause `HardStop` and sets `halted_`. A position without a quote keeps its last mark.
+After every position, it checks the **hard stop**: if equity is at or below `starting_balance × (1 - hard_stop)`, it closes every position at its mark, less its last spread, with cause `HardStop` and sets `halted_`. A position without a quote keeps its last mark.
 
 It returns every position it closed.
 
@@ -558,10 +589,10 @@ What a strategy returns at the close of a clock step. It fills at the open of th
 | `kind` | `Open` | `Order::Kind::Open` or `Order::Kind::Close`. |
 | `instrument` | | Which market. |
 | `side` | `Long` | Long or short. Used by opens only. |
-| `stop_distance` | 0 | Stop distance as a fraction of the fill price. 0.05 puts the stop 5% away, on the losing side. |
+| `stop_distance` | 0 | Stop distance as a fraction of the oracle open the order fills at, before the spread. 0.05 puts the stop 5% away, on the losing side. |
 | `take_profit_distance` | NaN | Take-profit distance as a fraction. NaN for none. |
 | `leverage` | 1 | Leverage for the position. |
-| `trail_distance` | 0 | Trailing-stop gap as a fraction of the fill price. 0 for a stop that never moves. |
+| `trail_distance` | 0 | Trailing-stop gap as a fraction of the oracle open. 0 for a stop that never moves. |
 | `take_profit_fraction` | 1 | Fraction of the position the take profit closes. 0.5 sells half and lets the rest run. |
 
 Distances are fractions, not prices, because the strategy decides before it knows the next open. The loop turns them into prices at the fill: for a short filled at 1.00 with `stop_distance = 0.05`, the stop is 1.05.
@@ -578,11 +609,12 @@ One closed trade.
 | `entry_bar`, `exit_bar` | Clock steps of the two fills: indexes into `Result::clock`. |
 | `entry_time`, `exit_time` | The UTC seconds of those two steps: `clock[entry_bar]` and `clock[exit_bar]`. |
 | `side` | Long or short. |
-| `entry_price`, `exit_price` | The fill prices. |
+| `entry_price`, `exit_price` | The fill prices: the oracle price moved against the trade by the spread. |
 | `size` | Units closed in this trade. |
 | `leverage` | The position's leverage. |
 | `fees` | The open fee, the close fee, and the profit share, in account money. Price result = `result` + `fees` + `holding_costs`. |
 | `holding_costs` | The holding costs paid, in account money. Negative when the position received. |
+| `spread_cost` | The spread paid at both fills, in account money. It is already inside the price result, so it is not in the sum above. |
 | `result` | Account money gained or lost, after fees and holding costs. |
 | `cause` | Why it closed (see `Cause`). |
 
@@ -839,9 +871,10 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
-| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None)` | One market's costs. `Costs()` is zero cost. The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
+| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None, spread=None, max_spread=nan)` | One market's costs. `Costs()` has no fees and Veranta's spread from the table; `Costs(spread=0)` is zero cost. `spread` is `None` (the table), a number (every bar), or a numpy array (one per base bar); reading it gives `None` or an array. Bad spreads raise `ValueError` (see `check_spread`). The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
 | `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
 | `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; numpy numbers and booleans work as values, and an integer too big for a C++ `int` is taken as a float; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
+| `veranta_spreads()` | The spread table as a dict `{market: (spread, max_spread, read_on)}`. |
 | `Result`, `Trade` | The result and its trades, with the fields in the tables above, as attributes: `result.trades`, `trade.entry_time`. |
 | `Side`, `Cause` | The two enums, now Python enums. `Cause` has `Stop`, `TrailingStop`, `PartialTakeProfit`, `TakeProfit`, `Liquidation`, `HardStop`, `Order`, and `EndOfData`. |
 | `version` | The engine version, the same constant C++ stamps on every `Result`. |
@@ -855,11 +888,11 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 
 The old per-strategy functions (`late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long`, `campaign_and_spike`, `late_day_and_rally`, `run_state_trend`) are gone. Call `run` with the strategy's name.
 
-Costs are required. To run without costs, pass `Costs()` for each market.
+Costs are required. To run without costs, pass `Costs(spread=0)` for each market. A market with no row in the spread table, such as ZORA, needs a spread.
 
 ```python
 markets = avbt_cpp.Markets([avbt_cpp.Market("ZORA", [bars_1h])])
-costs = {"ZORA": avbt_cpp.Costs(open_fee=0.0001, close_fee=0.0001)}
+costs = {"ZORA": avbt_cpp.Costs(open_fee=0.0001, close_fee=0.0001, spread=0.0005)}
 result = avbt_cpp.run("late_day_short", {"stop": 0.05}, markets, costs, avbt_cpp.PortfolioSettings())
 ```
 
@@ -904,7 +937,8 @@ Or skip the object: `decide(name, params, markets, positions, now, settings)` wa
 
 `decide` returns opens and rule exits only. In a backtest the portfolio handles stops, take profits, trailing stops, partial take profits, and liquidation. Live, none of that runs. The caller's system must place them on the exchange from each `Order`, once the open fills:
 
-- `stop_distance`, `take_profit_distance`, and `trail_distance` are fractions of the fill price, not prices. The caller computes the prices from the actual fill, as `backtest` does.
+- `stop_distance`, `take_profit_distance`, and `trail_distance` are fractions, not prices. `backtest` counts them from the oracle open, before the spread; live, the caller counts them from the oracle price at the fill, or from the actual fill, which sits one spread away.
+- `decide` never fills, so the spread does not change it. The exchange charges it at each fill.
 - The caller's system moves the trailing stop as the price improves, and never moves it back.
 - The caller's system closes the partial take profit: when the take profit is hit, it closes `take_profit_fraction` of the position and leaves the rest open with no take profit.
 - The caller's system watches liquidation and the hard stop. A position that the exchange closes is no longer in `positions` at the next `decide`.
@@ -954,6 +988,12 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_partial_take_profit` | a partial take profit closes its fraction, and the rest has no take profit and stays open |
 | `test_open_refuses_bad_trail_or_fraction` | an open is refused for a negative trail or a fraction outside (0, 1] |
 | `test_scale_risk_with_leverage` | with the setting on, 5x leverage gives 5 times the size and 5 times the loss at the stop |
+| `test_spread_open`, `test_spread_short_prices` | a long fills above and a short below the oracle price, at the open and at the close; the stop stays on the oracle price; the liquidation price counts from the fill |
+| `test_spread_stop_loses_risk` | a stop fill with the spread loses exactly the risk |
+| `test_spread_liquidation_has_none` | a liquidation fills at its level, with no spread |
+| `test_spread_partial_take_profit` | a partial close takes its fraction of the entry spread |
+| `test_spread_fees_on_fills`, `test_spread_stop_cap_uses_fill` | fees and the 80% cap use the fill price |
+| `test_spread_hard_stop_uses_last`, `test_spread_equity_mark` | the hard stop closes with the last spread seen; equity marks at the oracle close |
 
 **`test_backtest.cpp`**, with small test-only strategies (`UpDown`, `Script`, `FollowY`, `HalfAtTarget`):
 
@@ -974,8 +1014,12 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_coarser_timeframe` | a strategy on 4-hour bars acts once per 4-hour bar and fills at the open after the bar closes, never earlier |
 | `test_partial_close_keeps_entry_bar` | both parts of a partly closed trade keep the trade's entry step |
 | `test_profit_share_fees` | a trade's `fees` hold the profit share from its market's `Costs`; tiers beside a size fee throw |
+| `test_spread_column_and_cap`, `test_spread_every_fill` | the spread, per bar or constant and capped, reaches order opens and closes, stops, take profits, and end-of-data closes; `spread_cost` counts both fills |
+| `test_spread_validation` | `check_costs` refuses a market with no row, a column of the wrong length, NaN, a negative value, 1, and a negative cap |
 
-**`test_profit_share.cpp`**: the profit share (ADR 0019): each tier and its boundary, a short, a partial take profit and a partial close each priced on its own ROI, a liquidation paying nothing, holding costs leaving the tier unchanged, equity subtracting the share owed, a hard stop charging a winner, empty tiers giving the old fees bit for bit, the `check_profit_share` errors, and a backtest's `Trade.fees`.
+**`test_profit_share.cpp`**: the profit share (ADR 0019): each tier and its boundary, a short, a partial take profit and a partial close each priced on its own ROI, a liquidation paying nothing, holding costs leaving the tier unchanged, equity subtracting the share owed, a hard stop charging a winner, empty tiers giving the old fees bit for bit, the `check_profit_share` errors, a backtest's `Trade.fees`, and a ROI counted on the fill prices after the spread.
+
+**`test_spread.cpp`**: the spread (ADR 0020) on every fill path, the table, and the `check_costs` errors.
 
 **`test_states.cpp`**:
 

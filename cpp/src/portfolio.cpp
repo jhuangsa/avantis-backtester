@@ -25,21 +25,25 @@ double profit_share(const std::vector<Tier>& tiers, double gross, double collate
 bool Portfolio::open(const std::string& instrument, Side side, double entry_price,
                      double stop_price, double leverage,
                      double take_profit_price, Fees fees,
-                     double trail, double take_profit_fraction, int64_t entry_time) {
+                     double trail, double take_profit_fraction, int64_t entry_time,
+                     double spread) {
     if (halted_ || leverage <= 0.0 || entry_price <= 0.0 || trail < 0.0) return false;
     if (!(take_profit_fraction > 0.0 && take_profit_fraction <= 1.0)) return false;
     for (const Position& p : positions_) {
         if (p.instrument == instrument) return false;
     }
+    double dir = direction(side);
     // Distance from entry to stop, positive only when the stop is on the losing side.
-    double distance = direction(side) * (entry_price - stop_price);
-    if (distance <= 0.0) return false;
-    if (direction(side) * (take_profit_price - entry_price) <= 0.0) return false;
+    if (dir * (entry_price - stop_price) <= 0.0) return false;
+    if (dir * (take_profit_price - entry_price) <= 0.0) return false;
 
+    // The fill, and the loss per unit if the stop fills at its level. ADR 0020.
+    double fill = entry_price * (1.0 + dir * spread);
+    double distance = dir * (fill - stop_price * (1.0 - dir * spread));
     double risk = settings_.risk_per_trade * balance_;
     if (settings_.scale_risk_with_leverage) risk *= leverage;
     double size = risk / distance;
-    double collateral = size * entry_price / leverage;
+    double collateral = size * fill / leverage;
     if (risk > max_stop_loss * collateral) return false;
     if (collateral > report().free_cash) return false;
 
@@ -48,31 +52,36 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
     positions_.push_back(Position{
         .instrument = instrument,
         .side = side,
-        .entry_price = entry_price,
+        .entry_price = fill,
         .size = size,
         .collateral = collateral,
         .stop_price = stop_price,
         .take_profit_price = take_profit_price,
         .fees = fees,
         .leverage = leverage,
-        .liquidation_price = entry_price - direction(side) * liquidation_move,
+        .liquidation_price = fill - dir * liquidation_move,
         .mark_price = entry_price,
         .trail = trail,
         .take_profit_fraction = take_profit_fraction,
         .entry_time = entry_time,
+        .spread = spread,
+        .spread_cost = size * entry_price * spread,
     });
-    balance_ -= fees.open * size * entry_price;
+    balance_ -= fees.open * size * fill;
     return true;
 }
 
 std::optional<Closed> Portfolio::close(const std::string& instrument, double price,
-                                       double fraction, Cause cause) {
+                                       double fraction, Cause cause, double spread) {
     auto it = std::find_if(positions_.begin(), positions_.end(),
                            [&](const Position& p) { return p.instrument == instrument; });
     if (it == positions_.end() || fraction <= 0.0) return std::nullopt;
     fraction = std::min(fraction, 1.0);
 
     double size = it->size * fraction;
+    // The oracle price moved against the position by the spread. ADR 0020.
+    double spread_cost = it->spread_cost * fraction + size * price * spread;
+    price *= 1.0 - direction(it->side) * spread;
     double close_fee = it->fees.close * size * price;
     double open_fee = it->fees.open * size * it->entry_price;
     double holding = it->holding * fraction;
@@ -84,9 +93,11 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
     // Apart, so the size-fee sums above keep their exact form.
     balance_ -= share;
     it->holding -= holding;
+    it->spread_cost -= it->spread_cost * fraction;
     Closed closed{.instrument = it->instrument, .side = it->side,
                   .entry_price = it->entry_price, .exit_price = price, .size = size,
                   .leverage = it->leverage, .fees = open_fee + close_fee + share, .holding = holding,
+                  .spread_cost = spread_cost,
                   .result = gross - close_fee - open_fee - holding - share, .cause = cause};
     if (fraction >= 1.0) {
         positions_.erase(it);
@@ -112,6 +123,7 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
                                [&](const Position& p) { return p.instrument == q.instrument; });
         if (it == positions_.end()) continue;
         Position& p = *it;
+        p.spread = q.spread;
         bool is_long = p.side == Side::Long;
 
         // The worst price the bar reached against the position.
@@ -125,8 +137,8 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         bool past = is_long ? q.open > p.take_profit_price : q.open < p.take_profit_price;
         if (take_hit && (!stop_hit || past)) {
             double fraction = p.take_profit_fraction;
-            out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price,
-                                 fraction, fraction < 1.0 ? Cause::PartialTakeProfit : Cause::TakeProfit));
+            out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price, fraction,
+                                 fraction < 1.0 ? Cause::PartialTakeProfit : Cause::TakeProfit, q.spread));
             if (fraction >= 1.0) continue;
             // A partial close keeps p in place; the rest runs on its stop.
             p.take_profit_price = std::nan("");
@@ -143,19 +155,22 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         }
         // A bar that opens past the stop fills at the open. A gap past the
         // liquidation price too fills there: the loss never passes liquidation_loss.
+        // Liquidation is decided on the oracle fill and pays no spread. ADR 0020.
         bool gapped = is_long ? q.open < p.stop_price : q.open > p.stop_price;
         double fill = gapped ? q.open : p.stop_price;
         bool liquidated = is_long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
-        out.push_back(*close(p.instrument, liquidated ? p.liquidation_price : fill, 1.0,
-                             liquidated ? Cause::Liquidation
-                             : p.trailed ? Cause::TrailingStop : Cause::Stop));
+        if (liquidated) {
+            out.push_back(*close(p.instrument, p.liquidation_price, 1.0, Cause::Liquidation));
+            continue;
+        }
+        out.push_back(*close(p.instrument, fill, 1.0, p.trailed ? Cause::TrailingStop : Cause::Stop, q.spread));
     }
 
     double floor = settings_.starting_balance * (1.0 - settings_.hard_stop);
     if (!halted_ && report().equity <= floor) {
         while (!positions_.empty()) {
-            out.push_back(*close(positions_.front().instrument,
-                                 positions_.front().mark_price, 1.0, Cause::HardStop));
+            const Position& p = positions_.front();
+            out.push_back(*close(p.instrument, p.mark_price, 1.0, Cause::HardStop, p.spread));
         }
         halted_ = true;
     }

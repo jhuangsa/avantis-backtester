@@ -293,6 +293,120 @@ void test_scale_risk_with_leverage() {
     check_value("scaled stop loss", p.report().balance, 9500.0);
 }
 
+// Spread 4% on a long from 100, stop 75, 2x (ADR 0020). The fill is 104;
+// the stop fills at 75 * 0.96 = 72, so 100 at risk buys 100 / 32 = 3.125
+// units. Collateral 3.125 * 104 / 2 = 162.5; liquidation
+// 104 - 0.85 * 162.5 / 3.125 = 59.8.
+Portfolio spread_long(double take = std::nan(""), double fraction = 1.0) {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 75.0, 2.0, take, Fees{}, 0.0, fraction, avbt::unknown_time, 0.04);
+    return p;
+}
+
+void test_spread_open() {
+    Portfolio p = spread_long();
+    const auto& pos = p.positions().at(0);
+    check_value("spread entry", pos.entry_price, 104.0);
+    check_value("spread size", pos.size, 3.125);
+    check_value("spread collateral", pos.collateral, 162.5);
+    check_value("spread liquidation", pos.liquidation_price, 59.8);
+    check_value("spread stop stays oracle", pos.stop_price, 75.0);
+    check_value("spread stored", pos.spread, 0.04);
+    check_value("spread entry cost", pos.spread_cost, 12.5);
+}
+
+// The stop at 75 fills at 72: 3.125 * 32 = 100, exactly the risk.
+void test_spread_stop_loses_risk() {
+    Portfolio p = spread_long();
+    auto closed = p.check({Quote{"BTC", 80.0, 80.0, 70.0, 72.0, 0.04}});
+    check_true("spread stop cause", closed.size() == 1 && closed[0].cause == Cause::Stop);
+    check_value("spread stop exit", closed.at(0).exit_price, 72.0);
+    check_value("spread stop balance", p.report().balance, 9900.0);
+    // 3.125 * 100 * 0.04 + 3.125 * 75 * 0.04
+    check_value("spread stop cost", closed.at(0).spread_cost, 21.875);
+}
+
+// A gap to 50 passes the 59.8 liquidation: it fills there, no spread, and
+// loses 0.85 of the collateral.
+void test_spread_liquidation_has_none() {
+    Portfolio p = spread_long();
+    auto closed = p.check({Quote{"BTC", 50.0, 50.0, 50.0, 50.0, 0.04}});
+    check_true("spread liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("spread liq exit", closed.at(0).exit_price, 59.8);
+    check_value("spread liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("spread liq cost", closed.at(0).spread_cost, 12.5);
+}
+
+// Half at the 120 take profit, on a bar with a 2% spread: fills at 117.6.
+// 1.5625 units: gross 1.5625 * 13.6 = 21.25. Cost: half the 12.5 entry part,
+// plus 1.5625 * 120 * 0.02 = 3.75.
+void test_spread_partial_take_profit() {
+    Portfolio p = spread_long(120.0, 0.5);
+    auto closed = p.check({Quote{"BTC", 105.0, 125.0, 104.0, 122.0, 0.02}});
+    check_true("spread partial cause", closed.size() == 1 && closed[0].cause == Cause::PartialTakeProfit);
+    check_value("spread partial exit", closed.at(0).exit_price, 117.6);
+    check_value("spread partial result", closed.at(0).result, 21.25);
+    check_value("spread partial cost", closed.at(0).spread_cost, 10.0);
+    check_value("spread rest cost", p.positions().at(0).spread_cost, 6.25);
+    check_value("spread rest last", p.positions().at(0).spread, 0.02);
+}
+
+// A short fills below the oracle at open and above it at close.
+void test_spread_short_prices() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Short, 100.0, 105.0, 10.0, std::nan(""), Fees{}, 0.0, 1.0, avbt::unknown_time, 0.01);
+    check_value("short spread entry", p.positions().at(0).entry_price, 99.0);
+    auto closed = p.close("BTC", 90.0, 1.0, Cause::Order, 0.01);
+    check_value("short spread exit", closed->exit_price, 90.9);
+    check_value("short spread gross", closed->result, (99.0 - 90.9) * closed->size);
+}
+
+// Fees are on the fill prices: 0.1% of 3.125 * 104 at the open.
+void test_spread_fees_on_fills() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 75.0, 2.0, std::nan(""), Fees{0.001, 0.001, {}}, 0.0, 1.0,
+           avbt::unknown_time, 0.04);
+    check_value("spread open fee", p.report().balance, 10000.0 - 0.001 * 3.125 * 104.0);
+    auto closed = p.close("BTC", 110.0, 1.0, Cause::Order, 0.04);
+    double x = 110.0 * 0.96;
+    check_value("spread close fees", closed->fees, 0.001 * 3.125 * (104.0 + x));
+    check_value("spread identity", closed->result + closed->fees + closed->holding,
+                (x - 104.0) * 3.125);
+}
+
+// The 80% cap counts the fill. Without the spread, 3x passes: 4 units,
+// collateral 133.3, 100 < 106.7. With it, collateral 3.125 * 104 / 3 =
+// 108.3, and 100 > 86.7: refused. 2.5x gives 130, 100 < 104: opens.
+void test_spread_stop_cap_uses_fill() {
+    Portfolio p(PortfolioSettings{});
+    check_true("no spread 3x opens", p.open("ETH", Side::Long, 100.0, 75.0, 3.0));
+    check_true("spread 3x refused", !p.open("BTC", Side::Long, 100.0, 75.0, 3.0, std::nan(""), Fees{},
+                                            0.0, 1.0, avbt::unknown_time, 0.04));
+    check_true("spread 2.5x opens", p.open("BTC", Side::Long, 100.0, 75.0, 2.5, std::nan(""), Fees{},
+                                           0.0, 1.0, avbt::unknown_time, 0.04));
+}
+
+// Opened with no spread: 100 units from 100 at 1x, stop 50. A bar to 70 with
+// a 2% spread brings equity to the 7,000 floor; the hard stop closes at the
+// 70 mark less 2%: 68.6, balance 10,000 - 100 * 31.4.
+void test_spread_hard_stop_uses_last() {
+    Portfolio p(PortfolioSettings{.risk_per_trade = 0.5});
+    check_true("hard stop spread opens", p.open("BTC", Side::Long, 100.0, 50.0, 1.0));
+    auto closed = p.check({Quote{"BTC", 70.0, 70.0, 70.0, 70.0, 0.02}});
+    check_true("hard stop spread cause", closed.size() == 1 && closed[0].cause == Cause::HardStop);
+    check_value("hard stop spread exit", closed.at(0).exit_price, 68.6);
+    check_value("hard stop spread balance", p.report().balance, 6860.0);
+    check_value("hard stop spread cost", closed.at(0).spread_cost, 140.0);
+}
+
+// Equity marks at the oracle close with no spread: a mark at 100 shows only
+// the entry spread paid, 3.125 * 4 = 12.5.
+void test_spread_equity_mark() {
+    Portfolio p = spread_long();
+    p.check({Quote{"BTC", 100.0, 100.0, 100.0, 100.0, 0.04}});
+    check_value("spread equity", p.report().equity, 10000.0 - 12.5);
+}
+
 }
 
 
@@ -322,6 +436,15 @@ int main() {
     test_partial_take_profit();
     test_open_refuses_bad_trail_or_fraction();
     test_scale_risk_with_leverage();
+    test_spread_open();
+    test_spread_stop_loses_risk();
+    test_spread_liquidation_has_none();
+    test_spread_partial_take_profit();
+    test_spread_short_prices();
+    test_spread_fees_on_fills();
+    test_spread_stop_cap_uses_fill();
+    test_spread_hard_stop_uses_last();
+    test_spread_equity_mark();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

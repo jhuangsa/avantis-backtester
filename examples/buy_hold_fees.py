@@ -54,7 +54,7 @@ def expected_fee(gross: float, roi: float) -> float:
 def main() -> None:
     minutes = pd.read_csv(ROOT / "data" / "candles" / "btc_1m.csv")
     minutes = minutes.drop_duplicates("ts").sort_values("ts")
-    costs = {"BTC": UPSIDE, "PAD": avbt_cpp.Costs()}
+    costs = {"BTC": UPSIDE, "PAD": avbt_cpp.Costs(spread=0)}
     head = (f"{'month':>12} {'lev':>4} {'entry':>10} {'exit':>10} {'move%':>7} "
             f"{'collat':>8} {'gross':>9} {'roi%':>8} {'fee':>8} {'fee/gr%':>7} "
             f"{'result':>9} {'cause':>12} match")

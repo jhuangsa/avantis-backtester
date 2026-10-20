@@ -47,6 +47,7 @@ struct Trade {
     int64_t entry_time = 0;
     int64_t exit_time = 0;
     Side side = Side::Long;
+    // Fill prices: the oracle price moved against the trade by the spread.
     double entry_price = 0.0;
     double exit_price = 0.0;
     double size = 0.0;
@@ -54,6 +55,9 @@ struct Trade {
     // Open, close and profit-share fee, and holding costs, in account money.
     double fees = 0.0;
     double holding_costs = 0.0;
+    // Spread paid at both fills, in account money; already inside the
+    // price result, so not taken off again. ADR 0020.
+    double spread_cost = 0.0;
     // Account money, after fees and holding costs.
     double result = 0.0;
     Cause cause = Cause::Order;
@@ -62,7 +66,7 @@ struct Trade {
 struct Result {
     std::vector<Trade> trades;
     // Equity at the close of every clock step. Open positions are marked at
-    // the close: a mark, not a fill, so no fee.
+    // the close: a mark, not a fill, so no fee and no spread.
     std::vector<double> equity;
     // Realized money at the end; positions still open are not in it.
     double ending_balance = 0.0;
@@ -116,16 +120,19 @@ concept Strategy = requires(S s, const Markets& markets, int64_t now, const Repo
 // Runs one strategy on several markets on one clock (Markets::clock). On
 // each step t:
 // 1. Fill the orders from step t-1, closes before opens so freed collateral
-//    can pay for a new trade, each at the open of its own market's base bar.
+//    can pay for a new trade, each at the open of its own market's base bar,
+//    moved against the trade by that bar's spread.
 //    An order for a market with no bar at step t (its data has not started,
 //    or has ended) is dropped.
-// 2. Check every position's levels on its own market's base bar.
+// 2. Check every position's levels on its own market's base bar; fills pay
+//    that bar's spread.
 // 3. Close the position of a market whose data ends at this step, at its
-//    last close, unless this is the run's last step.
+//    last close less the spread, unless this is the run's last step.
 // 4. Add each open position's holding cost for its base bar.
 // 5. Record equity, then ask the strategy.
 // Orders returned on the last step never fill. The caller chooses the bars;
-// nothing is trimmed. Every market needs Costs; check_costs. ADR 0010, 0011, 0016.
+// nothing is trimmed. Every market needs Costs; check_costs. ADR 0010, 0011,
+// 0016, 0020.
 // on_step, if given, sees every step's positions and the strategy's orders.
 struct NoStep {
     void operator()(int, const std::vector<Position>&, const std::vector<Order>&) const {}
@@ -134,6 +141,8 @@ template <Strategy S, class OnStep = NoStep>
 Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
                 PortfolioSettings settings, OnStep on_step = {}) {
     check_costs(markets, costs);
+    std::map<std::string, Spread> spreads;
+    for (const auto& [name, c] : costs) spreads[name] = spread_of(name, c);
     use_settings(strategy, settings);
     Portfolio portfolio(settings);
     Result result{.timeframe = markets.timeframe(), .clock = markets.clock()};
@@ -145,7 +154,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
         int e = entry_bar[c.instrument];
         result.trades.push_back(Trade{c.instrument, e, t, result.clock[e], result.clock[t], c.side,
                                       c.entry_price, c.exit_price, c.size, c.leverage, c.fees,
-                                      c.holding, c.result, c.cause});
+                                      c.holding, c.spread_cost, c.result, c.cause});
         // A partial close leaves the rest of the trade open, with its entry bar.
         bool still_open = std::any_of(portfolio.positions().begin(), portfolio.positions().end(),
                                       [&](const Position& p) { return p.instrument == c.instrument; });
@@ -162,10 +171,12 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
             int i = markets.bar_at(o.instrument, t);
             if (i < 0) continue;
             double open = markets.base(o.instrument).open[i];
+            double spread = spreads.at(o.instrument).at(i);
             if (o.kind == Order::Kind::Close) {
-                if (auto c = portfolio.close(o.instrument, open)) record(*c, t);
+                if (auto c = portfolio.close(o.instrument, open, 1.0, Cause::Order, spread)) record(*c, t);
                 continue;
             }
+            // Levels count from the oracle open; only the fill pays the spread.
             double sign = o.side == Side::Long ? 1.0 : -1.0;
             double stop = open * (1.0 - sign * o.stop_distance);
             double take = open * (1.0 + sign * o.take_profit_distance);
@@ -173,7 +184,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
             const Costs& cost = costs.at(o.instrument);
             if (portfolio.open(o.instrument, o.side, open, stop, o.leverage, take,
                                Fees{cost.open_fee, cost.close_fee, cost.profit_share},
-                               o.trail_distance * open, o.take_profit_fraction, clock[t])) {
+                               o.trail_distance * open, o.take_profit_fraction, clock[t], spread)) {
                 entry_bar[o.instrument] = t;
             }
         }
@@ -184,7 +195,8 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
             int i = markets.bar_at(p.instrument, t);
             if (i < 0) continue;
             const Bars& b = markets.base(p.instrument);
-            quotes.push_back(Quote{p.instrument, b.open[i], b.high[i], b.low[i], b.close[i]});
+            quotes.push_back(Quote{p.instrument, b.open[i], b.high[i], b.low[i], b.close[i],
+                                   spreads.at(p.instrument).at(i)});
         }
         for (const Closed& c : portfolio.check(quotes)) record(c, t);
 
@@ -194,7 +206,8 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
                 int i = markets.bar_at(m.instrument, t);
                 bool ends = i == static_cast<int>(b.ts.size()) - 1;
                 if (!ends) continue;
-                if (auto c = portfolio.close(m.instrument, b.close[i], 1.0, Cause::EndOfData)) {
+                double spread = spreads.at(m.instrument).at(i);
+                if (auto c = portfolio.close(m.instrument, b.close[i], 1.0, Cause::EndOfData, spread)) {
                     record(*c, t);
                 }
             }

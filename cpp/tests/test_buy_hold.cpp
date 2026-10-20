@@ -38,7 +38,7 @@ Markets make(int n, F c) {
 }
 
 Result go(const Markets& m, BuyHold s, PortfolioSettings p = {}) {
-    return backtest(s, m, {{"BTC", Costs{}}, {"PAD", Costs{}}}, p);
+    return backtest(s, m, {{"BTC", Costs{.spread = no_spread}}, {"PAD", Costs{.spread = no_spread}}}, p);
 }
 
 int main() {

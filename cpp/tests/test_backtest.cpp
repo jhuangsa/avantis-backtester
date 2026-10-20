@@ -37,7 +37,7 @@ using namespace avbt;
 // Every market at the given fee, no holding costs.
 MarketCosts flat_costs(const Markets& m, double fee = 0.0) {
     MarketCosts c;
-    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee};
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee, .spread = no_spread};
     return c;
 }
 
@@ -389,7 +389,7 @@ Result held(double rate, std::size_t n = 6) {
     Bars b = flat_bars({100, 101, 102, 103, 101, 101});
     UpDown s;
     Markets m = one(b);
-    MarketCosts c{{"X", Costs{.hold_long = std::vector<double>(n, rate)}}};
+    MarketCosts c{{"X", Costs{.hold_long = std::vector<double>(n, rate), .spread = no_spread}}};
     return avbt::backtest(s, m, c, PortfolioSettings{});
 }
 
@@ -422,7 +422,7 @@ void test_open_and_close_fees() {
     Bars b = flat_bars({100, 101, 102, 103, 101, 101});
     UpDown s;
     Markets m = one(b);
-    Result r = avbt::backtest(s, m, {{"X", Costs{.open_fee = 0.001, .close_fee = 0.002}}}, PortfolioSettings{});
+    Result r = avbt::backtest(s, m, {{"X", Costs{.open_fee = 0.001, .close_fee = 0.002, .spread = no_spread}}}, PortfolioSettings{});
     double size = r.trades.at(0).size;
     check_value("fees", r.trades.at(0).fees, size * (0.001 * 102 + 0.002 * 101));
     check_value("result after fees", r.trades.at(0).result, -size - r.trades.at(0).fees);
@@ -433,7 +433,7 @@ void test_profit_share_fees() {
     Bars b = flat_bars({100, 101, 102, 150, 140, 140});
     UpDown s;
     Markets m = one(b);
-    Costs c{.profit_share = {{2.5, 0.25}, {5.0, 0.20}}};
+    Costs c{.profit_share = {{2.5, 0.25}, {5.0, 0.20}}, .spread = no_spread};
     Result r = avbt::backtest(s, m, {{"X", c}}, PortfolioSettings{});
     const auto& t = r.trades.at(0);
     check_value("share fees", t.fees, 0.25 * t.size * 38);
@@ -450,6 +450,68 @@ void test_missing_costs_throws() {
     bool threw = false;
     try { avbt::backtest(s, m, MarketCosts{}, PortfolioSettings{}); } catch (const std::invalid_argument&) { threw = true; }
     check_true("missing costs throws", threw);
+}
+
+// A spread column per bar, capped at 3.5% (ADR 0020). The open fills on bar
+// 1 at 100 * 1.02; the close on bar 3 at 100 * (1 - 0.035), the cap. The
+// stop stays at 90, on the oracle open: size 100 / (102 - 90 * 0.98).
+void test_spread_column_and_cap() {
+    Bars b = flat_bars({100, 100, 100, 100, 100, 100});
+    Script s{.at = {{0, {open_long("X", 0.1)}}, {2, {close_order("X")}}}};
+    Markets m = one(b);
+    Costs c{.spread = std::vector<double>{0.01, 0.02, 0.03, 0.04, 0.05, 0.06}, .max_spread = 0.035};
+    Result r = avbt::backtest(s, m, {{"X", c}}, PortfolioSettings{});
+    check_value("spread one trade", r.trades.size(), 1);
+    if (r.trades.empty()) return;
+    const Trade& t = r.trades[0];
+    double size = 100.0 / (102.0 - 90.0 * 0.98);
+    check_value("spread order entry", t.entry_price, 102.0);
+    check_value("spread order exit", t.exit_price, 96.5);
+    check_value("spread order size", t.size, size);
+    check_value("spread order cost", t.spread_cost, size * 100.0 * (0.02 + 0.035));
+    check_value("spread order result", t.result, size * (96.5 - 102.0));
+}
+
+// A constant 1% on three markets: X takes profit at 110 and fills at 108.9,
+// Y stops at 90 and fills at 89.1, Z's data ends at 100 and fills at 99.
+void test_spread_every_fill() {
+    Bars x = flat_bars({100, 100, 100, 100, 100, 100});
+    x.high[2] = 115;
+    Bars y = flat_bars({100, 100, 100, 100, 100, 100});
+    y.low[2] = 85;
+    Bars z = flat_bars({100, 100, 100, 100});
+    Order take{.instrument = "X", .side = Side::Long, .stop_distance = 0.1, .take_profit_distance = 0.1};
+    Script s{.at = {{0, {take, open_long("Y", 0.1), open_long("Z", 0.1)}}}};
+    Markets m = Markets::make({{"X", {x}}, {"Y", {y}}, {"Z", {z}}});
+    Costs c{.spread = std::vector<double>{0.01}};
+    Result r = avbt::backtest(s, m, {{"X", c}, {"Y", c}, {"Z", c}}, PortfolioSettings{});
+    check_value("spread three trades", r.trades.size(), 3);
+    for (const Trade& t : r.trades) {
+        check_value("spread fill entry " + t.instrument, t.entry_price, 101.0);
+        double exit = t.instrument == "X" ? 108.9 : t.instrument == "Y" ? 89.1 : 99.0;
+        double oracle = t.instrument == "X" ? 110.0 : t.instrument == "Y" ? 90.0 : 100.0;
+        check_value("spread fill exit " + t.instrument, t.exit_price, exit);
+        check_value("spread fill cost " + t.instrument, t.spread_cost, t.size * (100.0 + oracle) * 0.01);
+        check_value("spread fill identity " + t.instrument, t.result + t.fees + t.holding_costs,
+                    t.size * (t.exit_price - t.entry_price));
+    }
+}
+
+void test_spread_validation() {
+    Markets m = one(flat_bars({100, 101, 102}));
+    auto throws = [&](const Costs& c) {
+        try { check_costs(m, {{"X", c}}); } catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    check_true("spread table has no X", throws(Costs{}));
+    check_true("spread column too short", throws(Costs{.spread = std::vector<double>{0.01, 0.01}}));
+    check_true("spread nan", throws(Costs{.spread = std::vector<double>{std::nan("")}}));
+    check_true("spread negative", throws(Costs{.spread = std::vector<double>{-0.01}}));
+    check_true("spread one", throws(Costs{.spread = std::vector<double>{1.0}}));
+    check_true("max_spread negative", throws(Costs{.spread = no_spread, .max_spread = -0.01}));
+    check_true("spread none valid", !throws(Costs{.spread = no_spread}));
+    check_true("spread constant valid", !throws(Costs{.spread = std::vector<double>{0.01}}));
+    check_true("spread column valid", !throws(Costs{.spread = std::vector<double>(3, 0.01)}));
 }
 
 }
@@ -505,6 +567,9 @@ int main() {
     test_open_and_close_fees();
     test_profit_share_fees();
     test_missing_costs_throws();
+    test_spread_column_and_cap();
+    test_spread_every_fill();
+    test_spread_validation();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;
 }

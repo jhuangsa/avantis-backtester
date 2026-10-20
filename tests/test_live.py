@@ -125,7 +125,7 @@ def test_state_delay_defaults_to_60_and_must_be_whole_minutes():
         with pytest.raises(ValueError):
             avbt.Live("state_trend", PARAMS, markets(100), settings)
         with pytest.raises(ValueError):
-            avbt.run("state_trend", PARAMS, markets(100), {"BTC": avbt.Costs(0.0, 0.0)}, settings)
+            avbt.run("state_trend", PARAMS, markets(100), {"BTC": avbt.Costs(0.0, 0.0, spread=0)}, settings)
 
 
 def test_decide_matches_live_with_no_state_kept():
@@ -151,7 +151,7 @@ def test_live_replay_matches_run(params):
     # Feed Live the bars as run saw them, with run's open positions; an order at
     # step t fills at the open of bar t + 1, so it matches a trade's entry or exit.
     ts, o, h, l, c = columns(1)
-    r = avbt.run("state_trend", params, markets(N), {"BTC": avbt.Costs()})
+    r = avbt.run("state_trend", params, markets(N), {"BTC": avbt.Costs(spread=0)})
     assert r.trades
     entries = {t.entry_bar - 1 for t in r.trades}
     exits = {t.exit_bar - 1 for t in r.trades if t.cause == avbt.Cause.Order}

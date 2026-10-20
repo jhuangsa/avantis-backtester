@@ -45,7 +45,7 @@ int main() {
     s.params.timeframe = Timeframe::Min15;
     std::vector<int> open_steps;
     bool bad = false, wrong_side = false, calm_only = true;
-    Result r = backtest(s, m, {{"AVAX", Costs{}}}, PortfolioSettings{},
+    Result r = backtest(s, m, {{"AVAX", Costs{.spread = no_spread}}}, PortfolioSettings{},
                         [&](int t, const std::vector<Position>&, const std::vector<Order>& orders) {
         for (const Order& o : orders) {
             if (o.kind != Order::Kind::Open) continue;

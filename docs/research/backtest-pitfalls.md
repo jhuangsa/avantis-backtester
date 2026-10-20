@@ -80,6 +80,14 @@ Sources: Bailey, Borwein, Lopez de Prado, and Zhu, ["Pseudo-Mathematics and Fina
 
 Sources: [BitMEX, Perpetual Contracts Guide](https://www.bitmex.com/app/perpetualContractsGuide) (inverse versus quanto; XBT PnL of one XBTUSD contract); [BitMEX, Inverse Perpetual Contracts](https://www.bitmex.com/app/inversePerpetualsGuide) (formula and the 10,000 / 11,000 / 9,000 example).
 
+## 8. Fills at the oracle price
+
+**Failure.** Every order fills exactly at the price in the bars, so each trade looks better than it was. A strategy with many short trades looks best of all, because it pays the hidden cost most often.
+
+**Mechanism.** Veranta fills a long above the oracle price and a short below it, and a close the other way (docs.veranta.xyz/trading/execution-and-pricing). The gap is the spread. It is small on one trade, but it is paid twice per trade, so a strategy that aims for a few tenths of a percent can lose most of its edge to it.
+
+**Guard.** The C++ engine moves every fill against the trade by the market's half-spread, from the caller or from Veranta's table (ADR 0020). A market with no spread is an error, not zero. Zero spread must be written out, and a result run with zero spread says so.
+
 ## Checklist
 
 On every run the engine enforces all six:

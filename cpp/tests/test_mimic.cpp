@@ -40,7 +40,7 @@ int main() {
     const int n = 800;
     Bars a = spiky(n, 0), z = spiky(n, 13);
     Markets m = Markets::make({Market{"AAA", {a}, std::nullopt}, Market{"ZZZ", {z}, std::nullopt}});
-    MarketCosts costs{{"AAA", Costs{}}, {"ZZZ", Costs{}}};
+    MarketCosts costs{{"AAA", Costs{.spread = no_spread}}, {"ZZZ", Costs{.spread = no_spread}}};
     Mimic s;
     s.params.move_on = true;
     s.params.move_lag = 1, s.params.move_size = 0.05, s.params.move_dir = -1;

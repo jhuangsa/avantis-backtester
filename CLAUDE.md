@@ -19,7 +19,8 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 **C++** (`cpp/`, built with `cpp/CMakeLists.txt`):
 - `include/avbt/indicators.hpp`, `src/indicators.cpp`: the `Bars` struct and the indicators, each a rolling object with `update`, one bar at a time; ADR 0017.
 - `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, partial take profit, trailing stop, fees, profit share, holding costs, liquidation, hard stop); ADR 0008, 0014, 0016, 0019.
-- `include/avbt/costs.hpp`: `Costs` per market (open and close fee, signed holding costs, or a profit share by ROI tier), `MarketCosts`, `check_costs`; a market with no `Costs` is an error; ADR 0016, 0019.
+- `include/avbt/costs.hpp`: `Costs` per market (open and close fee, signed holding costs, or a profit share by ROI tier, and the spread every fill pays), `MarketCosts`, `check_costs`; a market with no `Costs`, or with no spread and no table row, is an error; ADR 0016, 0019, 0020.
+- `include/avbt/spreads.hpp`: Veranta's default spread per market, read from its risk API; `examples/veranta_spreads.py` rewrites the rows.
 - `include/avbt/markets.hpp`, `src/markets.cpp`: `Market` and `Markets`, several markets, each on several timeframes, on one clock; `append` and `append_states` grow it; ADR 0011, 0017.
 - `include/avbt/backtest.hpp`: `Order`, `Trade`, the `Strategy` concept (`prepare`, `update`, `decide`), and the `backtest` template loop over `Markets`, with an `on_step` hook; ADR 0009, 0010, 0011, 0017.
 - `include/avbt/states.hpp`: the state labels of a market and `state_at`; ADR 0012.
