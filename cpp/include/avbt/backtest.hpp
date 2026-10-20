@@ -154,19 +154,17 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
     use_settings(strategy, settings);
     Portfolio portfolio(settings);
     Result result{.timeframe = markets.timeframe(), .clock = markets.clock()};
-    // The portfolio does not know clock steps, so the loop keeps them.
+    // The portfolio does not know clock steps, so the loop keeps them. Each
+    // open sets its market's entry; it stays after a close, so one check that
+    // closes a position in two parts records both with their own entry.
     std::map<std::string, int> entry_bar;
     std::vector<Order> waiting;
 
     auto record = [&](const Closed& c, int t) {
-        int e = entry_bar[c.instrument];
+        int e = entry_bar.at(c.instrument);
         result.trades.push_back(Trade{c.instrument, e, t, result.clock[e], result.clock[t], c.side,
                                       c.entry_price, c.exit_price, c.size, c.leverage, c.fees,
                                       c.holding, c.spread_cost, c.result, c.cause});
-        // A partial close leaves the rest of the trade open, with its entry bar.
-        bool still_open = std::any_of(portfolio.positions().begin(), portfolio.positions().end(),
-                                      [&](const Position& p) { return p.instrument == c.instrument; });
-        if (!still_open) entry_bar.erase(c.instrument);
     };
 
     strategy.prepare(markets);

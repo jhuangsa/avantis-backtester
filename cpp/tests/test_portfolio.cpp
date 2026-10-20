@@ -466,6 +466,32 @@ void test_spread_close_order_past_liquidation() {
     check_value("close liq cost", closed->spread_cost, 12.5);
 }
 
+// Half at the 120 take profit on a bar with a 51% spread fills at 58.8,
+// past the 59.8 liquidation: the whole position liquidates there.
+void test_spread_partial_past_liquidation() {
+    Portfolio p = spread_long(120.0, 0.5);
+    auto closed = p.check({Quote{"BTC", 105.0, 125.0, 104.0, 122.0, 0.51}});
+    check_true("partial liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("partial liq exit", closed.at(0).exit_price, 59.8);
+    check_value("partial liq size", closed.at(0).size, 3.125);
+    check_value("partial liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("partial liq cost", closed.at(0).spread_cost, 12.5);
+    check_true("partial liq: none left", p.positions().empty());
+}
+
+// The short mirror: from 100 at 2x, stop 125, spread 4%, liquidation 136.8.
+// Half at the 90 take profit with a 60% spread fills at 144: liquidated.
+void test_spread_short_partial_past_liquidation() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Short, 100.0, 125.0, 2.0, 90.0, Fees{}, 0.0, 0.5, avbt::unknown_time, 0.04);
+    double collateral = p.positions().at(0).collateral;
+    auto closed = p.check({Quote{"BTC", 95.0, 96.0, 85.0, 88.0, 0.6}});
+    check_true("short partial liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("short partial liq exit", closed.at(0).exit_price, 136.8);
+    check_value("short partial liq loss", closed.at(0).result, -0.85 * collateral);
+    check_true("short partial liq: none left", p.positions().empty());
+}
+
 }
 
 
@@ -509,6 +535,8 @@ int main() {
     test_spread_short_stop_past_liquidation();
     test_spread_hard_stop_past_liquidation();
     test_spread_close_order_past_liquidation();
+    test_spread_partial_past_liquidation();
+    test_spread_short_partial_past_liquidation();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

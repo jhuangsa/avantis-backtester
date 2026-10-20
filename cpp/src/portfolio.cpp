@@ -77,11 +77,13 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
                            [&](const Position& p) { return p.instrument == instrument; });
     if (it == positions_.end() || fraction <= 0.0) return std::nullopt;
     fraction = std::min(fraction, 1.0);
-    // A full close whose fill, spread included, is at or past the liquidation
-    // price fills there with no spread: the loss never passes liquidation_loss.
-    // A gap past it liquidates before any order can close. ADR 0020.
+    // A close whose fill, spread included, is at or past the liquidation
+    // price liquidates the whole position there with no spread: the loss
+    // never passes liquidation_loss. A gap past it liquidates before any
+    // order can close. ADR 0020.
     double dir = direction(it->side);
-    if (fraction >= 1.0 && dir * (price * (1.0 - dir * spread) - it->liquidation_price) <= 0.0) {
+    if (dir * (price * (1.0 - dir * spread) - it->liquidation_price) <= 0.0) {
+        fraction = 1.0;
         price = it->liquidation_price;
         spread = 0.0;
         cause = Cause::Liquidation;
@@ -148,7 +150,8 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
             double fraction = p.take_profit_fraction;
             out.push_back(*close(p.instrument, past ? q.open : p.take_profit_price, fraction,
                                  fraction < 1.0 ? Cause::PartialTakeProfit : Cause::TakeProfit, q.spread));
-            if (fraction >= 1.0) continue;
+            // A full close, or a liquidation, leaves no position.
+            if (fraction >= 1.0 || out.back().cause == Cause::Liquidation) continue;
             // A partial close keeps p in place; the rest runs on its stop.
             p.take_profit_price = std::nan("");
         }

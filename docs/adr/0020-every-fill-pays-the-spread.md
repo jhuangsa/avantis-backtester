@@ -26,7 +26,7 @@ On base bar `i` the half-spread is `min(value_i, cap)`. With `dir` +1 for a long
 - Stops, take profits, trails and the liquidation trigger stay on oracle prices. They count from the oracle open and trigger on the oracle high and low. Only the fill moves.
 - Size is `risk / (dir × (E − stop × (1 − dir × s_e)))`, with `s_e` the entry bar's spread. A stop that fills at its level on a bar with the same spread loses exactly the risk, before fees.
 - The collateral, the 80% stop cap, free cash and the liquidation price use `E` (ADR 0008). The 80% cap counts the spread, so a stop placed exactly at `max_stop_loss / leverage` is refused under any spread; `buy_hold`'s default stop is 0.75 for this reason. At 0.75 it opens only when the half-spread is at most 0.05 / (2 × leverage − 1.55): about 0.11 at 1x, 0.0027 at 10x, and 0.0005 at 50x.
-- Liquidation is decided on the fill: when any full close's fill (a stop, the hard stop, a close order or an end-of-data close), spread included, is at or past the liquidation price, the position closes at the liquidation price with no exit spread, cause `Liquidation`. So the loss never passes 85% of the collateral, plus fees.
+- Liquidation is decided on the fill: when any close's fill (a stop, the hard stop, a close order, an end-of-data close, or a take profit, partial or full), spread included, is at or past the liquidation price, the whole position closes at the liquidation price with no exit spread, cause `Liquidation`. So the loss never passes 85% of the collateral, plus fees.
 - The hard stop closes each position at its last mark with the last spread seen for its market.
 - Equity marks at the oracle close with no spread.
 

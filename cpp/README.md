@@ -551,14 +551,14 @@ Adds `rate × size × price` to the instrument's holding costs. A NaN rate adds 
 
 **`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order, spread = 0)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at the oracle `price` moved against it by `spread`: `price × (1 − dir × spread)`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A full close whose fill, the price less the spread, is at or past the liquidation price closes at the liquidation price instead, with no spread and cause `Liquidation`: a close order, an end-of-data close, a stop or the hard stop. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
+Closes `fraction` (from 0 to 1) of the instrument's position at the oracle `price` moved against it by `spread`: `price × (1 − dir × spread)`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A close whose fill, the price less the spread, is at or past the liquidation price liquidates the whole position at the liquidation price instead, with no spread and cause `Liquidation`: a close order, an end-of-data close, a stop, the hard stop, or a take profit, partial or full. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
 Applies one bar to every position that has a quote. For each position:
 
 1. **Stop.** Has the bar's worst price (low for a long, high for a short) reached the stop?
-2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
+2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If that fill less the spread is at or past the liquidation price, the whole position liquidates there instead. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
 3. **Neither.** Mark the position at the close. With a `trail`, move the stop to the bar's high minus the trail (low plus the trail for a short), if that is better than the stop. The stop never moves back, and the new stop counts from the next bar.
 4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the trail had moved the stop, otherwise `Stop`. If that price less the spread is at or past the liquidation price, close at the liquidation price instead, with no spread and cause `Liquidation`.
 
@@ -658,7 +658,7 @@ The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 
 - It runs `check_costs(markets, costs)` first, so a market with no `Costs` fails before any step.
 - It makes a fresh `Portfolio` from `settings`.
-- It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps. It forgets the entry step only when no position is left, so the rest of a partly closed trade keeps it.
+- It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps. Each open sets its market's entry step, and a close never removes it, so the rest of a partly closed trade keeps it, even when one bar's check closes a position in two parts (a partial take profit, then the stop).
 - **Fill step.** It moves close orders ahead of open orders, keeping their order otherwise (`std::stable_partition`). A close frees collateral, so a new open on the same bar can use it. It looks up the order's market bar with `bar_at`. An order for a market in a gap (no bar at this step, but bars before and after) keeps waiting; one for a market that has not started or has ended is dropped. For each open order it computes the stop and take-profit prices from that base open and calls `portfolio.open` with the market's `Fees`. A refused open is skipped, and nothing is recorded.
 - **Check step.** It builds one `Quote` per open position from that position's own base bar and calls `portfolio.check`. A position whose market has no bar at this step is not checked.
 - **End-of-data step.** Except on the run's last step, a market whose last base bar is this step has its position closed at that bar's close, with `Cause::EndOfData`.
@@ -1008,6 +1008,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_spread_partial_take_profit` | a partial close takes its fraction of the entry spread |
 | `test_spread_fees_on_fills`, `test_spread_stop_cap_uses_fill` | fees and the 80% cap use the fill price |
 | `test_spread_hard_stop_uses_last`, `test_spread_equity_mark` | the hard stop closes with the last spread seen; equity marks at the oracle close |
+| `test_spread_stop_past_liquidation`, `test_spread_gap_fill_past_liquidation`, `test_spread_short_stop_past_liquidation`, `test_spread_hard_stop_past_liquidation`, `test_spread_close_order_past_liquidation`, `test_spread_partial_past_liquidation`, `test_spread_short_partial_past_liquidation` | a close whose fill less the spread is at or past the liquidation price (a stop, a gap, the hard stop, a close order, a partial take profit; long and short) liquidates the whole position there, with no exit spread, losing 85% of the collateral |
 
 **`test_backtest.cpp`**, with small test-only strategies (`UpDown`, `Script`, `FollowY`, `HalfAtTarget`):
 
@@ -1030,6 +1031,9 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_profit_share_fees` | a trade's `fees` hold the profit share from its market's `Costs`; tiers beside a size fee throw |
 | `test_spread_column_and_cap`, `test_spread_every_fill` | the spread, per bar or constant and capped, reaches order opens and closes, stops, take profits, and end-of-data closes; `spread_cost` counts both fills |
 | `test_spread_validation` | `check_costs` refuses a market with no row, a column of the wrong length, NaN, a negative value, 1, and a negative cap |
+| `test_gap_close_replaces_waiting_open`, `test_gap_new_open_replaces_waiting_open`, `test_gap_waiting_close_survives_open`, `test_waiting_orders_stay_bounded` | in a gap, a new close drops a waiting open, a new open replaces a waiting open, a waiting close survives a new open (the long closes, then the short opens), and a close sent every step through a 30-day gap stays fast |
+| `test_close_order_past_liquidation`, `test_waiting_close_past_liquidation`, `test_end_of_data_past_liquidation` | a close order (with or without a gap) and an end-of-data close past the liquidation price liquidate there, long and short |
+| `test_two_part_close_keeps_entry_bar` | when one bar's check closes a position in two parts (a partial take profit, then the stop), both trades keep the real entry step |
 
 **`test_profit_share.cpp`**: the profit share (ADR 0019): each tier and its boundary, a short, a partial take profit and a partial close each priced on its own ROI, a liquidation paying nothing, holding costs leaving the tier unchanged, equity subtracting the share owed, a hard stop charging a winner, empty tiers giving the old fees bit for bit, the `check_profit_share` errors, a backtest's `Trade.fees`, and a ROI counted on the fill prices after the spread.
 

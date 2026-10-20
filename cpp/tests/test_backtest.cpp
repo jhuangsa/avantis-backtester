@@ -643,6 +643,30 @@ void test_end_of_data_past_liquidation() {
     }
 }
 
+void test_two_part_close_keeps_entry_bar() {
+    // Long Y fills at 200 on step 1, take profit 220 for half, stop 180.
+    // Step 3 opens at 230, past the take profit, and falls to 170: half
+    // closes at the open, then the rest at the stop. Both trades entered
+    // at step 1.
+    Bars x = flat_bars({100, 100, 100, 100, 100});
+    Bars y = flat_bars({200, 200, 200, 175, 175});
+    y.open[3] = y.high[3] = 230;
+    y.low[3] = 170;
+    Order o{.instrument = "Y", .side = Side::Long, .stop_distance = 0.1,
+            .take_profit_distance = 0.1, .take_profit_fraction = 0.5};
+    Script s{.at = {{0, {o}}}};
+    Result r = backtest(s, two(x, y), PortfolioSettings{});
+    check_value("two parts: two trades", r.trades.size(), 2);
+    if (r.trades.size() < 2) return;
+    check_true("two parts: partial first", r.trades[0].cause == Cause::PartialTakeProfit);
+    check_true("two parts: then the stop", r.trades[1].cause == Cause::Stop);
+    for (const Trade& t : r.trades) {
+        check_value("two parts: entry bar", t.entry_bar, 1);
+        check_value("two parts: entry time", t.entry_time, r.clock[1]);
+        check_value("two parts: exit bar", t.exit_bar, 3);
+    }
+}
+
 // Opens Y at step 0, then asks to close Y on every step from step 9.
 struct CloseEveryStep {
     void prepare(const Markets&) {}
@@ -711,6 +735,7 @@ int main() {
     test_close_order_past_liquidation();
     test_waiting_close_past_liquidation();
     test_end_of_data_past_liquidation();
+    test_two_part_close_keeps_entry_bar();
     test_waiting_orders_stay_bounded();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;

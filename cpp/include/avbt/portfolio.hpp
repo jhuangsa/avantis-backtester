@@ -177,8 +177,9 @@ public:
     // Closes `fraction` (0 to 1] of the instrument's position at the oracle
     // `price` moved against it by `spread`, charges the close fee, the profit share on that part's own ROI, and that
     // fraction of the holding costs, and returns what closed. Returns nothing when
-    // there is no position. A full close whose fill is at or past the liquidation
-    // price closes there instead, with no spread and cause Liquidation. ADR 0020.
+    // there is no position. A close (full or partial) whose fill is at or past
+    // the liquidation price liquidates the whole position there instead, with
+    // no spread and cause Liquidation. ADR 0020.
     std::optional<Closed> close(const std::string& instrument, double price,
                                 double fraction = 1.0, Cause cause = Cause::Order,
                                 double spread = 0.0);
