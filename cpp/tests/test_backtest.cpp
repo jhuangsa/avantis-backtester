@@ -4,6 +4,7 @@
 #include "avbt/backtest.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <stdexcept>
@@ -547,6 +548,94 @@ void test_partial_close_keeps_entry_bar() {
     check_value("rest exit bar", r.trades.at(1).exit_bar, 4);
 }
 
+// Y trades hours 0-1 and 7-9; X every hour 0-9. Y is in a gap at steps 2-6.
+Markets weekend() {
+    Bars x = flat_bars({100, 100, 100, 100, 100, 100, 100, 100, 100, 100});
+    Bars y = flat_bars({200, 200});
+    Bars late = flat_bars({210, 210, 210}, 7);
+    for (std::size_t i = 0; i < late.ts.size(); ++i) {
+        y.ts.push_back(late.ts[i]);
+        y.open.push_back(late.open[i]);
+        y.high.push_back(late.high[i]);
+        y.low.push_back(late.low[i]);
+        y.close.push_back(late.close[i]);
+        y.minutes_with_data.push_back(60);
+    }
+    return two(x, y);
+}
+
+void test_gap_close_replaces_waiting_open() {
+    // The open from step 1 waits through the gap; the close at step 3
+    // replaces it, so nothing opens at step 7. ADR 0021.
+    Script s{.at = {{1, {open_long("Y", 0.1)}}, {3, {close_order("Y")}}}};
+    Result r = backtest(s, weekend(), PortfolioSettings{});
+    check_value("gap close: no trades", r.trades.size(), 0);
+    check_value("gap close: no position", r.open_positions.size(), 0);
+}
+
+void test_gap_new_open_replaces_waiting_open() {
+    Order short_y{.instrument = "Y", .side = Side::Short, .stop_distance = 0.1};
+    Script s{.at = {{1, {open_long("Y", 0.1)}}, {3, {short_y}}}};
+    Result r = backtest(s, weekend(), PortfolioSettings{});
+    check_value("gap short: one position", r.open_positions.size(), 1);
+    if (r.open_positions.empty()) return;
+    check_true("gap short: the short fills", r.open_positions[0].side == Side::Short);
+}
+
+void test_gap_waiting_close_survives_open() {
+    // Long Y from step 1; the close at step 1 waits through the gap, and a
+    // short at step 3 does not replace it: at step 7 the long closes, then
+    // the short opens.
+    Order short_y{.instrument = "Y", .side = Side::Short, .stop_distance = 0.1};
+    Script s{.at = {{0, {open_long("Y", 0.1)}}, {1, {close_order("Y")}}, {3, {short_y}}}};
+    Result r = backtest(s, weekend(), PortfolioSettings{});
+    check_value("gap reverse: one trade", r.trades.size(), 1);
+    check_value("gap reverse: one position", r.open_positions.size(), 1);
+    if (r.trades.empty() || r.open_positions.empty()) return;
+    check_true("gap reverse: the long closed", r.trades[0].side == Side::Long && r.trades[0].cause == Cause::Order);
+    check_value("gap reverse: at the reopen", r.trades[0].exit_bar, 7);
+    check_true("gap reverse: the short opens", r.open_positions[0].side == Side::Short);
+}
+
+// Opens Y at step 0, then asks to close Y on every step from step 9.
+struct CloseEveryStep {
+    void prepare(const Markets&) {}
+    void update(const Markets&) {}
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>&) {
+        if (now == 60) return {open_long("Y", 0.1)};
+        if (now >= 600) return {close_order("Y")};
+        return {};
+    }
+};
+static_assert(Strategy<CloseEveryStep>);
+
+void test_waiting_orders_stay_bounded() {
+    // Y is in a 30-day gap of 1-minute steps. Each step's close replaces
+    // the last one, so the run stays fast and closes once, at the reopen.
+    const int64_t day = 1440;
+    Bars x, y;
+    x.timeframe = y.timeframe = Timeframe::Min1;
+    for (int64_t i = 0; i < 32 * day; ++i) {
+        for (Bars* b : {&x, &y}) {
+            if (b == &y && i >= 10 && i < 30 * day) continue;
+            b->ts.push_back(i * 60);
+            b->open.push_back(100);
+            b->high.push_back(100);
+            b->low.push_back(100);
+            b->close.push_back(100);
+            b->minutes_with_data.push_back(1);
+        }
+    }
+    CloseEveryStep s;
+    auto start = std::chrono::steady_clock::now();
+    Result r = backtest(s, two(x, y), PortfolioSettings{});
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    check_true("bounded: under 2 s", seconds < 2.0);
+    check_value("bounded: one trade", r.trades.size(), 1);
+    if (r.trades.empty()) return;
+    check_value("bounded: closes at the reopen", r.trades[0].exit_bar, 30 * day);
+}
+
 int main() {
     test_signal_fills_at_next_open();
     test_last_bar_order_never_fills();
@@ -570,6 +659,10 @@ int main() {
     test_spread_column_and_cap();
     test_spread_every_fill();
     test_spread_validation();
+    test_gap_close_replaces_waiting_open();
+    test_gap_new_open_replaces_waiting_open();
+    test_gap_waiting_close_survives_open();
+    test_waiting_orders_stay_bounded();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;
 }

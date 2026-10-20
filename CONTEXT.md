@@ -26,7 +26,7 @@ The fee a winning close pays on a venue such as Upside Perps: a share of its pro
 _Avoid_: performance fee, profit fee, a marginal or sliced rate
 
 **Spread**:
-The distance from the oracle price to a fill, as a fraction of price: a long fills above the oracle price, a short below, and a close the other way. Every fill pays it except liquidation. It is part of a market's `Costs`; with none given, the market uses Veranta's row, and a market with no row is an error. Levels still trigger on the oracle price. See ADR 0020.
+The distance from the oracle price to a fill, as a fraction of price: a long fills above the oracle price, a short below, and a close the other way. Every fill pays it except liquidation. It is part of a market's `Costs`; with none given, the market uses Veranta's row (looked up by exact, case-sensitive name, then name plus `/USD`), and a market with no row is an error. Levels still trigger on the oracle price. See ADR 0020.
 _Avoid_: slippage, a fee
 
 ### Getting in and out

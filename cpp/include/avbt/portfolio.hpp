@@ -200,6 +200,9 @@ public:
 
 private:
     double unrealized(const Position& p) const;
+    // Closes p at the oracle price less the spread, or at its liquidation
+    // price when that fill reaches it. ADR 0020.
+    Closed close_or_liquidate(const Position& p, double price, Cause cause, double spread);
 
     PortfolioSettings settings_;
     // Realized money only; moves when a position closes.

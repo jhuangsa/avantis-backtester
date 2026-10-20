@@ -1,7 +1,8 @@
 // Tests for buy_hold on synthetic minute bars, beside a one-bar market that
 // ends later, so BTC's data ends before the run does: it opens once at the
-// next open, holds, closes at the end of data, opens at stop_loss 0.8 at any
-// leverage, and stays out after a stop. Exit 0 is a pass.
+// next open, holds, closes at the end of data, opens by default under the
+// table spread, opens at stop_loss 0.8 at any leverage with no spread, and
+// stays out after a stop. Exit 0 is a pass.
 
 #include "avbt/library.hpp"
 
@@ -56,9 +57,18 @@ int main() {
     }
     check("nothing left open", r.open_positions.empty());
 
-    // stop_loss 0.8 opens at any leverage; collateral is risk / 0.8.
+    // The default opens at 1x, 10x and 50x under BTC's table spread.
+    for (double lev : {1.0, 10.0, 50.0}) {
+        BuyHold s;
+        s.params.leverage = lev;
+        Result x = backtest(s, up, {{"BTC", Costs{}}, {"PAD", Costs{.spread = no_spread}}}, PortfolioSettings{});
+        check("default opens under the table spread", x.trades.size() == 1);
+    }
+
+    // stop_loss 0.8 opens at any leverage with no spread; collateral is risk / 0.8.
     for (double lev : {1.0, 10.0, 50.0, 250.0}) {
         BuyHold s;
+        s.params.stop_loss = 0.8;
         s.params.leverage = lev;
         Result x = go(up, s, PortfolioSettings{.risk_per_trade = 0.08});
         bool ok = x.trades.size() == 1;

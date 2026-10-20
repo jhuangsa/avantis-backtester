@@ -153,28 +153,30 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
             }
             continue;
         }
-        // A bar that opens past the stop fills at the open. A gap past the
-        // liquidation price too fills there: the loss never passes liquidation_loss.
-        // Liquidation is decided on the oracle fill and pays no spread. ADR 0020.
+        // A bar that opens past the stop fills at the open.
         bool gapped = is_long ? q.open < p.stop_price : q.open > p.stop_price;
         double fill = gapped ? q.open : p.stop_price;
-        bool liquidated = is_long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
-        if (liquidated) {
-            out.push_back(*close(p.instrument, p.liquidation_price, 1.0, Cause::Liquidation));
-            continue;
-        }
-        out.push_back(*close(p.instrument, fill, 1.0, p.trailed ? Cause::TrailingStop : Cause::Stop, q.spread));
+        out.push_back(close_or_liquidate(p, fill, p.trailed ? Cause::TrailingStop : Cause::Stop, q.spread));
     }
 
     double floor = settings_.starting_balance * (1.0 - settings_.hard_stop);
     if (!halted_ && report().equity <= floor) {
         while (!positions_.empty()) {
             const Position& p = positions_.front();
-            out.push_back(*close(p.instrument, p.mark_price, 1.0, Cause::HardStop, p.spread));
+            out.push_back(close_or_liquidate(p, p.mark_price, Cause::HardStop, p.spread));
         }
         halted_ = true;
     }
     return out;
+}
+
+Closed Portfolio::close_or_liquidate(const Position& p, double price, Cause cause, double spread) {
+    // A fill at or past the liquidation price fills there with no spread:
+    // the loss never passes liquidation_loss. ADR 0020.
+    double fill = price * (1.0 - direction(p.side) * spread);
+    bool liquidated = p.side == Side::Long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
+    if (liquidated) return *close(p.instrument, p.liquidation_price, 1.0, Cause::Liquidation);
+    return *close(p.instrument, price, 1.0, cause, spread);
 }
 
 Report Portfolio::report() const {

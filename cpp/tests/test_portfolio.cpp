@@ -407,6 +407,54 @@ void test_spread_equity_mark() {
     check_value("spread equity", p.report().equity, 10000.0 - 12.5);
 }
 
+// The stop at 75 on a bar with a 25% spread would fill at 56.25, past the
+// 59.8 liquidation: it liquidates there instead, with no exit spread (ADR 0020).
+void test_spread_stop_past_liquidation() {
+    Portfolio p = spread_long();
+    auto closed = p.check({Quote{"BTC", 80.0, 80.0, 70.0, 72.0, 0.25}});
+    check_true("spread stop liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("spread stop liq exit", closed.at(0).exit_price, 59.8);
+    check_value("spread stop liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("spread stop liq cost", closed.at(0).spread_cost, 12.5);
+}
+
+// A gap to 62 sits above the 59.8 liquidation, but its fill 62 * 0.96 =
+// 59.52 does not: liquidation at 59.8.
+void test_spread_gap_fill_past_liquidation() {
+    Portfolio p = spread_long();
+    auto closed = p.check({Quote{"BTC", 62.0, 62.0, 61.0, 61.5, 0.04}});
+    check_true("spread gap liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("spread gap liq exit", closed.at(0).exit_price, 59.8);
+    check_value("spread gap liq loss", closed.at(0).result, -0.85 * 162.5);
+}
+
+// Short from 100 at 2x, stop 125, spread 4%: fill 96, stop fill 130, so
+// 100 / 34 units, collateral 48 each, liquidation 96 + 0.85 * 48 = 136.8.
+// The stop on a 10% bar fills at 137.5, past it: liquidation at 136.8.
+void test_spread_short_stop_past_liquidation() {
+    Portfolio p(PortfolioSettings{});
+    check_true("short liq opens", p.open("BTC", Side::Short, 100.0, 125.0, 2.0, std::nan(""), Fees{},
+                                         0.0, 1.0, avbt::unknown_time, 0.04));
+    double collateral = p.positions().at(0).collateral;
+    check_value("short liq price", p.positions().at(0).liquidation_price, 136.8);
+    auto closed = p.check({Quote{"BTC", 120.0, 126.0, 120.0, 124.0, 0.1}});
+    check_true("short stop liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("short stop liq exit", closed.at(0).exit_price, 136.8);
+    check_value("short stop liq loss", closed.at(0).result, -0.85 * collateral);
+}
+
+// 100 units from 100 at 1x: liquidation 15. A bar to 70 with an 80% spread
+// trips the hard stop, whose fill 70 * 0.2 = 14 passes 15: it closes at 15.
+void test_spread_hard_stop_past_liquidation() {
+    Portfolio p(PortfolioSettings{.risk_per_trade = 0.5});
+    check_true("hard stop liq opens", p.open("BTC", Side::Long, 100.0, 50.0, 1.0));
+    auto closed = p.check({Quote{"BTC", 70.0, 70.0, 70.0, 70.0, 0.8}});
+    check_true("hard stop liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    check_value("hard stop liq exit", closed.at(0).exit_price, 15.0);
+    check_value("hard stop liq loss", closed.at(0).result, -8500.0);
+    check_value("hard stop liq cost", closed.at(0).spread_cost, 0.0);
+}
+
 }
 
 
@@ -445,6 +493,10 @@ int main() {
     test_spread_stop_cap_uses_fill();
     test_spread_hard_stop_uses_last();
     test_spread_equity_mark();
+    test_spread_stop_past_liquidation();
+    test_spread_gap_fill_past_liquidation();
+    test_spread_short_stop_past_liquidation();
+    test_spread_hard_stop_past_liquidation();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

@@ -10,13 +10,15 @@ namespace avbt {
 // Buy and hold: one instrument. Opens once, at the first closed bar, and
 // never closes; the backtest closes it at the end of data. After a stop it
 // stays out. stop_loss is the fraction of collateral the stop loses, so the
-// stop sits stop_loss / leverage from the fill.
+// stop sits stop_loss / leverage from the fill. The default 0.75 sits below
+// max_stop_loss, since the spread adds to the loss: a stop at the cap is
+// refused under any spread. ADR 0020.
 struct BuyHold {
     struct Params {
         std::string instrument = "BTC";
         Timeframe timeframe = Timeframe::Min1;
         Side side = Side::Long;
-        double stop_loss = max_stop_loss, leverage = 1.0;
+        double stop_loss = 0.75, leverage = 1.0;
     } params;
     const Bars* bars = nullptr;
     bool opened = false;

@@ -197,6 +197,7 @@ inline constexpr SpreadRow spread_rows[] = {
 inline std::span<const SpreadRow> veranta_spreads() { return spread_rows; }
 
 // The row named `instrument`, else the row named instrument + "/USD".
+// Names match exactly, case included: "btc" finds no row.
 inline std::optional<SpreadRow> veranta_spread(std::string_view instrument) {
     std::string usd = std::string(instrument) + "/USD";
     for (std::string_view name : {instrument, std::string_view(usd)}) {

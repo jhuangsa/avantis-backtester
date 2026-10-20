@@ -86,7 +86,7 @@ Sources: [BitMEX, Perpetual Contracts Guide](https://www.bitmex.com/app/perpetua
 
 **Mechanism.** Veranta fills a long above the oracle price and a short below it, and a close the other way (docs.veranta.xyz/trading/execution-and-pricing). The gap is the spread. It is small on one trade, but it is paid twice per trade, so a strategy that aims for a few tenths of a percent can lose most of its edge to it.
 
-**Guard.** The C++ engine moves every fill against the trade by the market's half-spread, from the caller or from Veranta's table (ADR 0020). A market with no spread is an error, not zero. Zero spread must be written out, and a result run with zero spread says so.
+**Guard.** The C++ engine moves every fill against the trade by the market's half-spread, from the caller or from Veranta's table (ADR 0020). A market with no spread is an error, not zero. Zero spread must be written out.
 
 ## 9. Trading a closed market
 

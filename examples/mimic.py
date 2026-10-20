@@ -730,8 +730,16 @@ def rerun(saved, markets):
     params = {**saved["params"], "risk": s.get("risk_per_trade", saved["params"].get("risk", RISK))}
     print(f"fees {fees[0]:.3%} open, {fees[1]:.3%} close; profit share {share}; risk {params['risk']}; "
           f"scale_risk_with_leverage {scale}")
-    costs = {m: avbt_cpp.Costs(*fees, profit_share=share) for m in saved["markets"]}
-    return backtest(params, markets, costs, scale)
+    return backtest(params, markets, market_costs(saved["markets"], fees, share), scale)
+
+
+def market_costs(names, fees, share=None):
+    """Costs per market at the table spread; a market with no table row runs with none, and says so."""
+    rows = avbt_cpp.veranta_spreads()
+    bare = [m for m in names if m not in rows and f"{m}/USD" not in rows]
+    if bare:
+        print(f"no Veranta spread for {', '.join(bare)}: run with none")
+    return {m: avbt_cpp.Costs(*fees, profit_share=share, spread=0 if m in bare else None) for m in names}
 
 
 def on_grid(series, grid):
@@ -1045,7 +1053,7 @@ def main():
     address = checksum(args.address)
     w = setup(address, args.top)
     symbols, markets, start, end = w["symbols"], w["markets"], w["start"], w["end"]
-    costs = {s: avbt_cpp.Costs(FEE, FEE) for s in symbols}
+    costs = market_costs(symbols, (FEE, FEE))
     grid = hour_grid(start, end)
     target = w["target"]
     lever = float(np.clip(w["leverage"], 1, 100))
@@ -1057,7 +1065,7 @@ def main():
     best, best_mse = fit(markets, costs, target, grid, first, args.restarts, args.passes,
                          workers=args.workers, knobs=knobs)
     mimic = mimic_scores(backtest(best, markets, costs), markets, grid, target, best["leverage"])
-    used = costs[symbols[0]]  # every market has the same Costs
+    used = costs[symbols[0]]  # every market has the same fees
     out = {"address": address, "venue": VENUE, "avbt_version": avbt_cpp.version, "strategy": "mimic",
            "fit": "own", "params": best,
            "markets": symbols, "covered_share": w["covered_share"], "start": start, "end": end,

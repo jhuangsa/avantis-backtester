@@ -149,7 +149,8 @@ void Markets::append(const std::string& instrument, Timeframe tf, const Bar& bar
     }
     bool extends = is_base && (clock_.empty() || bar.ts > clock_.back());
     if (is_base && !extends && !std::binary_search(clock_.begin(), clock_.end(), bar.ts)) {
-        throw std::invalid_argument(where + "base bar ts is before the clock's end and not on the clock");
+        throw std::invalid_argument(where + "base bar ts is before the clock's end and not on the clock; "
+                                            "append every market's bars in time order");
     }
     b->ts.push_back(bar.ts);
     b->open.push_back(bar.open);

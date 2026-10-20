@@ -472,6 +472,27 @@ def test_costs_spread_arguments():
             avbt.Costs(**bad)
 
 
+
+def test_costs_spread_numpy_scalars():
+    # numpy scalars and 0-d arrays are numbers: one constant spread.
+    for x in (np.float32(0.001), np.int64(0), np.float64(0.001), np.array(0.001)):
+        assert len(avbt.Costs(spread=x).spread) == 1
+    assert avbt.Costs(spread=np.float32(0.25)).spread[0] == pytest.approx(0.25)
+    assert avbt.Costs(max_spread=np.float32(0.5)).max_spread == pytest.approx(0.5)
+    assert avbt.Costs(max_spread=np.array(0.5)).max_spread == 0.5
+
+
+def test_costs_spread_rejects_bool():
+    for bad in ({"spread": True}, {"spread": False}, {"spread": np.bool_(False)},
+                {"spread": np.array([False])}, {"max_spread": True}):
+        with pytest.raises(TypeError):
+            avbt.Costs(**bad)
+
+
+def test_costs_max_spread_none_is_nan():
+    assert math.isnan(avbt.Costs(max_spread=None).max_spread)
+    assert math.isnan(avbt.Costs(0.0, 0.0, None, None, None, 0.001, None).max_spread)
+
 def test_veranta_spreads_table():
     rows = avbt.veranta_spreads()
     spread, cap, read_on = rows["BTC/USD"]

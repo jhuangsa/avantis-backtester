@@ -133,7 +133,9 @@ concept Strategy = requires(S s, const Markets& markets, int64_t now, const Repo
 //    last close less the spread, unless this is the run's last step.
 // 4. Add each open position's holding cost for its base bar.
 // 5. Record equity, then ask the strategy at the step's bar_end. Its new
-//    orders join the ones still waiting.
+//    orders for a market drop its waiting open; a new close also drops its
+//    waiting close. So at most one close and one open wait per market;
+//    with no gaps nothing waits.
 // Nothing happens to a market in a gap: no fill, no level check, no
 // holding cost; its positions keep their last mark. ADR 0021.
 // Orders returned on the last step never fill. The caller chooses the bars;
@@ -238,6 +240,14 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
         int64_t now = bar_end(markets.timeframe(), clock[t]);
         std::vector<Order> orders = strategy.decide(now, portfolio.report(), portfolio.positions());
         on_step(t, portfolio.positions(), orders);
+        // For a market, a new order drops its waiting open, and a new close
+        // its waiting close; a waiting close survives a new open. ADR 0021.
+        std::erase_if(waiting, [&](const Order& w) {
+            return std::any_of(orders.begin(), orders.end(), [&](const Order& o) {
+                return o.instrument == w.instrument &&
+                       (w.kind == Order::Kind::Open || o.kind == Order::Kind::Close);
+            });
+        });
         waiting.insert(waiting.end(), orders.begin(), orders.end());
     }
     result.ending_balance = portfolio.report().balance;

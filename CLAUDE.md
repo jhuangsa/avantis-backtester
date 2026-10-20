@@ -17,19 +17,19 @@ Every change keeps these true: next-open fill; no trade on an undefined operand;
 **Python tests**: `tests/`, run with `python3 -m pytest` from the root. Tests never read `data/`.
 
 **C++** (`cpp/`, built with `cpp/CMakeLists.txt`):
-- `include/avbt/indicators.hpp`, `src/indicators.cpp`: the `Bars` struct and the indicators, each a rolling object with `update`, one bar at a time; ADR 0017.
-- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, partial take profit, trailing stop, fees, profit share, holding costs, liquidation, hard stop); ADR 0008, 0014, 0016, 0019.
+- `include/avbt/indicators.hpp`, `src/indicators.cpp`: the `Bars` struct and the indicators, each a rolling object with `update`, one bar at a time; `bar_end` and `last_closed`; ADR 0017, 0021.
+- `include/avbt/portfolio.hpp`, `src/portfolio.cpp`: the portfolio (balance, positions, take profit, partial take profit, trailing stop, fees, profit share, holding costs, liquidation, hard stop, spread); ADR 0008, 0014, 0016, 0019, 0020.
 - `include/avbt/costs.hpp`: `Costs` per market (open and close fee, signed holding costs, or a profit share by ROI tier, and the spread every fill pays), `MarketCosts`, `check_costs`; a market with no `Costs`, or with no spread and no table row, is an error; ADR 0016, 0019, 0020.
-- `include/avbt/spreads.hpp`: Veranta's default spread per market, read from its risk API; `examples/veranta_spreads.py` rewrites the rows.
-- `include/avbt/markets.hpp`, `src/markets.cpp`: `Market` and `Markets`, several markets, each on several timeframes, on one clock; `append` and `append_states` grow it; ADR 0011, 0017.
-- `include/avbt/backtest.hpp`: `Order`, `Trade`, the `Strategy` concept (`prepare`, `update`, `decide`), and the `backtest` template loop over `Markets`, with an `on_step` hook; ADR 0009, 0010, 0011, 0017.
+- `include/avbt/spreads.hpp`: Veranta's default spread per market, read from its risk API, looked up by case-sensitive name; `examples/veranta_spreads.py` rewrites the rows; ADR 0020.
+- `include/avbt/markets.hpp`, `src/markets.cpp`: `Market` and `Markets`, several markets, each on several timeframes, on one clock; `append` and `append_states` grow it; bars may skip time; ADR 0011, 0017, 0021.
+- `include/avbt/backtest.hpp`: `Order`, `Trade`, the `Strategy` concept (`prepare`, `update`, `decide`), and the `backtest` template loop over `Markets`, with an `on_step` hook; ADR 0009, 0010, 0011, 0017, 0020, 0021.
 - `include/avbt/states.hpp`: the state labels of a market and `state_at`; ADR 0012.
-- `include/avbt/strategies.hpp`: the five Veranta strategies, `StateTrend` (its signal timeframe set per instrument), and `Combined`, which runs two as one.
+- `include/avbt/strategies.hpp`: the five Veranta strategies, `StateTrend` (its signal timeframe set per instrument), and `Combined`, which runs two as one; `bars_held` counts bars for time exits; ADR 0021.
 - `include/avbt/registry.hpp`: the table's parts (`Param`, `StrategyInfo`, `field`, `single`, `combined`), used by every strategy file.
 - `include/avbt/library.hpp`, `include/avbt/library/<name>.hpp`: the strategy library, one file per strategy, each with its own `tests/test_<name>.cpp`. To add one: a new file, its include and `_info()` line in `library.hpp`, and its test in `CMakeLists.txt`.
-- `include/avbt/run.hpp`: the strategy table (built-ins, then the library), `strategies()`, `run(name, params, markets, costs, settings)`, `decide(name, params, markets, positions, now)` (one live call, no state kept), and `Live`, one strategy kept alive for live calls; a `Position` carries `entry_time` so time exits survive a restart.
+- `include/avbt/run.hpp`: the strategy table (built-ins, then the library), `strategies()`, `run(name, params, markets, costs, settings)`, `decide(name, params, markets, positions, now)` (one live call, no state kept), and `Live`, one strategy kept alive for live calls; a `Position` carries `entry_time` so time exits survive a restart; ADR 0021.
 - `include/avbt/version.hpp`: `avbt::version`, read by C++ and Python.
-- `include/avbt/optimize.hpp`: `sharpe`, `summary`, and `optimize(name, ...)`, a greedy search over pairs of knobs for any strategy, with a progress callback, and `walk_forward` over folds the caller cuts; a `Goal` picks Sharpe, or the highest return under a max drawdown limit; ADR 0013, 0018.
+- `include/avbt/optimize.hpp`: `sharpe`, `summary`, and `optimize(name, ...)`, a greedy search over pairs of knobs for any strategy, with a progress callback, and `walk_forward` over folds the caller cuts; a `Goal` picks Sharpe, or the highest return under a max drawdown limit; ADR 0013, 0018, 0020, 0021.
 - `python/avbt_py.cpp`: the pybind11 module `avbt_cpp`: `Market`, `Markets`, `Costs`, `run`, `strategies`, `Result`, `Trade`, `optimize`, `walk_forward`, `decide`, and `Live` (for a live caller; stops are the caller's, see `cpp/README.md`); no logic of its own.
 - `tests/test_*.cpp`: plain test programs; exit code 0 is a pass. `test_live.cpp` replays a backtest through `append`, `update`, `decide` and needs equal orders.
 - `README.md`: the guide to every C++ file, type, function, and test.

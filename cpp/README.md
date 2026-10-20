@@ -188,8 +188,9 @@ for each step t of the clock, from the first to the last:
                The cause is EndOfData.
   4. RECORD    Equity at the close of step t is saved.
   5. DECIDE    The strategy gets `now`, the UTC second at the close of step t
-               (`bar_end`), and returns orders. They join the waiting ones
-               for step 1 of the next step.
+               (`bar_end`), and returns orders for step 1 of the next
+               step. For a market, a new order drops its waiting open;
+               a new close also drops its waiting close.
 ```
 
 Orders returned on the last step never fill, because there is no next step. A position still open at the end is not a trade; it only counts in the last equity value.
@@ -379,7 +380,7 @@ Throws `std::invalid_argument` when a spread value is not finite and in [0, 1), 
 
 ### spreads.hpp: `SpreadRow`, `veranta_spreads()`, `veranta_spread(instrument)`
 
-The table of Veranta's default spreads, one `SpreadRow{market, spread, max_spread, read_on}` per market. `market` is the pair name, such as `"BTC/USD"` or `"USD/JPY"`. `veranta_spread` finds the row named `instrument`, then `instrument + "/USD"`, so `"BTC"` finds `"BTC/USD"`. The rows come from Veranta's risk API with a small order; markets closed when it was read have no row. `examples/veranta_spreads.py` reads the API again and rewrites the rows.
+The table of Veranta's default spreads, one `SpreadRow{market, spread, max_spread, read_on}` per market. `market` is the pair name, such as `"BTC/USD"` or `"USD/JPY"`. `veranta_spread` finds the row named `instrument`, then `instrument + "/USD"`, so `"BTC"` finds `"BTC/USD"`. The lookup is case-sensitive: `"btc"` finds no row. The rows come from Veranta's risk API with a small order; markets closed when it was read have no row. `examples/veranta_spreads.py` reads the API again and rewrites the rows.
 
 ### `void check_profit_share(const Costs& c)`
 
@@ -662,7 +663,7 @@ The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 - **Check step.** It builds one `Quote` per open position from that position's own base bar and calls `portfolio.check`. A position whose market has no bar at this step is not checked.
 - **End-of-data step.** Except on the run's last step, a market whose last base bar is this step has its position closed at that bar's close, with `Cause::EndOfData`.
 - **Holding step.** After the checks and the end-of-data close, each open position whose market has a bar at this step is charged `hold_long[i]` or `hold_short[i]` through `portfolio.hold`, at that bar's close. The step's equity then includes it.
-- **Decide step.** It passes `now`, `bar_end(timeframe, clock[t])`, which is the close of the step. The new orders join the waiting ones.
+- **Decide step.** It passes `now`, `bar_end(timeframe, clock[t])`, which is the close of the step. For a market, a new open replaces its waiting open, and a new close replaces its waiting close and drops its waiting open (`std::erase_if`). A waiting close survives a later open, so a reversal in a gap closes, then opens. At most one close and one open wait per market.
 - **`on_step` hook.** After `decide`, the loop calls `on_step(t, positions, orders)` with the step, the open positions, and the orders just returned. The default does nothing. `test_live.cpp` uses it.
 - The caller chooses the bars. The loop never trims them.
 
@@ -786,7 +787,7 @@ The table. It has eight entries:
 | `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | The five Veranta strategies. Each has a `side` param, a string: `"long"` or `"short"`. Any other value throws. |
 | `state_trend` | `StateTrend`. |
 | `campaign_and_spike`, `late_day_and_rally` | `Combined` pairs. Their params start with `a.` or `b.`: `a.lag` is the first strategy's `lag`. |
-| `buy_hold` (library) | `BuyHold`, in `library/buy_hold.hpp`: one open at the first closed bar, never a close, no re-entry after a stop. Params `instrument`, `timeframe`, `side` (`"long"` or `"short"`), `stop_loss` (the fraction of collateral the stop loses, at most 0.8; the stop sits `stop_loss / leverage` from the fill), `leverage`. `test_buy_hold.cpp` tests it. |
+| `buy_hold` (library) | `BuyHold`, in `library/buy_hold.hpp`: one open at the first closed bar, never a close, no re-entry after a stop. Params `instrument`, `timeframe`, `side` (`"long"` or `"short"`), `stop_loss` (the fraction of collateral the stop loses, at most 0.8, default 0.75, since a stop at 0.8 is refused under any spread; the stop sits `stop_loss / leverage` from the fill), `leverage`. `test_buy_hold.cpp` tests it. |
 
 ### `Result run(name, params, markets, costs, settings)`
 
@@ -881,7 +882,7 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
-| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None, spread=None, max_spread=nan)` | One market's costs. `Costs()` has no fees and Veranta's spread from the table; `Costs(spread=0)` is zero cost. `spread` is `None` (the table), a number (every bar), or a numpy array (one per base bar); reading it gives `None` or an array. Bad spreads raise `ValueError` (see `check_spread`). The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
+| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None, spread=None, max_spread=None)` | One market's costs. `Costs()` has no fees and Veranta's spread from the table; `Costs(spread=0)` is zero cost. `spread` is `None` (the table), a number (every bar), or a numpy array (one per base bar); a numpy number or 0-d array counts as a number. `max_spread` is a number, or `None` for no cap (read back as NaN). Reading `spread` gives `None` or an array. A bool or a string raises `TypeError`; bad values raise `ValueError` (see `check_spread`). The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
 | `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
 | `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; numpy numbers and booleans work as values, and an integer too big for a C++ `int` is taken as a float; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
 | `veranta_spreads()` | The spread table as a dict `{market: (spread, max_spread, read_on)}`. |
