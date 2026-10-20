@@ -77,6 +77,15 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
                            [&](const Position& p) { return p.instrument == instrument; });
     if (it == positions_.end() || fraction <= 0.0) return std::nullopt;
     fraction = std::min(fraction, 1.0);
+    // A full close whose fill, spread included, is at or past the liquidation
+    // price fills there with no spread: the loss never passes liquidation_loss.
+    // A gap past it liquidates before any order can close. ADR 0020.
+    double dir = direction(it->side);
+    if (fraction >= 1.0 && dir * (price * (1.0 - dir * spread) - it->liquidation_price) <= 0.0) {
+        price = it->liquidation_price;
+        spread = 0.0;
+        cause = Cause::Liquidation;
+    }
 
     double size = it->size * fraction;
     // The oracle price moved against the position by the spread. ADR 0020.
@@ -156,27 +165,18 @@ std::vector<Closed> Portfolio::check(const std::vector<Quote>& quotes) {
         // A bar that opens past the stop fills at the open.
         bool gapped = is_long ? q.open < p.stop_price : q.open > p.stop_price;
         double fill = gapped ? q.open : p.stop_price;
-        out.push_back(close_or_liquidate(p, fill, p.trailed ? Cause::TrailingStop : Cause::Stop, q.spread));
+        out.push_back(*close(p.instrument, fill, 1.0, p.trailed ? Cause::TrailingStop : Cause::Stop, q.spread));
     }
 
     double floor = settings_.starting_balance * (1.0 - settings_.hard_stop);
     if (!halted_ && report().equity <= floor) {
         while (!positions_.empty()) {
             const Position& p = positions_.front();
-            out.push_back(close_or_liquidate(p, p.mark_price, Cause::HardStop, p.spread));
+            out.push_back(*close(p.instrument, p.mark_price, 1.0, Cause::HardStop, p.spread));
         }
         halted_ = true;
     }
     return out;
-}
-
-Closed Portfolio::close_or_liquidate(const Position& p, double price, Cause cause, double spread) {
-    // A fill at or past the liquidation price fills there with no spread:
-    // the loss never passes liquidation_loss. ADR 0020.
-    double fill = price * (1.0 - direction(p.side) * spread);
-    bool liquidated = p.side == Side::Long ? fill <= p.liquidation_price : fill >= p.liquidation_price;
-    if (liquidated) return *close(p.instrument, p.liquidation_price, 1.0, Cause::Liquidation);
-    return *close(p.instrument, price, 1.0, cause, spread);
 }
 
 Report Portfolio::report() const {

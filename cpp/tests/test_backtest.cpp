@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -549,10 +550,10 @@ void test_partial_close_keeps_entry_bar() {
 }
 
 // Y trades hours 0-1 and 7-9; X every hour 0-9. Y is in a gap at steps 2-6.
-Markets weekend() {
+Markets weekend(double reopen = 210) {
     Bars x = flat_bars({100, 100, 100, 100, 100, 100, 100, 100, 100, 100});
     Bars y = flat_bars({200, 200});
-    Bars late = flat_bars({210, 210, 210}, 7);
+    Bars late = flat_bars({reopen, reopen, reopen}, 7);
     for (std::size_t i = 0; i < late.ts.size(); ++i) {
         y.ts.push_back(late.ts[i]);
         y.open.push_back(late.open[i]);
@@ -595,6 +596,51 @@ void test_gap_waiting_close_survives_open() {
     check_true("gap reverse: the long closed", r.trades[0].side == Side::Long && r.trades[0].cause == Cause::Order);
     check_value("gap reverse: at the reopen", r.trades[0].exit_bar, 7);
     check_true("gap reverse: the short opens", r.open_positions[0].side == Side::Short);
+}
+
+// A 50x long on Y from 200, stop 1% (198): 50 units, collateral 200,
+// liquidation 200 - 0.85 * 200 / 50 = 196.6.
+Order fifty_x(Side side) {
+    return Order{.instrument = "Y", .side = side, .stop_distance = 0.01, .leverage = 50.0};
+}
+
+void check_liquidated(const std::string& label, const Result& r, double price, int bar) {
+    check_value(label + ": one trade", r.trades.size(), 1);
+    if (r.trades.empty()) return;
+    check_true(label + ": cause", r.trades[0].cause == Cause::Liquidation);
+    check_value(label + ": exit", r.trades[0].exit_price, price);
+    check_value(label + ": exit bar", r.trades[0].exit_bar, bar);
+    check_value(label + ": loss", r.trades[0].result, -170.0);
+}
+
+void test_close_order_past_liquidation() {
+    // Y opens at 150 on step 3, past the 196.6 liquidation: the close
+    // order liquidates there instead of filling at 150. ADR 0020.
+    Bars x = flat_bars({100, 100, 100, 100, 100, 100});
+    Bars y = flat_bars({200, 200, 200, 150, 150, 150});
+    Script s{.at = {{0, {fifty_x(Side::Long)}}, {2, {close_order("Y")}}}};
+    check_liquidated("close past liq", backtest(s, two(x, y), PortfolioSettings{}), 196.6, 3);
+}
+
+void test_waiting_close_past_liquidation() {
+    // The close waits over the gap; Y reopens at 150, past liquidation.
+    Script s{.at = {{0, {fifty_x(Side::Long)}}, {1, {close_order("Y")}}}};
+    check_liquidated("gap close past liq", backtest(s, weekend(150), PortfolioSettings{}), 196.6, 7);
+}
+
+void test_end_of_data_past_liquidation() {
+    // Y ends at 199 (long) or 201 (short) with a 2% spread on its last bar:
+    // 199 * 0.98 = 195.02 passes 196.6, and 201 * 1.02 = 205.02 passes the
+    // short's 200 + 3.4 = 203.4. Each liquidates at its level.
+    Bars x = flat_bars({100, 100, 100, 100, 100});
+    for (auto [side, last, liq] : {std::tuple{Side::Long, 199.0, 196.6}, std::tuple{Side::Short, 201.0, 203.4}}) {
+        Markets m = two(x, flat_bars({200, 200, last}));
+        MarketCosts c = flat_costs(m);
+        c["Y"].spread = std::vector<double>{0.0, 0.0, 0.02};
+        Script s{.at = {{0, {fifty_x(side)}}}};
+        check_liquidated(side == Side::Long ? "eod long" : "eod short",
+                         avbt::backtest(s, m, c, PortfolioSettings{}), liq, 2);
+    }
 }
 
 // Opens Y at step 0, then asks to close Y on every step from step 9.
@@ -662,6 +708,9 @@ int main() {
     test_gap_close_replaces_waiting_open();
     test_gap_new_open_replaces_waiting_open();
     test_gap_waiting_close_survives_open();
+    test_close_order_past_liquidation();
+    test_waiting_close_past_liquidation();
+    test_end_of_data_past_liquidation();
     test_waiting_orders_stay_bounded();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;

@@ -455,6 +455,17 @@ void test_spread_hard_stop_past_liquidation() {
     check_value("hard stop liq cost", closed.at(0).spread_cost, 0.0);
 }
 
+// A close order at 62 with a 4% spread fills at 59.52, past the 59.8
+// liquidation: it liquidates there. A partial close is not checked.
+void test_spread_close_order_past_liquidation() {
+    Portfolio p = spread_long();
+    auto closed = p.close("BTC", 62.0, 1.0, Cause::Order, 0.04);
+    check_true("close liq cause", closed && closed->cause == Cause::Liquidation);
+    check_value("close liq exit", closed->exit_price, 59.8);
+    check_value("close liq loss", closed->result, -0.85 * 162.5);
+    check_value("close liq cost", closed->spread_cost, 12.5);
+}
+
 }
 
 
@@ -497,6 +508,7 @@ int main() {
     test_spread_gap_fill_past_liquidation();
     test_spread_short_stop_past_liquidation();
     test_spread_hard_stop_past_liquidation();
+    test_spread_close_order_past_liquidation();
     if (failures == 0) std::printf("all portfolio checks passed\n");
     return failures == 0 ? 0 : 1;
 }

@@ -37,17 +37,33 @@ std::vector<T> to_vector(const py::array_t<T, py::array::c_style | py::array::fo
     return std::vector<T>(p, p + a.size());
 }
 
-// A spread argument as numbers: None is nullopt; a Python or numpy number
-// or a 0-d array is one value; an array is its values. A bool is refused.
-std::optional<std::vector<double>> numbers(const py::object& x, const char* name) {
-    if (x.is_none()) return std::nullopt;
+// The numpy array of a spread argument, numbers only: a bool, a string or
+// any other kind is refused.
+py::array number_array(const py::object& x, const std::string& refused) {
     py::array a = py::module_::import("numpy").attr("asarray")(x);
     char kind = a.dtype().kind();
     if (py::isinstance<py::bool_>(x) || (kind != 'i' && kind != 'u' && kind != 'f')) {
-        throw py::type_error(std::string(name) + " must be a number, an array of numbers, or None");
+        throw py::type_error(refused);
     }
+    return a;
+}
+
+// spread: None is nullopt (the table); a Python or numpy number or a 0-d
+// array is one value; a 1-d array is one value per base bar.
+std::optional<std::vector<double>> spread_arg(const py::object& x) {
+    if (x.is_none()) return std::nullopt;
+    py::array a = number_array(x, "spread must be a number, an array of numbers, or None");
     if (a.ndim() == 0) return std::vector<double>{py::float_(x).cast<double>()};
+    if (a.ndim() != 1) throw py::value_error("spread must be a 1-d array, got " + std::to_string(a.ndim()) + " dimensions");
     return to_vector(InArray::ensure(a));
+}
+
+// max_spread: None is NaN (no cap); otherwise one number, not a sequence.
+double max_spread_arg(const py::object& x) {
+    if (x.is_none()) return std::numeric_limits<double>::quiet_NaN();
+    const char* refused = "max_spread must be a number or None";
+    if (number_array(x, refused).ndim() != 0) throw py::type_error(refused);
+    return py::float_(x).cast<double>();
 }
 
 // Hands the vector's buffer to numpy. A capsule owns it and frees it with the array.
@@ -186,7 +202,7 @@ py::dict to_dict(const avbt::Params& ps) {
 std::vector<avbt::Knob> knobs_of(const py::dict& knobs) {
     std::vector<avbt::Knob> list;
     for (auto [k, values] : knobs) {
-        avbt::Knob knob{k.cast<std::string>()};
+        avbt::Knob knob{.name = k.cast<std::string>()};
         for (py::handle v : values) knob.values.push_back(to_value(knob.name, v));
         list.push_back(std::move(knob));
     }
@@ -458,17 +474,14 @@ PYBIND11_MODULE(avbt_cpp, m) {
                          const std::optional<InArray>& hold_short,
                          const std::optional<std::vector<std::pair<double, double>>>& profit_share,
                          const py::object& spread, const py::object& max_spread) {
-                 avbt::Costs c{open_fee, close_fee, hold_long ? to_vector(*hold_long) : std::vector<double>{},
-                               hold_short ? to_vector(*hold_short) : std::vector<double>{}, {}};
+                 avbt::Costs c{.open_fee = open_fee, .close_fee = close_fee,
+                               .hold_long = hold_long ? to_vector(*hold_long) : std::vector<double>{},
+                               .hold_short = hold_short ? to_vector(*hold_short) : std::vector<double>{}};
                  if (profit_share) {
                      for (auto [roi, share] : *profit_share) c.profit_share.push_back({roi, share});
                  }
-                 // None: the table; a number: every bar; an array: one per base bar.
-                 c.spread = numbers(spread, "spread");
-                 // None: no cap.
-                 auto cap = numbers(max_spread, "max_spread");
-                 if (cap && cap->size() != 1) throw py::type_error("max_spread must be a number or None");
-                 if (cap) c.max_spread = cap->front();
+                 c.spread = spread_arg(spread);
+                 c.max_spread = max_spread_arg(max_spread);
                  avbt::check_profit_share(c);
                  avbt::check_spread(c);
                  return c;

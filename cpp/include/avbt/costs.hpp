@@ -64,13 +64,15 @@ inline Spread spread_of(const std::string& market, const Costs& c) {
 // Throws std::invalid_argument when a spread value is not finite and in
 // [0, 1), or max_spread is neither NaN nor finite and at least 0.
 inline void check_spread(const Costs& c) {
+    // std::to_string prints inf and nan as "inf" and "nan".
     if (!std::isnan(c.max_spread) && !(std::isfinite(c.max_spread) && c.max_spread >= 0.0)) {
-        throw std::invalid_argument("max_spread must be NaN or at least 0");
+        throw std::invalid_argument("max_spread must be NaN, or finite and at least 0, got " +
+                                    std::to_string(c.max_spread));
     }
     if (!c.spread) return;
     for (double s : *c.spread) {
         if (!(std::isfinite(s) && s >= 0.0 && s < 1.0)) {
-            throw std::invalid_argument("spread values must be in [0, 1), got " + std::to_string(s));
+            throw std::invalid_argument("spread values must be finite and in [0, 1), got " + std::to_string(s));
         }
     }
 }

@@ -551,7 +551,7 @@ Adds `rate × size × price` to the instrument's holding costs. A NaN rate adds 
 
 **`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order, spread = 0)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at the oracle `price` moved against it by `spread`: `price × (1 − dir × spread)`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
+Closes `fraction` (from 0 to 1) of the instrument's position at the oracle `price` moved against it by `spread`: `price × (1 − dir × spread)`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A full close whose fill, the price less the spread, is at or past the liquidation price closes at the liquidation price instead, with no spread and cause `Liquidation`: a close order, an end-of-data close, a stop or the hard stop. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
@@ -560,13 +560,13 @@ Applies one bar to every position that has a quote. For each position:
 1. **Stop.** Has the bar's worst price (low for a long, high for a short) reached the stop?
 2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
 3. **Neither.** Mark the position at the close. With a `trail`, move the stop to the bar's high minus the trail (low plus the trail for a short), if that is better than the stop. The stop never moves back, and the new stop counts from the next bar.
-4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the trail had moved the stop, otherwise `Stop`. If that price is at or past the liquidation price, close at the liquidation price instead, with cause `Liquidation`.
+4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the trail had moved the stop, otherwise `Stop`. If that price less the spread is at or past the liquidation price, close at the liquidation price instead, with no spread and cause `Liquidation`.
 
 Levels trigger on the quote's oracle prices. The take-profit and stop fills pay the quote's `spread`; a liquidation fills at its level with none. Each position with a quote stores the quote's spread.
 
 If a bar reaches both the stop and the take profit, the stop fills. A bar does not show which price came first, so the backtest assumes the worse one ([ADR 0003](../docs/adr/0003-a-bar-with-both-levels-exits-at-the-stop.md)).
 
-After every position, it checks the **hard stop**: if equity is at or below `starting_balance × (1 - hard_stop)`, it closes every position at its mark, less its last spread, with cause `HardStop` and sets `halted_`. A position without a quote keeps its last mark.
+After every position, it checks the **hard stop**: if equity is at or below `starting_balance × (1 - hard_stop)`, it closes every position at its mark, less its last spread, with cause `HardStop` and sets `halted_`. A position whose mark less the spread is at or past its liquidation price closes there instead, with cause `Liquidation`. A position without a quote keeps its last mark.
 
 It returns every position it closed.
 
@@ -953,6 +953,7 @@ Or skip the object: `decide(name, params, markets, positions, now, settings)` wa
 - The caller's system moves the trailing stop as the price improves, and never moves it back.
 - The caller's system closes the partial take profit: when the take profit is hit, it closes `take_profit_fraction` of the position and leaves the rest open with no take profit.
 - The caller's system watches liquidation and the hard stop. A position that the exchange closes is no longer in `positions` at the next `decide`.
+- `Live` returns only the new orders of each call; it keeps no waiting list. An order for a market that is closed is the caller's to hold until the market opens. A new order for that market replaces it, as in the backtest: a new open replaces a held open, and a new close replaces a held close and drops a held open.
 
 ## Tests
 

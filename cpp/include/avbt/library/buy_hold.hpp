@@ -12,7 +12,8 @@ namespace avbt {
 // stays out. stop_loss is the fraction of collateral the stop loses, so the
 // stop sits stop_loss / leverage from the fill. The default 0.75 sits below
 // max_stop_loss, since the spread adds to the loss: a stop at the cap is
-// refused under any spread. ADR 0020.
+// refused under any spread. At 0.75 it opens only when the half-spread is
+// at most 0.05 / (2 * leverage - 1.55): about 0.0005 at 50x. ADR 0020.
 struct BuyHold {
     struct Params {
         std::string instrument = "BTC";

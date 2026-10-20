@@ -489,6 +489,21 @@ def test_costs_spread_rejects_bool():
             avbt.Costs(**bad)
 
 
+
+def test_costs_max_spread_only_a_number():
+    for bad in ((0.001,), [0.001], np.array([0.001]), np.zeros((1, 1)), []):
+        with pytest.raises(TypeError, match="max_spread"):
+            avbt.Costs(spread=0.001, max_spread=bad)
+
+
+def test_costs_spread_error_texts():
+    with pytest.raises(ValueError, match="max_spread.*finite"):
+        avbt.Costs(max_spread=math.inf)
+    with pytest.raises(ValueError, match="spread.*got inf"):
+        avbt.Costs(spread=math.inf)
+    with pytest.raises(ValueError, match="spread must be a 1-d array"):
+        avbt.Costs(spread=np.zeros((2, 2)))
+
 def test_costs_max_spread_none_is_nan():
     assert math.isnan(avbt.Costs(max_spread=None).max_spread)
     assert math.isnan(avbt.Costs(0.0, 0.0, None, None, None, 0.001, None).max_spread)
