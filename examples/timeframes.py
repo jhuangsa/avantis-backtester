@@ -3,7 +3,8 @@
 Every bar is bucketed in UTC and labelled with its open time. Minute and hour
 bars count from 00:00 UTC, weeks start Monday 00:00 UTC, and months start the
 1st at 00:00 UTC. Empty bars are filled flat at the previous close with
-minutes_with_data = 0, by btc_bars.resample.
+minutes_with_data = 0, by btc_bars.resample; with keep_empty=False they are
+left out, so the bars skip the time (ADR 0021).
 
 Run (self-check on a synthetic series): python3 examples/timeframes.py
 """
@@ -67,9 +68,10 @@ def to_bars(timeframe, df: pd.DataFrame) -> avbt_cpp.Bars:
                          df.close.to_numpy(float), df.minutes_with_data.to_numpy("int32"))
 
 
-def all_timeframes(minutes: pd.DataFrame) -> list[avbt_cpp.Bars]:
-    """The 12 timeframes of one market, finest first, from ts/open/high/low/close minutes."""
-    return [to_bars(tf, resample(minutes, rule)) for tf, rule in RULES]
+def all_timeframes(minutes: pd.DataFrame, keep_empty: bool = True) -> list[avbt_cpp.Bars]:
+    """The 12 timeframes of one market, finest first, from ts/open/high/low/close
+    minutes. keep_empty=False leaves out bars with no minutes (see resample)."""
+    return [to_bars(tf, resample(minutes, rule, keep_empty)) for tf, rule in RULES]
 
 
 if __name__ == "__main__":
@@ -98,4 +100,10 @@ if __name__ == "__main__":
     # The gap is filled flat with no data.
     filled = resample(minutes, "1min").query("minutes_with_data == 0")
     assert len(filled) > 0 and (filled.open == filled.close).all()
+
+    # keep_empty=False leaves the gap out; the bars still build Markets.
+    kept = resample(minutes, "1min", keep_empty=False)
+    assert len(kept) == len(minutes) and (kept.minutes_with_data == 1).all()
+    gapped = all_timeframes(minutes, keep_empty=False)
+    assert avbt_cpp.Markets([avbt_cpp.Market("X", gapped, None)]).clock.size == len(minutes)
     print("ok:", ", ".join(avbt_cpp.timeframe_name(tf) for tf, _ in RULES))

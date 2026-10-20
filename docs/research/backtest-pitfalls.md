@@ -88,6 +88,14 @@ Sources: [BitMEX, Perpetual Contracts Guide](https://www.bitmex.com/app/perpetua
 
 **Guard.** The C++ engine moves every fill against the trade by the market's half-spread, from the caller or from Veranta's table (ADR 0020). A market with no spread is an error, not zero. Zero spread must be written out, and a result run with zero spread says so.
 
+## 9. Trading a closed market
+
+**Failure.** A market that closes (stocks, forex, metals) gets flat bars over the weekend. Orders fill and stops trigger at Friday's close while nobody can trade, and a weekend counts as held time.
+
+**Mechanism.** Filling empty bars flat makes closed time look like quiet trading. The real Monday open can be far from Friday's close.
+
+**Guard.** Build such markets with `resample(..., keep_empty=False)`, so the bars skip the closed time (ADR 0021). The engine then does nothing to the market in the gap: an order waits for the next open, and a stop the reopen jumps past fills at the open. Time exits count bars, not clock time.
+
 ## Checklist
 
 On every run the engine enforces all six:

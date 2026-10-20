@@ -193,7 +193,7 @@ void test_markets_refuse_misaligned() {
     ragged.low.pop_back();
     Bars gap = flat_bars({100, 101, 102});
     gap.ts[2] += 3600;
-    check_true("missing base bar refused", refused({{"X", {gap}}}));
+    check_true("missing base bar passes", !refused({{"X", {gap}}}));
     Bars sparse_four = flat_bars({100, 101});
     sparse_four.timeframe = Timeframe::Hour4;
     sparse_four.ts = {0, 8 * 3600};

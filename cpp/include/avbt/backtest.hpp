@@ -19,7 +19,8 @@ namespace avbt {
 inline bool defined(double x) { return !std::isnan(x); }
 
 // What a strategy returns at the close of bar t. It fills at the open of
-// bar t+1. Distances are fractions of that open, because the strategy does
+// bar t+1, or at its market's next open if the market skips that step.
+// Distances are fractions of that open, because the strategy does
 // not know it yet. See ADR 0009.
 struct Order {
     enum class Kind { Open, Close };
@@ -83,8 +84,9 @@ struct Result {
 
 // What every strategy has: prepare resets its lines and computes them from
 // the markets; update extends them with only the bars added since the last
-// call, so a live caller can append bars and update; decide is called at the close of every clock step with `now`, the
-// UTC second of that close, and returns orders. A strategy reads its bars
+// call, so a live caller can append bars and update; decide is called at
+// the close of every clock step with `now`, the UTC second of that close
+// (bar_end of the step), and returns orders. A strategy reads its bars
 // through last_closed(bars, now), which never returns a bar still open. No
 // base class, no virtual call.
 // Checks the settings and hands state_delay to a strategy that reads labels.
@@ -119,17 +121,21 @@ concept Strategy = requires(S s, const Markets& markets, int64_t now, const Repo
 
 // Runs one strategy on several markets on one clock (Markets::clock). On
 // each step t:
-// 1. Fill the orders from step t-1, closes before opens so freed collateral
+// 1. Fill the waiting orders, closes before opens so freed collateral
 //    can pay for a new trade, each at the open of its own market's base bar,
 //    moved against the trade by that bar's spread.
-//    An order for a market with no bar at step t (its data has not started,
-//    or has ended) is dropped.
+//    An order for a market in a gap at step t (no bar, but bars before and
+//    after) waits for that market's next open. An order for a market whose
+//    data has not started, or has ended, is dropped.
 // 2. Check every position's levels on its own market's base bar; fills pay
 //    that bar's spread.
 // 3. Close the position of a market whose data ends at this step, at its
 //    last close less the spread, unless this is the run's last step.
 // 4. Add each open position's holding cost for its base bar.
-// 5. Record equity, then ask the strategy.
+// 5. Record equity, then ask the strategy at the step's bar_end. Its new
+//    orders join the ones still waiting.
+// Nothing happens to a market in a gap: no fill, no level check, no
+// holding cost; its positions keep their last mark. ADR 0021.
 // Orders returned on the last step never fill. The caller chooses the bars;
 // nothing is trimmed. Every market needs Costs; check_costs. ADR 0010, 0011,
 // 0016, 0020.
@@ -167,9 +173,16 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
     for (int t = 0; t < n; ++t) {
         std::stable_partition(waiting.begin(), waiting.end(),
                               [](const Order& o) { return o.kind == Order::Kind::Close; });
+        std::vector<Order> kept;
         for (const Order& o : waiting) {
             int i = markets.bar_at(o.instrument, t);
-            if (i < 0) continue;
+            if (i < 0) {
+                // In a gap the order waits for the next open; before the
+                // market starts or after it ends, it is dropped.
+                const std::vector<int64_t>& ts = markets.base(o.instrument).ts;
+                if (ts.front() <= clock[t] && clock[t] <= ts.back()) kept.push_back(o);
+                continue;
+            }
             double open = markets.base(o.instrument).open[i];
             double spread = spreads.at(o.instrument).at(i);
             if (o.kind == Order::Kind::Close) {
@@ -188,7 +201,7 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
                 entry_bar[o.instrument] = t;
             }
         }
-        waiting.clear();
+        waiting = std::move(kept);
 
         std::vector<Quote> quotes;
         for (const Position& p : portfolio.positions()) {
@@ -222,9 +235,10 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
         }
 
         result.equity.push_back(portfolio.report().equity);
-        int64_t now = clock[t] + seconds(markets.timeframe());
-        waiting = strategy.decide(now, portfolio.report(), portfolio.positions());
-        on_step(t, portfolio.positions(), waiting);
+        int64_t now = bar_end(markets.timeframe(), clock[t]);
+        std::vector<Order> orders = strategy.decide(now, portfolio.report(), portfolio.positions());
+        on_step(t, portfolio.positions(), orders);
+        waiting.insert(waiting.end(), orders.begin(), orders.end());
     }
     result.ending_balance = portfolio.report().balance;
     result.open_positions = portfolio.positions();

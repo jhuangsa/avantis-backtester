@@ -1,4 +1,4 @@
-_Superseded in part by [ADR 0011](0011-markets-carry-several-timeframes-and-their-own-history.md): markets may have several timeframes and their own history. The clock rules below no longer hold._
+_Superseded in part by [ADR 0011](0011-markets-carry-several-timeframes-and-their-own-history.md): markets may have several timeframes and their own history. The clock rules below no longer hold. [ADR 0021](0021-bars-may-skip-time.md) lets a market skip time; an order for it waits for its next open._
 
 # A C++ backtest runs one strategy on several markets on one clock
 

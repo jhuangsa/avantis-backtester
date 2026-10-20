@@ -154,7 +154,7 @@ How far back a strategy reads state labels. It matches how late labels arrive li
 _Avoid_: lag, label delay
 
 **Clock**:
-The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. The C++ engine refuses markets with different base timeframes.
+The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. A market may skip steps in between (a weekend, a closed session): it has no bar there, and its orders wait for its next open. The C++ engine refuses markets with different base timeframes. See ADR 0021.
 _Avoid_: calendar, index
 
 **Hard stop**:

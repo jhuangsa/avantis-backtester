@@ -26,7 +26,9 @@ struct BuyHold {
         update(m);
     }
     void update(const Markets& m) { bars = &m.at(params.instrument, params.timeframe); }
-    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>&) {
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
+        // A position already there (after a restart) counts as opened.
+        for (const Position& x : positions) opened = opened || x.instrument == params.instrument;
         if (opened || last_closed(*bars, now) < 0) return {};
         opened = true;
         const auto& p = params;

@@ -76,7 +76,7 @@ struct WeekendBasket {
             if (mine != positions.end()) {
                 // hold is 0 after a restart; then the longer of the two is used.
                 int h = l.hold ? l.hold : std::max(p.w_hold, p.b_hold);
-                if (mine->entry_time != unknown_time && now - mine->entry_time >= h * seconds(p.timeframe))
+                if (mine->entry_time != unknown_time && bars_held(*l.bars, mine->entry_time, now) >= h)
                     orders.push_back(Order{.kind = Order::Kind::Close, .instrument = l.instrument});
                 continue;
             }

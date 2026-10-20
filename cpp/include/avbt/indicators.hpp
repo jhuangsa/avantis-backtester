@@ -15,16 +15,20 @@ enum class Timeframe {
 };
 
 // Length of one bar, in seconds. A month is 28 to 31 days, so Month1 returns
-// 31 days, the longest: last_closed uses it only for a series' last bar, and
-// a bar taken as longer than it is can close late but never early.
+// 31 days, the longest. For when a bar ends, use bar_end.
 int64_t seconds(Timeframe tf);
+
+// The UTC second at which the bar opened at ts closes: ts + seconds(tf),
+// or for Month1 the first second of the next UTC month.
+int64_t bar_end(Timeframe tf, int64_t ts);
 
 // Plain text for results and messages: "1 minute", "4 hours", "1 month".
 const char* name(Timeframe tf);
 
-// One instrument's bars on one timeframe. Python builds every timeframe
-// from the same 1-minute candles and fills empty bars flat, so there are no
-// gaps: bar i ends when bar i+1 opens.
+// One instrument's bars on one timeframe. Bars may skip time: a closed
+// session or a weekend can have no bars at all. Bar i ends at
+// bar_end(timeframe, ts[i]), which is when bar i+1 opens only if there is
+// no gap. ADR 0021.
 struct Bars {
     Timeframe timeframe = Timeframe::Min1;
     // UTC seconds at which each bar opens, rising.
@@ -39,9 +43,10 @@ struct Bars {
 };
 
 // The index of the last bar that has fully closed at time `now` (UTC
-// seconds), or -1 when none has. Bar i has closed once bar i+1 has opened;
-// the last bar, once seconds(timeframe) have passed. A strategy reads an
-// hourly bar through this, so at 10:30 it sees the 09:00 bar, not the 10:00.
+// seconds), or -1 when none has: the last k with
+// bar_end(timeframe, ts[k]) <= now. A strategy reads an hourly bar through
+// this, so at 10:30 it sees the 09:00 bar, not the 10:00. A bar before a gap
+// closes at its own end, not when the next bar opens.
 int last_closed(const Bars& bars, int64_t now);
 
 // Rolling indicators: each takes one bar per update and returns that bar's

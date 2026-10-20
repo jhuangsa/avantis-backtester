@@ -96,7 +96,7 @@ struct FalseBreak1h {
             auto mine = std::find_if(positions.begin(), positions.end(),
                                      [&](const Position& x) { return x.instrument == l.instrument; });
             if (mine != positions.end()) {
-                bool late = mine->entry_time != unknown_time && now - mine->entry_time >= p.hold * seconds(p.timeframe);
+                bool late = mine->entry_time != unknown_time && bars_held(*l.bars, mine->entry_time, now) >= p.hold;
                 double mid = (l.high[t] + l.low[t]) / 2;
                 bool back = p.revert && defined(mid) && (mine->side == Side::Long ? c[t] >= mid : c[t] <= mid);
                 if (late || back) orders.push_back(Order{.kind = Order::Kind::Close, .instrument = l.instrument});

@@ -1,5 +1,6 @@
 #include "avbt/indicators.hpp"
 #include <cmath>
+#include <ctime>
 #include <stdexcept>
 #include <cstdio>
 #include <utility>
@@ -45,16 +46,31 @@ const char* name(Timeframe tf) {
     throw std::invalid_argument("unknown timeframe");
 }
 
+int64_t bar_end(Timeframe tf, int64_t ts) {
+    if (tf != Timeframe::Month1) return ts + seconds(tf);
+    // Days from 1970-01-01 to the first of the next UTC month; Howard
+    // Hinnant's days_from_civil.
+    std::time_t t = static_cast<std::time_t>(ts);
+    std::tm u{};
+    gmtime_r(&t, &u);
+    int64_t y = u.tm_year + 1900, m = u.tm_mon + 2;
+    if (m > 12) m = 1, ++y;
+    if (m <= 2) --y;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (era * 146097 + doe - 719468) * 86400;
+}
+
 int last_closed(const Bars& bars, int64_t now) {
     // k is the last bar that has opened by now. Every bar before it has
-    // closed, because the bar after it has opened.
+    // closed by then: it ended at or before k opened. Bar k itself may
+    // have closed too, if its end has passed.
     auto after = std::upper_bound(bars.ts.begin(), bars.ts.end(), now);
     int k = static_cast<int>(after - bars.ts.begin()) - 1;
     if (k < 0) return -1;
-    // Bar k itself has closed only if it is the last bar and its length has passed.
-    bool last = k + 1 == static_cast<int>(bars.ts.size());
-    if (last && bars.ts[k] + seconds(bars.timeframe) <= now) return k;
-    return k - 1;
+    return bar_end(bars.timeframe, bars.ts[k]) <= now ? k : k - 1;
 }
 
 Sma::Sma(int n) : n_(n) {

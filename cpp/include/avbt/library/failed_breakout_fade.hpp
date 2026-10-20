@@ -74,7 +74,7 @@ struct FailedBreakoutFade {
             auto mine = std::find_if(positions.begin(), positions.end(),
                                      [&](const Position& x) { return x.instrument == l.instrument; });
             if (mine != positions.end()) {
-                if (mine->entry_time != unknown_time && now - mine->entry_time >= p.hold * seconds(p.timeframe))
+                if (mine->entry_time != unknown_time && bars_held(*l.bars, mine->entry_time, now) >= p.hold)
                     orders.push_back(Order{.kind = Order::Kind::Close, .instrument = l.instrument});
                 continue;
             }

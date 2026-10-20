@@ -1,3 +1,5 @@
+_Superseded in part by [ADR 0021](0021-bars-may-skip-time.md): bars may skip time, an order for a market in a gap waits, and a bar closes at `bar_end`. The gap rules below no longer hold._
+
 # Markets carry several timeframes and their own history
 
 This replaces the clock rules of [ADR 0010](0010-a-cpp-backtest-runs-on-markets-on-one-clock.md). The rest of ADR 0010 stands: orders fill at the next open of their own instrument, closes fill before opens, and `Combined` runs several strategies in one account.

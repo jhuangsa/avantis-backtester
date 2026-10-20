@@ -52,7 +52,7 @@ struct DipBuyer {
                                  [&](const Position& x) { return x.instrument == p.instrument; });
         if (mine != positions.end()) {
             bool late = mine->entry_time != unknown_time &&
-                        now - mine->entry_time >= p.hold * seconds(p.timeframe);
+                        bars_held(*bars, mine->entry_time, now) >= p.hold;
             bool back = p.revert && defined(avg[t]) &&
                         (mine->side == Side::Long ? bars->close[t] >= avg[t] : bars->close[t] <= avg[t]);
             if (late || back) return {Order{.kind = Order::Kind::Close, .instrument = p.instrument}};

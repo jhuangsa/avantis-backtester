@@ -14,10 +14,10 @@
 
 namespace avbt {
 
-// Daily Sharpe from clock time. Step i closes at clock[i] + seconds(timeframe).
+// Daily Sharpe from clock time. Step i closes at bar_end(timeframe, clock[i]).
 // At each UTC midnight from the first close to the last, the day's value is
 // the equity of the last step closed at or before it, so a day with no bars
-// is a 0% return; the part-days at either end are dropped. -inf when any
+// (a weekend, a closed market) is a 0% return and still counts; the part-days at either end are dropped. -inf when any
 // equity is at or below 0; NaN with fewer than 30 daily returns or none that
 // vary; else mean / sample sd * sqrt(365). Throws std::invalid_argument
 // when equity and clock differ in length. ADR 0013.
@@ -30,12 +30,13 @@ inline double sharpe(const Result& r) {
         if (e <= 0) return -std::numeric_limits<double>::infinity();
     }
     if (r.equity.empty()) return std::nan("");
-    const int64_t day = 86400, len = seconds(r.timeframe);
-    int64_t first = r.clock.front() + len, last = r.clock.back() + len;
+    const int64_t day = 86400;
+    auto end = [&](int64_t ts) { return bar_end(r.timeframe, ts); };
+    int64_t first = end(r.clock.front()), last = end(r.clock.back());
     std::vector<double> days;
     std::size_t i = 0;
     for (int64_t midnight = (first + day - 1) / day * day; midnight <= last; midnight += day) {
-        while (i + 1 < r.clock.size() && r.clock[i + 1] + len <= midnight) ++i;
+        while (i + 1 < r.clock.size() && end(r.clock[i + 1]) <= midnight) ++i;
         days.push_back(r.equity[i]);
     }
     std::vector<double> returns;
