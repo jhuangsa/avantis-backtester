@@ -32,7 +32,7 @@ using namespace avbt;
 // Every market at the given fee (the old strategy default), no holding costs.
 MarketCosts flat_costs(const Markets& m, double fee = 0.0001) {
     MarketCosts c;
-    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee};
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee, .spread = no_spread};
     return c;
 }
 

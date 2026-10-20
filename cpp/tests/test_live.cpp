@@ -89,7 +89,7 @@ Result replay(const std::string& name, const S& fresh, const std::vector<Market>
               PortfolioSettings settings = {}, const std::string& table = "", const Params& params = {}) {
     Markets all = Markets::make(full);
     MarketCosts costs;
-    for (const Market& m : full) costs[m.instrument] = Costs{.open_fee = 0.0001, .close_fee = 0.0001};
+    for (const Market& m : full) costs[m.instrument] = Costs{.open_fee = 0.0001, .close_fee = 0.0001, .spread = no_spread};
     S s = fresh;
     std::vector<Step> steps;
     Result r = backtest(s, all, costs, settings,

@@ -98,8 +98,10 @@ def dedupe(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def resample(minutes_df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Bucket minutes into UTC bars, left-labelled, and fill empty buckets forward."""
+def resample(minutes_df: pd.DataFrame, rule: str, keep_empty: bool = True) -> pd.DataFrame:
+    """Bucket minutes into UTC bars, left-labelled. keep_empty=True fills an
+    empty bucket flat at the last close; False drops it, so the bars skip
+    the time (a closed market; ADR 0021)."""
     idx = pd.to_datetime(minutes_df["ts"], unit="s", utc=True)
     s = minutes_df.set_index(idx)
     if "filled" in s:
@@ -116,6 +118,8 @@ def resample(minutes_df: pd.DataFrame, rule: str) -> pd.DataFrame:
     })
     real = bars["minutes_with_data"] > 0
     bars = bars.loc[real.idxmax(): real[::-1].idxmax()]
+    if not keep_empty:
+        bars = bars[bars["minutes_with_data"] > 0]
     close = bars["close"].ffill()
     for col in ("open", "high", "low"):
         bars[col] = bars[col].where(bars["minutes_with_data"] > 0, close)

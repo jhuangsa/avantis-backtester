@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -95,14 +96,21 @@ inline Result run(const std::string& name, const Params& params, const Markets& 
 }
 
 // The orders `live` gives at `now`, from a fresh start: prepare on the bars
-// so far, decide one base step earlier to learn which bars were already
-// seen, then decide at `now`. So it returns orders only at the step where
-// run would, with no state kept between calls. Positions need entry_time
-// for time exits; test_live checks the orders equal run's.
+// so far, decide at the previous clock step's close to learn which bars
+// were already seen, then decide at `now`. That step may be before a gap.
+// When `now` is the first step's close or not a step's close, it warms up
+// one base bar earlier. So it returns orders only at the step where run
+// would, with no state kept between calls. Positions need entry_time for
+// time exits; test_live and test_gaps check the orders equal run's.
 inline std::vector<Order> decide_once(Live live, const Markets& markets, const std::vector<Position>& positions,
                                       int64_t now) {
+    Timeframe tf = markets.timeframe();
+    const std::vector<int64_t>& clock = markets.clock();
+    auto s = std::partition_point(clock.begin(), clock.end(), [&](int64_t ts) { return bar_end(tf, ts) < now; });
+    bool on_clock = s != clock.end() && bar_end(tf, *s) == now;
+    int64_t before = on_clock && s != clock.begin() ? bar_end(tf, *(s - 1)) : now - seconds(tf);
     live.prepare(markets);
-    live.decide(now - seconds(markets.timeframe()), Report{}, positions);
+    live.decide(before, Report{}, positions);
     return live.decide(now, Report{}, positions);
 }
 

@@ -4,11 +4,13 @@
 #include "avbt/backtest.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <stdexcept>
 #include <cstdio>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -37,7 +39,7 @@ using namespace avbt;
 // Every market at the given fee, no holding costs.
 MarketCosts flat_costs(const Markets& m, double fee = 0.0) {
     MarketCosts c;
-    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee};
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = fee, .close_fee = fee, .spread = no_spread};
     return c;
 }
 
@@ -193,7 +195,7 @@ void test_markets_refuse_misaligned() {
     ragged.low.pop_back();
     Bars gap = flat_bars({100, 101, 102});
     gap.ts[2] += 3600;
-    check_true("missing base bar refused", refused({{"X", {gap}}}));
+    check_true("missing base bar passes", !refused({{"X", {gap}}}));
     Bars sparse_four = flat_bars({100, 101});
     sparse_four.timeframe = Timeframe::Hour4;
     sparse_four.ts = {0, 8 * 3600};
@@ -389,7 +391,7 @@ Result held(double rate, std::size_t n = 6) {
     Bars b = flat_bars({100, 101, 102, 103, 101, 101});
     UpDown s;
     Markets m = one(b);
-    MarketCosts c{{"X", Costs{.hold_long = std::vector<double>(n, rate)}}};
+    MarketCosts c{{"X", Costs{.hold_long = std::vector<double>(n, rate), .spread = no_spread}}};
     return avbt::backtest(s, m, c, PortfolioSettings{});
 }
 
@@ -422,7 +424,7 @@ void test_open_and_close_fees() {
     Bars b = flat_bars({100, 101, 102, 103, 101, 101});
     UpDown s;
     Markets m = one(b);
-    Result r = avbt::backtest(s, m, {{"X", Costs{.open_fee = 0.001, .close_fee = 0.002}}}, PortfolioSettings{});
+    Result r = avbt::backtest(s, m, {{"X", Costs{.open_fee = 0.001, .close_fee = 0.002, .spread = no_spread}}}, PortfolioSettings{});
     double size = r.trades.at(0).size;
     check_value("fees", r.trades.at(0).fees, size * (0.001 * 102 + 0.002 * 101));
     check_value("result after fees", r.trades.at(0).result, -size - r.trades.at(0).fees);
@@ -433,7 +435,7 @@ void test_profit_share_fees() {
     Bars b = flat_bars({100, 101, 102, 150, 140, 140});
     UpDown s;
     Markets m = one(b);
-    Costs c{.profit_share = {{2.5, 0.25}, {5.0, 0.20}}};
+    Costs c{.profit_share = {{2.5, 0.25}, {5.0, 0.20}}, .spread = no_spread};
     Result r = avbt::backtest(s, m, {{"X", c}}, PortfolioSettings{});
     const auto& t = r.trades.at(0);
     check_value("share fees", t.fees, 0.25 * t.size * 38);
@@ -450,6 +452,68 @@ void test_missing_costs_throws() {
     bool threw = false;
     try { avbt::backtest(s, m, MarketCosts{}, PortfolioSettings{}); } catch (const std::invalid_argument&) { threw = true; }
     check_true("missing costs throws", threw);
+}
+
+// A spread column per bar, capped at 3.5% (ADR 0020). The open fills on bar
+// 1 at 100 * 1.02; the close on bar 3 at 100 * (1 - 0.035), the cap. The
+// stop stays at 90, on the oracle open: size 100 / (102 - 90 * 0.98).
+void test_spread_column_and_cap() {
+    Bars b = flat_bars({100, 100, 100, 100, 100, 100});
+    Script s{.at = {{0, {open_long("X", 0.1)}}, {2, {close_order("X")}}}};
+    Markets m = one(b);
+    Costs c{.spread = std::vector<double>{0.01, 0.02, 0.03, 0.04, 0.05, 0.06}, .max_spread = 0.035};
+    Result r = avbt::backtest(s, m, {{"X", c}}, PortfolioSettings{});
+    check_value("spread one trade", r.trades.size(), 1);
+    if (r.trades.empty()) return;
+    const Trade& t = r.trades[0];
+    double size = 100.0 / (102.0 - 90.0 * 0.98);
+    check_value("spread order entry", t.entry_price, 102.0);
+    check_value("spread order exit", t.exit_price, 96.5);
+    check_value("spread order size", t.size, size);
+    check_value("spread order cost", t.spread_cost, size * 100.0 * (0.02 + 0.035));
+    check_value("spread order result", t.result, size * (96.5 - 102.0));
+}
+
+// A constant 1% on three markets: X takes profit at 110 and fills at 108.9,
+// Y stops at 90 and fills at 89.1, Z's data ends at 100 and fills at 99.
+void test_spread_every_fill() {
+    Bars x = flat_bars({100, 100, 100, 100, 100, 100});
+    x.high[2] = 115;
+    Bars y = flat_bars({100, 100, 100, 100, 100, 100});
+    y.low[2] = 85;
+    Bars z = flat_bars({100, 100, 100, 100});
+    Order take{.instrument = "X", .side = Side::Long, .stop_distance = 0.1, .take_profit_distance = 0.1};
+    Script s{.at = {{0, {take, open_long("Y", 0.1), open_long("Z", 0.1)}}}};
+    Markets m = Markets::make({{"X", {x}}, {"Y", {y}}, {"Z", {z}}});
+    Costs c{.spread = std::vector<double>{0.01}};
+    Result r = avbt::backtest(s, m, {{"X", c}, {"Y", c}, {"Z", c}}, PortfolioSettings{});
+    check_value("spread three trades", r.trades.size(), 3);
+    for (const Trade& t : r.trades) {
+        check_value("spread fill entry " + t.instrument, t.entry_price, 101.0);
+        double exit = t.instrument == "X" ? 108.9 : t.instrument == "Y" ? 89.1 : 99.0;
+        double oracle = t.instrument == "X" ? 110.0 : t.instrument == "Y" ? 90.0 : 100.0;
+        check_value("spread fill exit " + t.instrument, t.exit_price, exit);
+        check_value("spread fill cost " + t.instrument, t.spread_cost, t.size * (100.0 + oracle) * 0.01);
+        check_value("spread fill identity " + t.instrument, t.result + t.fees + t.holding_costs,
+                    t.size * (t.exit_price - t.entry_price));
+    }
+}
+
+void test_spread_validation() {
+    Markets m = one(flat_bars({100, 101, 102}));
+    auto throws = [&](const Costs& c) {
+        try { check_costs(m, {{"X", c}}); } catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    check_true("spread table has no X", throws(Costs{}));
+    check_true("spread column too short", throws(Costs{.spread = std::vector<double>{0.01, 0.01}}));
+    check_true("spread nan", throws(Costs{.spread = std::vector<double>{std::nan("")}}));
+    check_true("spread negative", throws(Costs{.spread = std::vector<double>{-0.01}}));
+    check_true("spread one", throws(Costs{.spread = std::vector<double>{1.0}}));
+    check_true("max_spread negative", throws(Costs{.spread = no_spread, .max_spread = -0.01}));
+    check_true("spread none valid", !throws(Costs{.spread = no_spread}));
+    check_true("spread constant valid", !throws(Costs{.spread = std::vector<double>{0.01}}));
+    check_true("spread column valid", !throws(Costs{.spread = std::vector<double>(3, 0.01)}));
 }
 
 }
@@ -485,6 +549,163 @@ void test_partial_close_keeps_entry_bar() {
     check_value("rest exit bar", r.trades.at(1).exit_bar, 4);
 }
 
+// Y trades hours 0-1 and 7-9; X every hour 0-9. Y is in a gap at steps 2-6.
+Markets weekend(double reopen = 210) {
+    Bars x = flat_bars({100, 100, 100, 100, 100, 100, 100, 100, 100, 100});
+    Bars y = flat_bars({200, 200});
+    Bars late = flat_bars({reopen, reopen, reopen}, 7);
+    for (std::size_t i = 0; i < late.ts.size(); ++i) {
+        y.ts.push_back(late.ts[i]);
+        y.open.push_back(late.open[i]);
+        y.high.push_back(late.high[i]);
+        y.low.push_back(late.low[i]);
+        y.close.push_back(late.close[i]);
+        y.minutes_with_data.push_back(60);
+    }
+    return two(x, y);
+}
+
+void test_gap_close_replaces_waiting_open() {
+    // The open from step 1 waits through the gap; the close at step 3
+    // replaces it, so nothing opens at step 7. ADR 0021.
+    Script s{.at = {{1, {open_long("Y", 0.1)}}, {3, {close_order("Y")}}}};
+    Result r = backtest(s, weekend(), PortfolioSettings{});
+    check_value("gap close: no trades", r.trades.size(), 0);
+    check_value("gap close: no position", r.open_positions.size(), 0);
+}
+
+void test_gap_new_open_replaces_waiting_open() {
+    Order short_y{.instrument = "Y", .side = Side::Short, .stop_distance = 0.1};
+    Script s{.at = {{1, {open_long("Y", 0.1)}}, {3, {short_y}}}};
+    Result r = backtest(s, weekend(), PortfolioSettings{});
+    check_value("gap short: one position", r.open_positions.size(), 1);
+    if (r.open_positions.empty()) return;
+    check_true("gap short: the short fills", r.open_positions[0].side == Side::Short);
+}
+
+void test_gap_waiting_close_survives_open() {
+    // Long Y from step 1; the close at step 1 waits through the gap, and a
+    // short at step 3 does not replace it: at step 7 the long closes, then
+    // the short opens.
+    Order short_y{.instrument = "Y", .side = Side::Short, .stop_distance = 0.1};
+    Script s{.at = {{0, {open_long("Y", 0.1)}}, {1, {close_order("Y")}}, {3, {short_y}}}};
+    Result r = backtest(s, weekend(), PortfolioSettings{});
+    check_value("gap reverse: one trade", r.trades.size(), 1);
+    check_value("gap reverse: one position", r.open_positions.size(), 1);
+    if (r.trades.empty() || r.open_positions.empty()) return;
+    check_true("gap reverse: the long closed", r.trades[0].side == Side::Long && r.trades[0].cause == Cause::Order);
+    check_value("gap reverse: at the reopen", r.trades[0].exit_bar, 7);
+    check_true("gap reverse: the short opens", r.open_positions[0].side == Side::Short);
+}
+
+// A 50x long on Y from 200, stop 1% (198): 50 units, collateral 200,
+// liquidation 200 - 0.85 * 200 / 50 = 196.6.
+Order fifty_x(Side side) {
+    return Order{.instrument = "Y", .side = side, .stop_distance = 0.01, .leverage = 50.0};
+}
+
+void check_liquidated(const std::string& label, const Result& r, double price, int bar) {
+    check_value(label + ": one trade", r.trades.size(), 1);
+    if (r.trades.empty()) return;
+    check_true(label + ": cause", r.trades[0].cause == Cause::Liquidation);
+    check_value(label + ": exit", r.trades[0].exit_price, price);
+    check_value(label + ": exit bar", r.trades[0].exit_bar, bar);
+    check_value(label + ": loss", r.trades[0].result, -170.0);
+}
+
+void test_close_order_past_liquidation() {
+    // Y opens at 150 on step 3, past the 196.6 liquidation: the close
+    // order liquidates there instead of filling at 150. ADR 0020.
+    Bars x = flat_bars({100, 100, 100, 100, 100, 100});
+    Bars y = flat_bars({200, 200, 200, 150, 150, 150});
+    Script s{.at = {{0, {fifty_x(Side::Long)}}, {2, {close_order("Y")}}}};
+    check_liquidated("close past liq", backtest(s, two(x, y), PortfolioSettings{}), 196.6, 3);
+}
+
+void test_waiting_close_past_liquidation() {
+    // The close waits over the gap; Y reopens at 150, past liquidation.
+    Script s{.at = {{0, {fifty_x(Side::Long)}}, {1, {close_order("Y")}}}};
+    check_liquidated("gap close past liq", backtest(s, weekend(150), PortfolioSettings{}), 196.6, 7);
+}
+
+void test_end_of_data_past_liquidation() {
+    // Y ends at 199 (long) or 201 (short) with a 2% spread on its last bar:
+    // 199 * 0.98 = 195.02 passes 196.6, and 201 * 1.02 = 205.02 passes the
+    // short's 200 + 3.4 = 203.4. Each liquidates at its level.
+    Bars x = flat_bars({100, 100, 100, 100, 100});
+    for (auto [side, last, liq] : {std::tuple{Side::Long, 199.0, 196.6}, std::tuple{Side::Short, 201.0, 203.4}}) {
+        Markets m = two(x, flat_bars({200, 200, last}));
+        MarketCosts c = flat_costs(m);
+        c["Y"].spread = std::vector<double>{0.0, 0.0, 0.02};
+        Script s{.at = {{0, {fifty_x(side)}}}};
+        check_liquidated(side == Side::Long ? "eod long" : "eod short",
+                         avbt::backtest(s, m, c, PortfolioSettings{}), liq, 2);
+    }
+}
+
+void test_two_part_close_keeps_entry_bar() {
+    // Long Y fills at 200 on step 1, take profit 220 for half, stop 180.
+    // Step 3 opens at 230, past the take profit, and falls to 170: half
+    // closes at the open, then the rest at the stop. Both trades entered
+    // at step 1.
+    Bars x = flat_bars({100, 100, 100, 100, 100});
+    Bars y = flat_bars({200, 200, 200, 175, 175});
+    y.open[3] = y.high[3] = 230;
+    y.low[3] = 170;
+    Order o{.instrument = "Y", .side = Side::Long, .stop_distance = 0.1,
+            .take_profit_distance = 0.1, .take_profit_fraction = 0.5};
+    Script s{.at = {{0, {o}}}};
+    Result r = backtest(s, two(x, y), PortfolioSettings{});
+    check_value("two parts: two trades", r.trades.size(), 2);
+    if (r.trades.size() < 2) return;
+    check_true("two parts: partial first", r.trades[0].cause == Cause::PartialTakeProfit);
+    check_true("two parts: then the stop", r.trades[1].cause == Cause::Stop);
+    for (const Trade& t : r.trades) {
+        check_value("two parts: entry bar", t.entry_bar, 1);
+        check_value("two parts: entry time", t.entry_time, r.clock[1]);
+        check_value("two parts: exit bar", t.exit_bar, 3);
+    }
+}
+
+// Opens Y at step 0, then asks to close Y on every step from step 9.
+struct CloseEveryStep {
+    void prepare(const Markets&) {}
+    void update(const Markets&) {}
+    std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>&) {
+        if (now == 60) return {open_long("Y", 0.1)};
+        if (now >= 600) return {close_order("Y")};
+        return {};
+    }
+};
+static_assert(Strategy<CloseEveryStep>);
+
+void test_waiting_orders_stay_bounded() {
+    // Y is in a 30-day gap of 1-minute steps. Each step's close replaces
+    // the last one, so the run stays fast and closes once, at the reopen.
+    const int64_t day = 1440;
+    Bars x, y;
+    x.timeframe = y.timeframe = Timeframe::Min1;
+    for (int64_t i = 0; i < 32 * day; ++i) {
+        for (Bars* b : {&x, &y}) {
+            if (b == &y && i >= 10 && i < 30 * day) continue;
+            b->ts.push_back(i * 60);
+            b->open.push_back(100);
+            b->high.push_back(100);
+            b->low.push_back(100);
+            b->close.push_back(100);
+            b->minutes_with_data.push_back(1);
+        }
+    }
+    CloseEveryStep s;
+    auto start = std::chrono::steady_clock::now();
+    Result r = backtest(s, two(x, y), PortfolioSettings{});
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    check_true("bounded: under 2 s", seconds < 2.0);
+    check_value("bounded: one trade", r.trades.size(), 1);
+    if (r.trades.empty()) return;
+    check_value("bounded: closes at the reopen", r.trades[0].exit_bar, 30 * day);
+}
+
 int main() {
     test_signal_fills_at_next_open();
     test_last_bar_order_never_fills();
@@ -505,6 +726,17 @@ int main() {
     test_open_and_close_fees();
     test_profit_share_fees();
     test_missing_costs_throws();
+    test_spread_column_and_cap();
+    test_spread_every_fill();
+    test_spread_validation();
+    test_gap_close_replaces_waiting_open();
+    test_gap_new_open_replaces_waiting_open();
+    test_gap_waiting_close_survives_open();
+    test_close_order_past_liquidation();
+    test_waiting_close_past_liquidation();
+    test_end_of_data_past_liquidation();
+    test_two_part_close_keeps_entry_bar();
+    test_waiting_orders_stay_bounded();
     if (failures == 0) std::printf("all backtest checks passed\n");
     return failures == 0 ? 0 : 1;
 }

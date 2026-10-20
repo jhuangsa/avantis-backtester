@@ -42,7 +42,7 @@ int main() {
     RangeSeller s;
     std::vector<int> open_steps;
     bool bad = false, wrong_side = false;
-    Result r = backtest(s, m, {{"ETH", Costs{}}}, PortfolioSettings{},
+    Result r = backtest(s, m, {{"ETH", Costs{.spread = no_spread}}}, PortfolioSettings{},
                         [&](int t, const std::vector<Position>&, const std::vector<Order>& orders) {
         for (const Order& o : orders) {
             if (o.kind != Order::Kind::Open) continue;

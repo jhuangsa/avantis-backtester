@@ -55,7 +55,7 @@ int main() {
     s.params.tp_atrs = 50.0, s.params.revert = false;  // so time exits are seen
     std::vector<std::pair<int, std::string>> opens;
     bool bad = false, too_many = false;
-    Result r = backtest(s, m, {{"A", Costs{}}, {"B", Costs{}}, {"C", Costs{}}}, PortfolioSettings{},
+    Result r = backtest(s, m, {{"A", Costs{.spread = no_spread}}, {"B", Costs{.spread = no_spread}}, {"C", Costs{.spread = no_spread}}}, PortfolioSettings{},
                         [&](int t, const std::vector<Position>& pos, const std::vector<Order>& orders) {
         int count = 0;
         for (const Order& o : orders) {

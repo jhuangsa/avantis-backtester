@@ -11,6 +11,7 @@ Python cleans the labels. C++ never sees a hole. The cleaning in `clean_states` 
 - Start at the first row that has all three labels.
 - Keep one row per minute, on a 60-second grid.
 - Carry a label forward at most 60 minutes. A longer gap becomes Unknown.
+  A market that is closed (ADR 0021) keeps a row for every minute; while closed, the rows are Unknown.
 - Refuse a value that is not in the code lists. A new label in the table is an error, not a silent Unknown.
 
 C++ receives a start time (a whole minute, in UTC seconds) and three arrays of equal length. `Markets::make` refuses a market whose arrays differ in length or whose start is not a whole minute.

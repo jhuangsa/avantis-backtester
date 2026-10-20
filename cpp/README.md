@@ -101,7 +101,8 @@ cpp/
 │   ├── indicators.hpp        Timeframe, Bars, last_closed, Side, Field, and the indicators
 │   ├── states.hpp            state labels and state_at
 │   ├── markets.hpp           Market and Markets
-│   ├── costs.hpp             Costs, MarketCosts, check_costs
+│   ├── costs.hpp             Costs, MarketCosts, Spread, check_costs
+│   ├── spreads.hpp           Veranta's default spread per market
 │   ├── portfolio.hpp         the account: positions, levels, fees, holding costs, liquidation, hard stop
 │   ├── backtest.hpp          Order, Trade, Result, the Strategy concept, the backtest loop
 │   ├── strategies.hpp        the five Veranta strategies, StateTrend, and Combined
@@ -122,6 +123,7 @@ Each header includes the ones below it:
 optimize.hpp ───► backtest.hpp
 run.hpp ────────► strategies.hpp ─► backtest.hpp
 backtest.hpp ───► costs.hpp ─────► markets.hpp
+              │               └─► spreads.hpp
               └─► version.hpp
 strategies.hpp ─► backtest.hpp ─► portfolio.hpp ─► indicators.hpp
                               └─► markets.hpp ───► indicators.hpp
@@ -171,23 +173,31 @@ Everything happens in clock order. The **clock** is every base bar open of every
 ```
 for each step t of the clock, from the first to the last:
 
-  1. FILL      Orders the strategy returned at step t-1 fill at the open of
-               their own market's base bar. Closes fill before opens. An order
-               for a market with no bar at step t is dropped.
+  1. FILL      Waiting orders fill at the open of their own market's base
+               bar, moved against the trade by the bar's spread. Closes
+               fill before opens. An order for a market in a gap at step t
+               keeps waiting; one for a market that has not started or has
+               ended is dropped.
   2. CHECK     The portfolio checks every open position against its own
                market's base bar: stop, take profit, liquidation, then the
-               hard stop. This includes the bar a position opened on.
+               hard stop. This includes the bar a position opened on. Levels
+               trigger on the oracle prices; fills pay the bar's spread,
+               except liquidation.
   3. END       A market whose data ends at step t, before the run's last step,
-               has its position closed at its last close. The cause is
-               EndOfData.
+               has its position closed at its last close, less the spread.
+               The cause is EndOfData.
   4. RECORD    Equity at the close of step t is saved.
-  5. DECIDE    The strategy gets `now`, the UTC second at the close of step t,
-               and returns orders. They wait for step 1 of the next step.
+  5. DECIDE    The strategy gets `now`, the UTC second at the close of step t
+               (`bar_end`), and returns orders for step 1 of the next
+               step. For a market, a new order drops its waiting open;
+               a new close also drops its waiting close.
 ```
 
 Orders returned on the last step never fill, because there is no next step. A position still open at the end is not a trade; it only counts in the last equity value.
 
 A market joins the run at its first bar. Before that it has no bar, so an order for it is dropped.
+
+A market may skip steps: a weekend or a closed session ([ADR 0021](../docs/adr/0021-bars-may-skip-time.md)). Nothing happens to it in the gap: no fill, no level check, no holding cost, and its positions keep their last mark. An order for it waits and fills at its next open. If that open is past a stop, take profit or liquidation, the level fills at the open, as on any gap. A gap is not the end of data. The hard stop checks the whole account, so it can close a gapped market's position at its last mark.
 
 An example with one short trade on ZORA, with a take profit 2% below and a stop 5% above the fill. ZORA is the only market, on 1-hour bars, so a step is a bar:
 
@@ -213,12 +223,13 @@ The length of one bar. Twelve values, finest first: `Min1`, `Min3`, `Min5`, `Min
 
 | Function | What it does |
 |---|---|
-| `int64_t seconds(Timeframe tf)` | The length of one bar in seconds. `Month1` returns 31 days, the longest month, because months differ. `last_closed` uses it only for a series' last bar, so a month can make that bar close late but never early. |
+| `int64_t seconds(Timeframe tf)` | The length of one bar in seconds. `Month1` returns 31 days, the longest month, because months differ. For when a bar ends, use `bar_end`. |
+| `int64_t bar_end(Timeframe tf, int64_t ts)` | The UTC second at which the bar opened at `ts` closes: `ts + seconds(tf)`, or for `Month1` the first second of the next UTC month. |
 | `const char* name(Timeframe tf)` | Plain text for results and messages: `"1 minute"`, `"4 hours"`, `"1 month"`. |
 
 ### `struct Bars`
 
-One instrument's price history on one timeframe. Index `i` in every list is the same bar. Python builds every timeframe from the same 1-minute candles and fills empty bars flat, so a series has no gaps: bar `i` ends when bar `i+1` opens. Bars start on UTC boundaries, weeks start on Monday, and months are calendar months.
+One instrument's price history on one timeframe. Index `i` in every list is the same bar. Python builds every timeframe from the same 1-minute candles. By default it fills empty bars flat, so a series has no gaps. With `keep_empty=False` it leaves them out, so the bars skip the time a market is closed ([ADR 0021](../docs/adr/0021-bars-may-skip-time.md)). Bar `i` ends at `bar_end(timeframe, ts[i])`. Bars start on UTC boundaries, weeks start on Monday, and months are calendar months.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -232,7 +243,7 @@ One instrument's price history on one timeframe. Index `i` in every list is the 
 
 ### `int last_closed(const Bars& bars, int64_t now)`
 
-The index of the last bar that has fully closed at UTC second `now`, or -1 when none has. Bar `i` has closed once bar `i+1` has opened. The last bar has closed once `seconds(timeframe)` have passed since it opened. A strategy reads every bar through this function, so it never sees a bar still open. At 10:30 on hourly bars it sees the 09:00 bar, not the 10:00 bar. This is what prevents lookahead when a strategy reads a coarser timeframe. It uses a binary search (`std::upper_bound`).
+The index of the last bar that has fully closed at UTC second `now`, or -1 when none has: the last `k` with `bar_end(timeframe, ts[k]) <= now`. A bar before a gap closes at its own end, not when the next bar opens: Friday's last hourly bar closes on Friday. A strategy reads every bar through this function, so it never sees a bar still open. At 10:30 on hourly bars it sees the 09:00 bar, not the 10:00 bar. This is what prevents lookahead when a strategy reads a coarser timeframe. It uses a binary search (`std::upper_bound`).
 
 ### `enum class Side { Long, Short }`
 
@@ -295,21 +306,21 @@ Files: `include/avbt/markets.hpp`, `src/markets.cpp`. Decisions: [ADR 0010](../d
 
 ### `class Markets`
 
-All the markets one backtest uses, on one **clock**: every base bar open of every market, sorted, with no repeats. Markets may start and end at different times. A market joins the run at its first bar. All markets must have the same base timeframe, so one step is one base bar everywhere.
+All the markets one backtest uses, on one **clock**: every base bar open of every market, sorted, with no repeats. Markets may start and end at different times. A market joins the run at its first bar. A market may skip steps (no bar while it is closed). All markets must have the same base timeframe, so one step is one base bar everywhere.
 
 The constructor is private, so the only way to get a `Markets` is `Markets::make`, and `make` always runs the check. Code that receives a `Markets` never has to check again.
 
 | Method | What it does |
 |---|---|
-| `static Markets make(std::vector<Market> markets)` | Builds a `Markets`. Throws `std::invalid_argument`, naming the market, when: the list is empty; two markets share a name; a market has no timeframes, repeats one, or does not list them finest first; a market's base timeframe differs from the first market's; a `Bars` is empty, has lists of different lengths, or has timestamps that do not rise; a market's base bars skip a bar (two base bars more than one bar apart; Month1 is not checked); a base bar opens off its timeframe grid (`ts` not a multiple of the bar length, or for Month1 not the first second of a UTC month), which would let one market's step run ahead of another's; or `states` has columns of different lengths or a start that is not a whole minute. |
+| `static Markets make(std::vector<Market> markets)` | Builds a `Markets`. Throws `std::invalid_argument`, naming the market, when: the list is empty; two markets share a name; a market has no timeframes, repeats one, or does not list them finest first; a market's base timeframe differs from the first market's; a `Bars` is empty, has lists of different lengths, or has timestamps that do not rise; a base bar opens off its timeframe grid (`ts` not a multiple of the bar length, or for Month1 not the first second of a UTC month), which would let one market's step run ahead of another's; or `states` has columns of different lengths or a start that is not a whole minute. |
 | `const Bars& at(const std::string& instrument, Timeframe tf) const` | Returns the market's bars on that timeframe. Throws if there is no such market or timeframe. |
 | `const Bars& base(const std::string& instrument) const` | Returns the market's base bars. |
 | `const States* states(const std::string& instrument) const` | The market's states, or `nullptr` when it has none. |
 | `const std::vector<Market>& all() const` | Every market, in the order given to `make`. |
 | `const std::vector<int64_t>& clock() const` | The clock: the UTC second at which each step opens. |
 | `Timeframe timeframe() const` | The base timeframe, shared by every market. |
-| `int bar_at(const std::string& instrument, int t) const` | The index of the market's base bar that opens at step `t`, or -1 when it has none then (its data has not started, or has ended). |
-| `void append(const std::string& instrument, Timeframe tf, const Bar& bar)` | Adds one closed bar to the market on that timeframe. A base bar past the clock's end adds one clock step. Throws, naming the market, when the market or timeframe does not exist, `ts` is not later than the last bar, the volume column does not match, a base `ts` is off its timeframe grid (as in `make`), or a base `ts` would shift existing clock steps. |
+| `int bar_at(const std::string& instrument, int t) const` | The index of the market's base bar that opens at step `t`, or -1 when it has none then (its data has not started, has ended, or skips this step). |
+| `void append(const std::string& instrument, Timeframe tf, const Bar& bar)` | Adds one closed bar to the market on that timeframe. A base bar past the clock's end adds one clock step. A base bar may come after a gap. Append every market's bars in time order: a base bar earlier than the clock's end must already be a clock step. Throws, naming the market, when the market or timeframe does not exist, `ts` is not later than the last bar, the volume column does not match, a base `ts` is off its timeframe grid (as in `make`), or a base `ts` would shift existing clock steps. |
 | `void append_states(const std::string& instrument, int64_t ts, const State& state)` | Adds one minute of labels. With no states yet, they start at `ts`. Throws, naming the market, when the market does not exist, `ts` is not a whole minute, or `ts` is not exactly one minute after the last row. |
 
 `Bar` holds `ts`, `open`, `high`, `low`, `close`, `minutes_with_data`, and an optional `volume`. Bars are only appended, never dropped, so bar numbers never shift and a reference from `at` or `base` stays valid. Append a coarser bar only after it has closed. [ADR 0017](../docs/adr/0017-indicators-update-one-bar-at-a-time.md).
@@ -326,7 +337,7 @@ A **state label** names the condition of a market in one minute. It is computed 
 | `MarketState` | 13 labels and `Unknown`, such as `TrendingUp`, `Breakout`, and `ShockStress`. |
 | `TrendState` | `Uptrend`, `Downtrend`, `NonTrending`, `MixedConflicted`, and `Unknown`. |
 | `VolatilityState` | `Low`, `Normal`, `High`, `Extreme`, `Compression`, `Expansion`, `Shock`, and `Unknown`. |
-| `States` | `start` (UTC seconds, a whole minute) and the columns `market`, `trend`, `volatility`: one row per minute, no holes. Python has filled short gaps and set the rest to `Unknown`. |
+| `States` | `start` (UTC seconds, a whole minute) and the columns `market`, `trend`, `volatility`: one row per minute, no holes. Python has filled short gaps and set the rest to `Unknown`. A closed market keeps its rows; they are `Unknown` while it is closed. |
 | `State` | The three labels of one minute. |
 
 `State state_at(const States& s, int64_t now)` returns the labels a strategy may read at `now`: the row stamped one minute earlier. At 10:00 it returns the 9:59 row, whose minute closed at 10:00, so there is no lookahead. It returns all `Unknown` before the first row or past the last.
@@ -335,7 +346,7 @@ A **state label** names the condition of a market in one minute. It is computed 
 
 ## costs.hpp: what a market charges
 
-File: `include/avbt/costs.hpp`. Decisions: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0019](../docs/adr/0019-upside-perps-profit-share.md). It has no `.cpp` file.
+Files: `include/avbt/costs.hpp`, `include/avbt/spreads.hpp`. Decisions: [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0019](../docs/adr/0019-upside-perps-profit-share.md), [ADR 0020](../docs/adr/0020-every-fill-pays-the-spread.md). They have no `.cpp` file.
 
 Costs belong to the market, not the strategy. The caller gives one `Costs` for each market.
 
@@ -348,12 +359,28 @@ Costs belong to the market, not the strategy. The caller gives one `Costs` for e
 | `hold_long` | Holding cost of a long, one value per base bar: the cost of holding through that bar, as a fraction of notional. Empty means none. |
 | `hold_short` | The same for a short. |
 | `profit_share` | Profit-share tiers, each a `Tier{max_roi, share}`. Empty (the default) means none. |
+| `spread` | The half-spread each fill pays, as a fraction of price. `nullopt` (the default): Veranta's row for the market. Otherwise the caller's: empty for none, one value for every bar, or one value per base bar. |
+| `max_spread` | A cap on the half-spread. NaN (the default): no cap, or the row's cap when `spread` is `nullopt`. |
 
-Holding costs are signed: positive means the position pays, negative means it receives. NaN means zero, so a holding cost never blocks a trade. Example: `hold_long` of 0.0001 on a bar charges a long 0.01% of its notional for that bar.
+Holding costs are signed: positive means the position pays, negative means it receives. NaN means zero, so a holding cost never blocks a trade. Example: `hold_long` of 0.0001 on a bar charges a long 0.01% of its notional for that bar. A market that skips time is charged only on the bars it has. The caller folds the cost of a gap (a weekend's funding) into the bar before it.
 
 A profit share replaces size fees on a venue such as Upside Perps. ROI is a close's gross profit over the collateral of the part closed, as a fraction: 2.5 is 250%. A loss pays 0. A win pays the share of the first tier whose `max_roi` is at least its ROI (with 1e-9 of tolerance, so a boundary is in its tier), or the last tier's share above them all, times the whole profit. Example: tiers `{{2.5, 0.25}, {5.0, 0.20}}` and a close that makes 300 on 100 of collateral (ROI 3.0) pay 20% of 300, which is 60.
 
+The spread moves every fill against the trade: a long opens at `P × (1 + s)` and closes at `P × (1 − s)`, a short the other way, where `P` is the oracle price and `s` the bar's half-spread, `min(value, max_spread)`. Example: `spread = {0.0005}` opens a long at 100 at 100.05. Write `.spread = avbt::no_spread` for none. `.spread = {}` is `nullopt`, the table, not none.
+
 `MarketCosts` is `std::map<std::string, Costs>`, from instrument to costs.
+
+### `struct Spread`, `Spread spread_of(const std::string& market, const Costs& c)`
+
+`spread_of` reads a market's spread from its `Costs`, or from the table when `spread` is `nullopt`, and throws `std::invalid_argument` when the market has no row. `Spread::at(i)` is the half-spread on base bar `i`. The backtest builds one per market before the first step.
+
+### `void check_spread(const Costs& c)`
+
+Throws `std::invalid_argument` when a spread value is not finite and in [0, 1), or `max_spread` is neither NaN nor finite and at least 0. NaN is an error here, unlike in the holding costs. The Python `Costs` constructor calls it.
+
+### spreads.hpp: `SpreadRow`, `veranta_spreads()`, `veranta_spread(instrument)`
+
+The table of Veranta's default spreads, one `SpreadRow{market, spread, max_spread, read_on}` per market. `market` is the pair name, such as `"BTC/USD"` or `"USD/JPY"`. `veranta_spread` finds the row named `instrument`, then `instrument + "/USD"`, so `"BTC"` finds `"BTC/USD"`. The lookup is case-sensitive: `"btc"` finds no row. The rows come from Veranta's risk API with a small order; markets closed when it was read have no row. `examples/veranta_spreads.py` reads the API again and rewrites the rows.
 
 ### `void check_profit_share(const Costs& c)`
 
@@ -366,7 +393,9 @@ Throws `std::invalid_argument`, naming the market, when:
 - a market has no `Costs`;
 - a `Costs` names an instrument that is not a market;
 - a holding list is neither empty nor one value per base bar of its market;
-- the profit share fails `check_profit_share`.
+- the profit share fails `check_profit_share`;
+- the spread fails `check_spread`, or its column is not of size 0, 1, or one per base bar;
+- `spread` is `nullopt` and the market has no row in the table.
 
 A missing `Costs` is an error and not zero cost, because a backtest with no costs looks better than reality. `backtest` calls this before the first step.
 
@@ -374,7 +403,7 @@ A missing `Costs` is an error and not zero cost, because a backtest with no cost
 
 ## portfolio.hpp: the account
 
-Files: `include/avbt/portfolio.hpp`, `src/portfolio.cpp`. Decisions: [ADR 0008](../docs/adr/0008-a-portfolio-scores-in-account-terms.md), [ADR 0014](../docs/adr/0014-a-stop-may-trail-and-a-take-profit-may-close-part.md), [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md).
+Files: `include/avbt/portfolio.hpp`, `src/portfolio.cpp`. Decisions: [ADR 0008](../docs/adr/0008-a-portfolio-scores-in-account-terms.md), [ADR 0014](../docs/adr/0014-a-stop-may-trail-and-a-take-profit-may-close-part.md), [ADR 0016](../docs/adr/0016-costs-belong-to-the-market.md), [ADR 0020](../docs/adr/0020-every-fill-pays-the-spread.md).
 
 The portfolio is the trading account. It holds the balance and the open positions, and it applies the rules of Veranta, the exchange whose rules this backtester copies. Strategies never call it. Only the backtest loop does.
 
@@ -415,7 +444,7 @@ One open trade. The portfolio holds at most one per instrument.
 |---|---|
 | `instrument` | Which market. |
 | `side` | Long or short. |
-| `entry_price` | The fill price. |
+| `entry_price` | The fill price, after the spread. |
 | `size` | Units of the instrument. Notional = `size × entry_price`. |
 | `collateral` | Balance locked: `notional / leverage`. |
 | `stop_price` | The stop level. |
@@ -423,12 +452,14 @@ One open trade. The portfolio holds at most one per instrument.
 | `fees` | The `Fees` charged at the open and at the close. |
 | `leverage` | The leverage the position opened with. |
 | `holding` | Holding costs so far, in account money. Positive means the position has paid. |
-| `liquidation_price` | Where the loss reaches 85% of the collateral. |
-| `mark_price` | The last close seen; it values the unrealized result. |
+| `liquidation_price` | Where the loss reaches 85% of the collateral, counted from the fill price. |
+| `mark_price` | The last oracle close seen; it values the unrealized result. |
 | `trail` | The price gap the stop keeps behind the best high (low for a short). 0: the stop never moves. |
 | `trailed` | True once the trail has moved the stop. Only then is a stop-out a `TrailingStop`; otherwise it is a `Stop`. |
 | `take_profit_fraction` | The fraction of the position the take profit closes. Below 1, the take profit fires once and the rest runs on its stop. |
 | `entry_time` | UTC second of the entry fill, or `unknown_time` (the lowest `int64_t`) when it is not known. 0 is a real time. |
+| `spread` | The last half-spread seen for the market: the entry bar's, then each quote's. The hard stop closes with it. |
+| `spread_cost` | The spread paid at the entry fill on the size still open, in account money. |
 
 ### `enum class Cause`
 
@@ -452,17 +483,18 @@ What `close` and `check` return for each closed position.
 | Field | Meaning |
 |---|---|
 | `instrument`, `side` | As in `Position`. |
-| `entry_price`, `exit_price` | The two fill prices. |
+| `entry_price`, `exit_price` | The two fill prices, after the spread. |
 | `size` | Units closed. |
 | `leverage` | The position's leverage. |
 | `fees` | The open fee, the close fee, and the profit share on this size. |
 | `holding` | This size's share of the holding costs. |
+| `spread_cost` | The spread paid at both fills on this size: the entry part times the fraction closed, plus size × oracle exit × spread. 0 at the exit for a liquidation. Already inside the price result. |
 | `result` | Price result minus `fees` and `holding`, in account money. |
 | `cause` | Why it closed. |
 
 ### `struct Quote`
 
-One instrument's bar, handed to `check`: `instrument`, `open`, `high`, `low`, `close`.
+One instrument's bar, handed to `check`: `instrument`, `open`, `high`, `low`, `close`, and `spread`, the bar's half-spread (0 by default).
 
 ### `struct Report`
 
@@ -482,7 +514,7 @@ Its state is private: `settings_`, `balance_`, `positions_`, and `halted_`. Only
 
 **`Portfolio(PortfolioSettings settings)`**: the constructor. The balance starts at `starting_balance`.
 
-**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1)`**
+**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1, entry_time = unknown_time, spread = 0)`**
 
 Opens a position and returns true, or opens nothing and returns false.
 
@@ -490,12 +522,15 @@ It sizes the position so that a fill at the stop loses `risk_per_trade` of the b
 
 ```
 risk       = risk_per_trade × balance
-distance   = the gap between entry and stop, on the losing side
+fill       = entry_price × (1 + dir × spread)        dir: +1 long, -1 short
+distance   = dir × (fill − stop_price × (1 − dir × spread))
 size       = risk / distance
-collateral = size × entry_price / leverage
+collateral = size × fill / leverage
 ```
 
-Example: balance 10,000, risk 1%, a short at 1.00 with a stop at 1.05. Risk = 100, distance = 0.05, size = 2,000 units, notional = 2,000, collateral at leverage 1 = 2,000. The fee is not part of the sizing.
+`entry_price` is the oracle price. With no spread, `distance` is the gap between entry and stop. With a spread, it is the loss per unit if the stop fills at its level on a bar with the same spread, so that fill still loses exactly the risk.
+
+Example: balance 10,000, risk 1%, a short at 1.00 with a stop at 1.05, no spread. Risk = 100, distance = 0.05, size = 2,000 units, notional = 2,000, collateral at leverage 1 = 2,000. The fee is not part of the sizing.
 
 It refuses the open (returns false) when:
 
@@ -508,28 +543,30 @@ It refuses the open (returns false) when:
 - the collateral is more than the free cash;
 - `trail` is negative, or `take_profit_fraction` is not above 0 and at most 1.
 
-On success, the open fee (`fees.open × notional`, 0 under a profit share) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the entry. At leverage 1 that is an 85% price move.
+The stop, take profit and trail stay on oracle prices; the checks above use the fill. On success, the open fee (`fees.open × notional` at the fill, 0 under a profit share) leaves the balance, and the liquidation price is set 85% of the collateral's worth of price away from the fill. At leverage 1 that is an 85% price move.
 
 **`void hold(instrument, rate, price)`**
 
 Adds `rate × size × price` to the instrument's holding costs. A NaN rate adds nothing, and so does an instrument with no position. The backtest calls it once per base bar for each open position, with the bar's close as the price.
 
-**`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order)`**
+**`std::optional<Closed> close(instrument, price, fraction = 1.0, cause = Cause::Order, spread = 0)`**
 
-Closes `fraction` (from 0 to 1) of the instrument's position at `price`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
+Closes `fraction` (from 0 to 1) of the instrument's position at the oracle `price` moved against it by `spread`: `price × (1 − dir × spread)`. The price result minus the close fee, the profit share on the part's own ROI (its gross over the collateral times `fraction`, before holding costs), and that fraction of the holding costs goes into the balance. It returns what closed, or nothing if there is no position. A close whose fill, the price less the spread, is at or past the liquidation price liquidates the whole position at the liquidation price instead, with no spread and cause `Liquidation`: a close order, an end-of-data close, a stop, the hard stop, or a take profit, partial or full. A partial close shrinks the size and the collateral by the same fraction, so the liquidation price does not move. A partial take profit uses it.
 
 **`std::vector<Closed> check(const std::vector<Quote>& quotes)`**
 
 Applies one bar to every position that has a quote. For each position:
 
 1. **Stop.** Has the bar's worst price (low for a long, high for a short) reached the stop?
-2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
+2. **Take profit.** Has the bar's best price reached the take profit? If yes and the stop was not reached, close `take_profit_fraction` of the position at the take profit, or at the open if the bar opened past it. If that fill less the spread is at or past the liquidation price, the whole position liquidates there instead. If part of the position is left, its take profit becomes NaN and it goes on to step 3.
 3. **Neither.** Mark the position at the close. With a `trail`, move the stop to the bar's high minus the trail (low plus the trail for a short), if that is better than the stop. The stop never moves back, and the new stop counts from the next bar.
-4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the trail had moved the stop, otherwise `Stop`. If that price is at or past the liquidation price, close at the liquidation price instead, with cause `Liquidation`.
+4. **Stop reached.** Close at the stop, or at the open if the bar opened past it (a gap). The cause is `TrailingStop` when the trail had moved the stop, otherwise `Stop`. If that price less the spread is at or past the liquidation price, close at the liquidation price instead, with no spread and cause `Liquidation`.
+
+Levels trigger on the quote's oracle prices. The take-profit and stop fills pay the quote's `spread`; a liquidation fills at its level with none. Each position with a quote stores the quote's spread.
 
 If a bar reaches both the stop and the take profit, the stop fills. A bar does not show which price came first, so the backtest assumes the worse one ([ADR 0003](../docs/adr/0003-a-bar-with-both-levels-exits-at-the-stop.md)).
 
-After every position, it checks the **hard stop**: if equity is at or below `starting_balance × (1 - hard_stop)`, it closes every position at its mark with cause `HardStop` and sets `halted_`. A position without a quote keeps its last mark.
+After every position, it checks the **hard stop**: if equity is at or below `starting_balance × (1 - hard_stop)`, it closes every position at its mark, less its last spread, with cause `HardStop` and sets `halted_`. A position whose mark less the spread is at or past its liquidation price closes there instead, with cause `Liquidation`. A position without a quote keeps its last mark.
 
 It returns every position it closed.
 
@@ -558,10 +595,10 @@ What a strategy returns at the close of a clock step. It fills at the open of th
 | `kind` | `Open` | `Order::Kind::Open` or `Order::Kind::Close`. |
 | `instrument` | | Which market. |
 | `side` | `Long` | Long or short. Used by opens only. |
-| `stop_distance` | 0 | Stop distance as a fraction of the fill price. 0.05 puts the stop 5% away, on the losing side. |
+| `stop_distance` | 0 | Stop distance as a fraction of the oracle open the order fills at, before the spread. 0.05 puts the stop 5% away, on the losing side. |
 | `take_profit_distance` | NaN | Take-profit distance as a fraction. NaN for none. |
 | `leverage` | 1 | Leverage for the position. |
-| `trail_distance` | 0 | Trailing-stop gap as a fraction of the fill price. 0 for a stop that never moves. |
+| `trail_distance` | 0 | Trailing-stop gap as a fraction of the oracle open. 0 for a stop that never moves. |
 | `take_profit_fraction` | 1 | Fraction of the position the take profit closes. 0.5 sells half and lets the rest run. |
 
 Distances are fractions, not prices, because the strategy decides before it knows the next open. The loop turns them into prices at the fill: for a short filled at 1.00 with `stop_distance = 0.05`, the stop is 1.05.
@@ -578,11 +615,12 @@ One closed trade.
 | `entry_bar`, `exit_bar` | Clock steps of the two fills: indexes into `Result::clock`. |
 | `entry_time`, `exit_time` | The UTC seconds of those two steps: `clock[entry_bar]` and `clock[exit_bar]`. |
 | `side` | Long or short. |
-| `entry_price`, `exit_price` | The fill prices. |
+| `entry_price`, `exit_price` | The fill prices: the oracle price moved against the trade by the spread. |
 | `size` | Units closed in this trade. |
 | `leverage` | The position's leverage. |
 | `fees` | The open fee, the close fee, and the profit share, in account money. Price result = `result` + `fees` + `holding_costs`. |
 | `holding_costs` | The holding costs paid, in account money. Negative when the position received. |
+| `spread_cost` | The spread paid at both fills, in account money. It is already inside the price result, so it is not in the sum above. |
 | `result` | Account money gained or lost, after fees and holding costs. |
 | `cause` | Why it closed (see `Cause`). |
 
@@ -612,7 +650,7 @@ There is no base class and no `virtual` function (a function looked up while the
 
 - `prepare` runs once, before the first step. It resets the strategy's indicators and calls `update`. A strategy chooses its timeframes.
 - `update` feeds each rolling indicator only the bars added since the last call, and pushes the outputs onto the strategy's vectors. It never clears state that `decide` relies on, such as `seen_bar` and `signal_bar`. `StateTrend` builds a market's lines once and only extends them. `Combined` forwards `update` to both strategies.
-- `decide` runs at the close of every clock step. `now` is the UTC second of that close. It must read bars only through `last_closed(bars, now)`, which never returns a bar still open.
+- `decide` runs at the close of every clock step. `now` is the UTC second of that close, `bar_end` of the step. It must read bars only through `last_closed(bars, now)`, which never returns a bar still open.
 
 ### `template <Strategy S, class OnStep> Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs, PortfolioSettings settings, OnStep on_step = {})`
 
@@ -620,12 +658,12 @@ The loop described in [How one backtest runs](#how-one-backtest-runs). Details:
 
 - It runs `check_costs(markets, costs)` first, so a market with no `Costs` fails before any step.
 - It makes a fresh `Portfolio` from `settings`.
-- It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps. It forgets the entry step only when no position is left, so the rest of a partly closed trade keeps it.
-- **Fill step.** It moves close orders ahead of open orders, keeping their order otherwise (`std::stable_partition`). A close frees collateral, so a new open on the same bar can use it. It looks up the order's market bar with `bar_at`; an order for a market with no bar at this step is dropped. For each open order it computes the stop and take-profit prices from that base open and calls `portfolio.open` with the market's `Fees`. A refused open is skipped, and nothing is recorded.
+- It keeps a map from instrument to entry step, because the portfolio does not know clock steps. When a position closes, the loop turns the `Closed` into a `Trade` with both steps. Each open sets its market's entry step, and a close never removes it, so the rest of a partly closed trade keeps it, even when one bar's check closes a position in two parts (a partial take profit, then the stop).
+- **Fill step.** It moves close orders ahead of open orders, keeping their order otherwise (`std::stable_partition`). A close frees collateral, so a new open on the same bar can use it. It looks up the order's market bar with `bar_at`. An order for a market in a gap (no bar at this step, but bars before and after) keeps waiting; one for a market that has not started or has ended is dropped. For each open order it computes the stop and take-profit prices from that base open and calls `portfolio.open` with the market's `Fees`. A refused open is skipped, and nothing is recorded.
 - **Check step.** It builds one `Quote` per open position from that position's own base bar and calls `portfolio.check`. A position whose market has no bar at this step is not checked.
 - **End-of-data step.** Except on the run's last step, a market whose last base bar is this step has its position closed at that bar's close, with `Cause::EndOfData`.
 - **Holding step.** After the checks and the end-of-data close, each open position whose market has a bar at this step is charged `hold_long[i]` or `hold_short[i]` through `portfolio.hold`, at that bar's close. The step's equity then includes it.
-- **Decide step.** It passes `now`, the step's open plus `seconds(timeframe)`, which is the close of the step.
+- **Decide step.** It passes `now`, `bar_end(timeframe, clock[t])`, which is the close of the step. For a market, a new open replaces its waiting open, and a new close replaces its waiting close and drops its waiting open (`std::erase_if`). A waiting close survives a later open, so a reversal in a gap closes, then opens. At most one close and one open wait per market.
 - **`on_step` hook.** After `decide`, the loop calls `on_step(t, positions, orders)` with the step, the open positions, and the orders just returned. The default does nothing. `test_live.cpp` uses it.
 - The caller chooses the bars. The loop never trims them.
 
@@ -660,7 +698,11 @@ The shared decision, a template used by all five strategies. It first sets `t = 
 - **While a position is open:** return a close order if the time exit is due (`t - signal_bar >= time_exit`) or the rule exit holds. Otherwise return nothing.
 - **While flat:** if `entry(t)` is true, save `signal_bar = t` and return an open order with the strategy's side, stop, take profit, and leverage.
 
-**Time exit:** the bar of the fill is bar 1. With a signal at bar t and a time exit of N, the close order is returned at bar t+N and fills at the open of bar t+N+1. A time exit of 0 means none.
+**Time exit:** the bar of the fill is bar 1. With a signal at bar t and a time exit of N, the close order is returned at bar t+N and fills at the open of bar t+N+1. A time exit of 0 means none. It counts bars, so a gap (a weekend) counts 0.
+
+### `int bars_held(const Bars& b, int64_t entry_time, int64_t now)`
+
+How many of `b`'s bars have closed by `now` since a fill at `entry_time`. The bar opened at or after `entry_time` is the first. 0 or less means none yet. The library strategies' time exits of N bars use `bars_held(...) >= N`, and none when `entry_time` is `unknown_time`. It counts bars, not clock time, so a weekend counts 0; with no gaps it gives the same exit as `now - entry_time >= N × bar length`. [ADR 0021](../docs/adr/0021-bars-may-skip-time.md).
 
 It uses `if constexpr (requires { s.rule_exit(t); })`, which asks the compiler whether the strategy has a `rule_exit` method, so strategies without one skip that test.
 
@@ -699,6 +741,7 @@ Runs two strategies as one strategy, in one account. The two strategies do not k
 | `a`, `b` | The two strategies. Change their settings through `a.params` and `b.params`. |
 | `owner` | A map from instrument to the strategy that owns its position: 0 for `a`, 1 for `b`. |
 | `claimed` | A map from instrument to the `now` of the `decide` whose open order claimed it. |
+| `markets` | The `Markets` from the last `prepare` or `update`, to tell when a claim has passed. |
 | `prepare(m)` | Clears `owner` and `claimed`, then calls `a.prepare(m)` and `b.prepare(m)`. |
 | `trades(instrument)` | True when `a` or `b` can trade the instrument. |
 | `decide(now, report, positions)` | See below. |
@@ -707,7 +750,7 @@ Runs two strategies as one strategy, in one account. The two strategies do not k
 
 `decide` works in four steps:
 
-1. Forget the owner of any instrument that has no position (a level closed it, or the open was refused), unless an open claimed it at this same `now`: a live caller may ask again before the open fills.
+1. Forget the owner of any instrument that has no position (a level closed it, or the open was refused), unless the open's fill chance has not passed yet. An open claimed at `c` has passed once the market has a base bar opened at or after `c` that has closed by `now`. Until then the order may still be waiting: a live caller may ask again at the same `now`, or the market may be in a gap.
 2. Give each position with no owner to `a` if `a` trades its instrument, else to `b` if `b` does. A position does not name the strategy that opened it, so this is how a restarted `Combined` finds its owners.
 3. Ask `a`, passing only the positions `a` owns. Then ask `b`, passing only the positions `b` owns.
 4. Return all the orders, `a`'s first.
@@ -744,7 +787,7 @@ The table. It has eight entries:
 | `late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long` | The five Veranta strategies. Each has a `side` param, a string: `"long"` or `"short"`. Any other value throws. |
 | `state_trend` | `StateTrend`. |
 | `campaign_and_spike`, `late_day_and_rally` | `Combined` pairs. Their params start with `a.` or `b.`: `a.lag` is the first strategy's `lag`. |
-| `buy_hold` (library) | `BuyHold`, in `library/buy_hold.hpp`: one open at the first closed bar, never a close, no re-entry after a stop. Params `instrument`, `timeframe`, `side` (`"long"` or `"short"`), `stop_loss` (the fraction of collateral the stop loses, at most 0.8; the stop sits `stop_loss / leverage` from the fill), `leverage`. `test_buy_hold.cpp` tests it. |
+| `buy_hold` (library) | `BuyHold`, in `library/buy_hold.hpp`: one open at the first closed bar, never a close, no re-entry after a stop. Params `instrument`, `timeframe`, `side` (`"long"` or `"short"`), `stop_loss` (the fraction of collateral the stop loses, at most 0.8, default 0.75, since a stop at 0.8 is refused under any spread; the stop sits `stop_loss / leverage` from the fill), `leverage`. `test_buy_hold.cpp` tests it. |
 
 ### `Result run(name, params, markets, costs, settings)`
 
@@ -758,7 +801,7 @@ An `int` is accepted where a `double` is expected.
 
 ### `decide(name, params, markets, positions, now, settings = {})` and `decide_once(live, markets, positions, now)`
 
-`decide` gives the orders of the strategy `name` at `now`, keeping nothing between calls. `decide_once` does the work: it prepares a fresh `Live` on `markets` (the bars so far), decides one base step before `now` so the strategy knows which bars it has already acted on, then decides at `now`. So it returns orders only at the step where `run` would: an hourly strategy on minute bars gives its open once, not every minute until the next hourly close. It throws as `run` does. Each call reads the whole history; `Live` is the fast path. `test_live.cpp` checks it gives `run`'s orders.
+`decide` gives the orders of the strategy `name` at `now`, keeping nothing between calls. `decide_once` does the work: it prepares a fresh `Live` on `markets` (the bars so far), decides at the previous clock step's close so the strategy knows which bars it has already acted on, then decides at `now`. That step may be before a gap. When `now` is the first step's close, or not a step's close, it decides one base bar before `now` instead. So it returns orders only at the step where `run` would: an hourly strategy on minute bars gives its open once, not every minute until the next hourly close. It throws as `run` does. Each call reads the whole history; `Live` is the fast path. `test_live.cpp` and `test_gaps.cpp` check it gives `run`'s orders.
 
 ### `avbt::version`
 
@@ -772,10 +815,10 @@ File: `include/avbt/optimize.hpp`. ADR 0013.
 
 ### `double sharpe(const Result& r)`
 
-Daily Sharpe from clock time, the same on bars of every length. Step `i` closes at `clock[i] + seconds(timeframe)`.
+Daily Sharpe from clock time, the same on bars of every length. Step `i` closes at `bar_end(timeframe, clock[i])`.
 
 1. It uses full UTC days only: from the first midnight at or after the first close to the last midnight at or before the last close. The part-days at either end are dropped.
-2. At each midnight it takes the equity of the last step that closed at or before it. A day with no bars keeps the last value, so it is a 0% return.
+2. At each midnight it takes the equity of the last step that closed at or before it. A day with no bars keeps the last value, so it is a 0% return. A market that is closed on weekends or holidays (ADR 0021) has 0% days, and they count, so its Sharpe comes out lower than a market that trades every day.
 3. Daily return: `day[k] / day[k-1] - 1`.
 4. −∞ when any equity value, at any step, is at or below 0. NaN with fewer than 30 daily returns, or when they never vary. Otherwise the mean over the sample standard deviation, times √365; crypto trades every day.
 
@@ -839,9 +882,10 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
-| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None)` | One market's costs. `Costs()` is zero cost. The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
+| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None, spread=None, max_spread=None)` | One market's costs. `Costs()` has no fees and Veranta's spread from the table; `Costs(spread=0)` is zero cost. `spread` is `None` (the table), a number (every bar), or a numpy array (one per base bar); a numpy number or 0-d array counts as a number. `max_spread` is a number, or `None` for no cap (read back as NaN). Reading `spread` gives `None` or an array. A bool or a string raises `TypeError`; bad values raise `ValueError` (see `check_spread`). The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
 | `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
 | `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; numpy numbers and booleans work as values, and an integer too big for a C++ `int` is taken as a float; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
+| `veranta_spreads()` | The spread table as a dict `{market: (spread, max_spread, read_on)}`. |
 | `Result`, `Trade` | The result and its trades, with the fields in the tables above, as attributes: `result.trades`, `trade.entry_time`. |
 | `Side`, `Cause` | The two enums, now Python enums. `Cause` has `Stop`, `TrailingStop`, `PartialTakeProfit`, `TakeProfit`, `Liquidation`, `HardStop`, `Order`, and `EndOfData`. |
 | `version` | The engine version, the same constant C++ stamps on every `Result`. |
@@ -855,11 +899,11 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 
 The old per-strategy functions (`late_day_short`, `rally_short`, `campaign_short`, `spike_short`, `gold_trend_long`, `campaign_and_spike`, `late_day_and_rally`, `run_state_trend`) are gone. Call `run` with the strategy's name.
 
-Costs are required. To run without costs, pass `Costs()` for each market.
+Costs are required. To run without costs, pass `Costs(spread=0)` for each market. A market with no row in the spread table, such as ZORA, needs a spread.
 
 ```python
 markets = avbt_cpp.Markets([avbt_cpp.Market("ZORA", [bars_1h])])
-costs = {"ZORA": avbt_cpp.Costs(open_fee=0.0001, close_fee=0.0001)}
+costs = {"ZORA": avbt_cpp.Costs(open_fee=0.0001, close_fee=0.0001, spread=0.0005)}
 result = avbt_cpp.run("late_day_short", {"stop": 0.05}, markets, costs, avbt_cpp.PortfolioSettings())
 ```
 
@@ -886,8 +930,8 @@ These example scripts use the module:
 A live caller runs the same strategy code as a backtest. In order:
 
 1. Build `Markets` from the history, and build the strategy once: `Live(name, params, markets, settings)` in Python, or `prepare` in C++. This warms up every indicator on the history.
-2. Each time a bar closes, append the closed bars with `markets.append(...)` and the new state labels with `markets.append_states(...)`.
-3. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close.
+2. Each time a bar closes, append the closed bars with `markets.append(...)` and the new state labels with `markets.append_states(...)`. Append every market's bars in time order. A market may reopen after a gap, but a base bar earlier than the clock's end must already be a clock step.
+3. Call `live.decide(now, positions)`, which runs `update` on the new bars and then `decide`. `now` is the UTC second of the close, `bar_end` of the step.
 4. Send the orders it returns to the exchange.
 
 Or skip the object: `decide(name, params, markets, positions, now, settings)` warms up on `markets` every call and gives the same orders (see run.hpp above). Positions need `entry_time` for time exits, as after a restart. A `Combined` strategy on one instrument for both halves (`late_day_and_rally`) cannot tell from a position which half opened it, so it gives it to `a`; see Combined.
@@ -904,10 +948,12 @@ Or skip the object: `decide(name, params, markets, positions, now, settings)` wa
 
 `decide` returns opens and rule exits only. In a backtest the portfolio handles stops, take profits, trailing stops, partial take profits, and liquidation. Live, none of that runs. The caller's system must place them on the exchange from each `Order`, once the open fills:
 
-- `stop_distance`, `take_profit_distance`, and `trail_distance` are fractions of the fill price, not prices. The caller computes the prices from the actual fill, as `backtest` does.
+- `stop_distance`, `take_profit_distance`, and `trail_distance` are fractions, not prices. `backtest` counts them from the oracle open, before the spread; live, the caller counts them from the oracle price at the fill, or from the actual fill, which sits one spread away.
+- `decide` never fills, so the spread does not change it. The exchange charges it at each fill.
 - The caller's system moves the trailing stop as the price improves, and never moves it back.
 - The caller's system closes the partial take profit: when the take profit is hit, it closes `take_profit_fraction` of the position and leaves the rest open with no take profit.
 - The caller's system watches liquidation and the hard stop. A position that the exchange closes is no longer in `positions` at the next `decide`.
+- `Live` returns only the new orders of each call; it keeps no waiting list. An order for a market that is closed is the caller's to hold until the market opens. A new order for that market replaces it, as in the backtest: a new open replaces a held open, and a new close replaces a held close and drops a held open.
 
 ## Tests
 
@@ -917,7 +963,9 @@ Each test program builds its own small price series by hand, runs the code, and 
 
 **`test_rolling.cpp`**: each rolling indicator, updated bar by bar, equals its full-series function bit for bit (NaN equals NaN), across NaN gaps and windows longer than the series.
 
-**`test_append.cpp`**: `Markets::append` and `append_states` grow the bars, a reference taken before an append stays valid, an out-of-order `ts`, a missing market or timeframe, a missing base bar, and a states gap are refused, and a base bar past the clock's end extends the clock. A volume column must match the bars: `make` refuses a wrong length, `append` refuses a bar with no volume when the market has one, and an appended volume is stored.
+**`test_append.cpp`**: `Markets::append` and `append_states` grow the bars, a reference taken before an append stays valid, an out-of-order `ts`, a missing market or timeframe, and a states gap are refused, a base bar past the clock's end extends the clock, and a base bar after a gap is accepted. A volume column must match the bars: `make` refuses a wrong length, `append` refuses a bar with no volume when the market has one, and an appended volume is stored.
+
+**`test_gaps.cpp`**: bars that skip time (ADR 0021). `make` and `append` accept a gap and still refuse off-grid bars; `bar_end` on every length, `Month1` to the real month end; `last_closed` across a weekend and a missing month; an order waits over a gap and fills at the reopen, and is dropped before a market starts or after it ends; a gap is not the end of data; a reopen past a stop, take profit or liquidation fills at the open (or the liquidation price); no holding cost in a gap; `bars_held` and the library time exits count bars, not clock time; a live replay on gapped markets gives the backtest's orders (`Live`, `decide_once`, `decide` by name); `Combined` keeps a waiting claim; `dip_basket` acts while its first market is closed; and with no gaps, three library strategies give the same trades and balance as before.
 
 **`test_live.cpp`**: records a backtest with `on_step`, then replays it as a live caller would: start from the first bar, `prepare`, and for each step append the bars and states, `update`, and `decide` with the recorded positions. The orders must be equal at every step, with no tolerance. It runs the five Veranta strategies, `StateTrend` on two markets with 1-minute and 1-hour bars, and a `Combined`. A strategy that looks ahead gives different orders and fails. It also checks that `avbt::decide` and `avbt::run`, called by table name, give the same orders and result.
 
@@ -954,6 +1002,13 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_partial_take_profit` | a partial take profit closes its fraction, and the rest has no take profit and stays open |
 | `test_open_refuses_bad_trail_or_fraction` | an open is refused for a negative trail or a fraction outside (0, 1] |
 | `test_scale_risk_with_leverage` | with the setting on, 5x leverage gives 5 times the size and 5 times the loss at the stop |
+| `test_spread_open`, `test_spread_short_prices` | a long fills above and a short below the oracle price, at the open and at the close; the stop stays on the oracle price; the liquidation price counts from the fill |
+| `test_spread_stop_loses_risk` | a stop fill with the spread loses exactly the risk |
+| `test_spread_liquidation_has_none` | a liquidation fills at its level, with no spread |
+| `test_spread_partial_take_profit` | a partial close takes its fraction of the entry spread |
+| `test_spread_fees_on_fills`, `test_spread_stop_cap_uses_fill` | fees and the 80% cap use the fill price |
+| `test_spread_hard_stop_uses_last`, `test_spread_equity_mark` | the hard stop closes with the last spread seen; equity marks at the oracle close |
+| `test_spread_stop_past_liquidation`, `test_spread_gap_fill_past_liquidation`, `test_spread_short_stop_past_liquidation`, `test_spread_hard_stop_past_liquidation`, `test_spread_close_order_past_liquidation`, `test_spread_partial_past_liquidation`, `test_spread_short_partial_past_liquidation` | a close whose fill less the spread is at or past the liquidation price (a stop, a gap, the hard stop, a close order, a partial take profit; long and short) liquidates the whole position there, with no exit spread, losing 85% of the collateral |
 
 **`test_backtest.cpp`**, with small test-only strategies (`UpDown`, `Script`, `FollowY`, `HalfAtTarget`):
 
@@ -964,7 +1019,7 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_fee_at_open_and_close` | the trade result includes both fees |
 | `test_no_lookahead` | changing every bar after t changes no order, trade, or equity up to t |
 | `test_timeframe_carried` | the result names the input's base timeframe |
-| `test_markets_refuse_misaligned` | `Markets::make` refuses an empty list, a repeated name, a market with no timeframes, timeframes not finest first or repeated, different base timeframes, empty bars, uneven lists, timestamps that do not rise, and a missing base bar; markets of different lengths, and a missing coarser bar, are accepted |
+| `test_markets_refuse_misaligned` | `Markets::make` refuses an empty list, a repeated name, a market with no timeframes, timeframes not finest first or repeated, different base timeframes, empty bars, uneven lists, and timestamps that do not rise; markets of different lengths, a missing base bar, and a missing coarser bar are accepted |
 | `test_each_market_uses_its_own_bars` | a position's stop uses its own market's low |
 | `test_closes_fill_before_opens` | a close on a bar frees the cash for an open on the same bar |
 | `test_no_lookahead_two_markets` | the lookahead test, with a strategy that reads one market to trade another |
@@ -974,8 +1029,15 @@ Each test program builds its own small price series by hand, runs the code, and 
 | `test_coarser_timeframe` | a strategy on 4-hour bars acts once per 4-hour bar and fills at the open after the bar closes, never earlier |
 | `test_partial_close_keeps_entry_bar` | both parts of a partly closed trade keep the trade's entry step |
 | `test_profit_share_fees` | a trade's `fees` hold the profit share from its market's `Costs`; tiers beside a size fee throw |
+| `test_spread_column_and_cap`, `test_spread_every_fill` | the spread, per bar or constant and capped, reaches order opens and closes, stops, take profits, and end-of-data closes; `spread_cost` counts both fills |
+| `test_spread_validation` | `check_costs` refuses a market with no row, a column of the wrong length, NaN, a negative value, 1, and a negative cap |
+| `test_gap_close_replaces_waiting_open`, `test_gap_new_open_replaces_waiting_open`, `test_gap_waiting_close_survives_open`, `test_waiting_orders_stay_bounded` | in a gap, a new close drops a waiting open, a new open replaces a waiting open, a waiting close survives a new open (the long closes, then the short opens), and a close sent every step through a 30-day gap stays fast |
+| `test_close_order_past_liquidation`, `test_waiting_close_past_liquidation`, `test_end_of_data_past_liquidation` | a close order (with or without a gap) and an end-of-data close past the liquidation price liquidate there, long and short |
+| `test_two_part_close_keeps_entry_bar` | when one bar's check closes a position in two parts (a partial take profit, then the stop), both trades keep the real entry step |
 
-**`test_profit_share.cpp`**: the profit share (ADR 0019): each tier and its boundary, a short, a partial take profit and a partial close each priced on its own ROI, a liquidation paying nothing, holding costs leaving the tier unchanged, equity subtracting the share owed, a hard stop charging a winner, empty tiers giving the old fees bit for bit, the `check_profit_share` errors, and a backtest's `Trade.fees`.
+**`test_profit_share.cpp`**: the profit share (ADR 0019): each tier and its boundary, a short, a partial take profit and a partial close each priced on its own ROI, a liquidation paying nothing, holding costs leaving the tier unchanged, equity subtracting the share owed, a hard stop charging a winner, empty tiers giving the old fees bit for bit, the `check_profit_share` errors, a backtest's `Trade.fees`, and a ROI counted on the fill prices after the spread.
+
+**`test_spread.cpp`**: the spread (ADR 0020) on every fill path, the table, and the `check_costs` errors.
 
 **`test_states.cpp`**:
 
@@ -1001,13 +1063,19 @@ Each test program builds its own small price series by hand, runs the code, and 
 4. Add a test in `test_strategies.cpp` with a hand-built series.
 5. To call it from Python, add a field list and a row in `strategies()` in `run.hpp`. `run` then finds it by name. Costs come from the caller's `MarketCosts`, so the strategy has no fee.
 
-A strategy that does not fit `decide_entry_and_exits` can write its own `decide`, as long as it returns orders and reads bars only through `last_closed(bars, now)`.
+A strategy that does not fit `decide_entry_and_exits` can write its own `decide`, as long as it returns orders and reads bars only through `last_closed(bars, now)`. Count a time exit with `bars_held`, not clock time.
+
+**Markets that skip time** ([ADR 0021](../docs/adr/0021-bars-may-skip-time.md)). On such bars these effects are accepted:
+
+- `weekend_basket` and `weekend_breakout_fade` test for "the Monday bar at hour H" by the bar's end; a market closed then has no such bar.
+- Lookbacks and indicators count bars, so they span the closed time.
+- The true range of the first bar after a gap includes the reopen jump, so ATR jumps too.
 
 ## Rules that must stay true
 
 These come from [CLAUDE.md](../CLAUDE.md) and the ADRs, and each has a test:
 
-- **Next-open fill.** An order from bar t fills at bar t+1's open. Strategies never call the portfolio.
+- **Next-open fill.** An order from bar t fills at bar t+1's open, or at its market's next open after a gap. Strategies never call the portfolio.
 - **No trade on an undefined value.** Indicators are NaN until they have enough bars, and a comparison with NaN is false.
 - **No lookahead.** `decide(now)` reads only bars that `last_closed` returns, so never a bar still open. The lookahead tests guard this.
 - **Levels are live from the entry bar.** The bar a position opens on is checked too.

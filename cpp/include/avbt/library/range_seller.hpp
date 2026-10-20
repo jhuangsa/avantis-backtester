@@ -61,7 +61,7 @@ struct RangeSeller {
                                  [&](const Position& x) { return x.instrument == p.instrument; });
         if (mine != positions.end()) {
             bool late = p.max_bars > 0 && mine->entry_time != unknown_time &&
-                        now - mine->entry_time >= p.max_bars * seconds(p.timeframe);
+                        bars_held(*bars, mine->entry_time, now) >= p.max_bars;
             if (late) return {Order{.kind = Order::Kind::Close, .instrument = p.instrument}};
             return {};
         }

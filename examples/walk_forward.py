@@ -61,12 +61,14 @@ def load():
 
 
 def cut(costs, keep):
-    """The Costs for a window: same fees, holding costs for its bars only."""
-    hl, hs = costs.hold_long, costs.hold_short
+    """The Costs for a window: same fees, holding costs and spread for its bars only."""
+    hl, hs, sp = costs.hold_long, costs.hold_short, costs.spread
     return avbt_cpp.Costs(costs.open_fee, costs.close_fee,
                           hl[keep] if len(hl) else None,
                           hs[keep] if len(hs) else None,
-                          costs.profit_share)
+                          costs.profit_share,
+                          sp[keep] if sp is not None and len(sp) > 1 else sp,
+                          costs.max_spread)
 
 
 def window(data, costs, lo: int, hi: int):
@@ -106,7 +108,7 @@ def main():
 
     settings = avbt_cpp.PortfolioSettings()
     data = load()
-    # Full-span Costs; window() slices their holding costs per window.
+    # Full-span Costs; window() slices their holding costs and spread per window.
     costs = {k: FEES for k in data}
     # The folds are cut here; the engine runs them.
     folds, names = [], []

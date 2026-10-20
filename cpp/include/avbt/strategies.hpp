@@ -14,6 +14,16 @@
 
 namespace avbt {
 
+// How many of b's bars have closed by `now` since a fill at entry_time:
+// the bar opened at or after entry_time is the first. 0 or less means none
+// yet. It counts bars, not clock time, so a gap (a weekend) counts 0. For a
+// time exit of N bars: bars_held(b, entry_time, now) >= N, and no time exit
+// when entry_time is unknown_time. ADR 0021.
+inline int bars_held(const Bars& b, int64_t entry_time, int64_t now) {
+    auto first = std::lower_bound(b.ts.begin(), b.ts.end(), entry_time);
+    return last_closed(b, now) - static_cast<int>(first - b.ts.begin()) + 1;
+}
+
 // The five ideas in examples/veranta_rules.py. Each reads one timeframe of
 // its instrument, params.timeframe, hourly by default. An entry is known at
 // the close of bar t on that timeframe and fills at the next base open.
@@ -268,9 +278,11 @@ bool trades(const S& s, const std::string& instrument) {
 // go out together, A's first, so A wins when both open on the same bar.
 // A position does not name its owner, so after a restart a position with no
 // owner goes to A if A trades its instrument, else to B if B does. An open
-// claims its instrument until a later decide finds no position there (a
-// level closed it, or the open was refused); a repeat decide at the same
-// `now`, before the fill, keeps the claim.
+// made at `now = c` claims its instrument until a decide finds no position
+// there after the open's fill chance has passed: the market has a base bar
+// opened at or after c that has closed (a level closed it, or the open was
+// refused). Before that the order may still be waiting: a repeat decide at
+// the same `now`, or a market in a gap, keeps the claim. ADR 0021.
 template <Strategy A, Strategy B>
 struct Combined {
     A a;
@@ -279,9 +291,20 @@ struct Combined {
     std::map<std::string, int> owner;
     // Instrument -> the `now` of the decide whose open claimed it.
     std::map<std::string, int64_t> claimed;
+    const Markets* markets = nullptr;
 
-    void prepare(const Markets& m) { owner.clear(); claimed.clear(); a.prepare(m); b.prepare(m); }
-    void update(const Markets& m) { a.update(m); b.update(m); }
+    void prepare(const Markets& m) {
+        owner.clear();
+        claimed.clear();
+        markets = &m;
+        a.prepare(m);
+        b.prepare(m);
+    }
+    void update(const Markets& m) {
+        markets = &m;
+        a.update(m);
+        b.update(m);
+    }
     bool trades(const std::string& instrument) const {
         return avbt::trades(a, instrument) || avbt::trades(b, instrument);
     }
@@ -290,10 +313,16 @@ struct Combined {
             return std::any_of(positions.begin(), positions.end(),
                                [&](const Position& p) { return p.instrument == instrument; });
         };
+        // True once a base bar opened at or after c has closed by now.
+        auto passed = [&](const std::string& instrument, int64_t c) {
+            const Bars& base = markets->base(instrument);
+            auto it = std::lower_bound(base.ts.begin(), base.ts.end(), c);
+            return it != base.ts.end() && bar_end(base.timeframe, *it) <= now;
+        };
         std::erase_if(owner, [&](const auto& o) {
             if (held(o.first)) return false;
             auto c = claimed.find(o.first);
-            return c == claimed.end() || c->second != now;
+            return c == claimed.end() || passed(o.first, c->second);
         });
         std::erase_if(claimed, [&](const auto& c) { return !owner.contains(c.first) || held(c.first); });
         for (const Position& p : positions) {

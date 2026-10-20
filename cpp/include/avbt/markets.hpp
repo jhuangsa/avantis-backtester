@@ -30,17 +30,19 @@ struct Bar {
 // Several markets on one clock. Each market starts and ends with its own
 // data. The clock is every base bar open of every market, sorted, with no
 // repeats, so a market joins the run at its first bar. Every market has the
-// same base timeframe, so one clock step is one base bar everywhere. Only
-// make() builds a Markets, and it checks. See ADR 0011.
+// same base timeframe, so one clock step is one base bar everywhere. A
+// market may skip steps (a weekend, a closed session): it has no bar
+// there, and nothing happens to it. Only make() builds a Markets, and it
+// checks. See ADR 0011 and 0021.
 class Markets {
 public:
     // Throws std::invalid_argument when the list is empty, two markets share
     // a name, or a market has no timeframes, has a timeframe twice or out of
     // order, has a base timeframe that differs from the first market's, or
     // has a Bars that is empty, has columns of different lengths, or has
-    // timestamps that do not rise, or has a base bar missing (two base bars
-    // more than one bar apart; not checked on Month1), or has states whose three columns differ
-    // in length or whose start is not a whole minute. The message names the market.
+    // timestamps that do not rise, or has a base bar off its timeframe's grid,
+    // or has states whose three columns differ in length or whose start is
+    // not a whole minute. The message names the market.
     static Markets make(std::vector<Market> markets);
 
     // Throws std::invalid_argument when no market has this name, or the
@@ -57,17 +59,21 @@ public:
     // The base timeframe, shared by every market.
     Timeframe timeframe() const { return markets_.front().timeframes.front().timeframe; }
     // The index of the market's base bar that opens at step t, or -1 when
-    // the market has no bar then: its data has not started, or has ended.
+    // the market has no bar then: its data has not started, has ended, or
+    // skips this step.
     int bar_at(const std::string& instrument, int t) const;
 
     // Adds one closed bar to the market's bars on this timeframe. A base bar
     // whose ts is past the clock's end adds one clock step. Bars are only
     // appended, so bar numbers never shift and references from at() and
-    // base() stay valid. Throws std::invalid_argument, naming the market,
-    // when the market or timeframe does not exist, ts is not later than
-    // that timeframe's last bar, volume is given when the column is empty or
-    // missing when it is not, a base bar is not one bar after the last, or a base bar's ts is not on the clock yet and
-    // earlier than its end (that would shift the clock's steps).
+    // base() stay valid. A base bar may come after a gap. Append every
+    // market's bars in time order: a base bar earlier than the clock's end
+    // must already be a clock step. Throws std::invalid_argument, naming
+    // the market, when the market or timeframe does not exist, ts is not
+    // later than that timeframe's last bar, volume is given when the column
+    // is empty or missing when it is not, a base bar is off the grid, or a
+    // base bar's ts is not on the clock yet and earlier than its end (that
+    // would shift the clock's steps).
     void append(const std::string& instrument, Timeframe tf, const Bar& bar);
     // Adds one minute's labels at ts. With no states yet, they start at ts.
     // Throws std::invalid_argument, naming the market, when the market does

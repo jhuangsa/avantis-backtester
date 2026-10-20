@@ -37,6 +37,35 @@ std::vector<T> to_vector(const py::array_t<T, py::array::c_style | py::array::fo
     return std::vector<T>(p, p + a.size());
 }
 
+// The numpy array of a spread argument, numbers only: a bool, a string or
+// any other kind is refused.
+py::array number_array(const py::object& x, const std::string& refused) {
+    py::array a = py::module_::import("numpy").attr("asarray")(x);
+    char kind = a.dtype().kind();
+    if (py::isinstance<py::bool_>(x) || (kind != 'i' && kind != 'u' && kind != 'f')) {
+        throw py::type_error(refused);
+    }
+    return a;
+}
+
+// spread: None is nullopt (the table); a Python or numpy number or a 0-d
+// array is one value; a 1-d array is one value per base bar.
+std::optional<std::vector<double>> spread_arg(const py::object& x) {
+    if (x.is_none()) return std::nullopt;
+    py::array a = number_array(x, "spread must be a number, an array of numbers, or None");
+    if (a.ndim() == 0) return std::vector<double>{py::float_(x).cast<double>()};
+    if (a.ndim() != 1) throw py::value_error("spread must be a 1-d array, got " + std::to_string(a.ndim()) + " dimensions");
+    return to_vector(InArray::ensure(a));
+}
+
+// max_spread: None is NaN (no cap); otherwise one number, not a sequence.
+double max_spread_arg(const py::object& x) {
+    if (x.is_none()) return std::numeric_limits<double>::quiet_NaN();
+    const char* refused = "max_spread must be a number or None";
+    if (number_array(x, refused).ndim() != 0) throw py::type_error(refused);
+    return py::float_(x).cast<double>();
+}
+
 // Hands the vector's buffer to numpy. A capsule owns it and frees it with the array.
 template <typename T>
 py::array_t<T> to_numpy(std::vector<T>&& v) {
@@ -173,7 +202,7 @@ py::dict to_dict(const avbt::Params& ps) {
 std::vector<avbt::Knob> knobs_of(const py::dict& knobs) {
     std::vector<avbt::Knob> list;
     for (auto [k, values] : knobs) {
-        avbt::Knob knob{k.cast<std::string>()};
+        avbt::Knob knob{.name = k.cast<std::string>()};
         for (py::handle v : values) knob.values.push_back(to_value(knob.name, v));
         list.push_back(std::move(knob));
     }
@@ -443,17 +472,23 @@ PYBIND11_MODULE(avbt_cpp, m) {
     py::class_<avbt::Costs>(m, "Costs")
         .def(py::init([](double open_fee, double close_fee, const std::optional<InArray>& hold_long,
                          const std::optional<InArray>& hold_short,
-                         const std::optional<std::vector<std::pair<double, double>>>& profit_share) {
-                 avbt::Costs c{open_fee, close_fee, hold_long ? to_vector(*hold_long) : std::vector<double>{},
-                               hold_short ? to_vector(*hold_short) : std::vector<double>{}, {}};
+                         const std::optional<std::vector<std::pair<double, double>>>& profit_share,
+                         const py::object& spread, const py::object& max_spread) {
+                 avbt::Costs c{.open_fee = open_fee, .close_fee = close_fee,
+                               .hold_long = hold_long ? to_vector(*hold_long) : std::vector<double>{},
+                               .hold_short = hold_short ? to_vector(*hold_short) : std::vector<double>{}};
                  if (profit_share) {
                      for (auto [roi, share] : *profit_share) c.profit_share.push_back({roi, share});
                  }
+                 c.spread = spread_arg(spread);
+                 c.max_spread = max_spread_arg(max_spread);
                  avbt::check_profit_share(c);
+                 avbt::check_spread(c);
                  return c;
              }),
              py::arg("open_fee") = 0.0, py::arg("close_fee") = 0.0, py::arg("hold_long") = py::none(),
-             py::arg("hold_short") = py::none(), py::arg("profit_share") = py::none())
+             py::arg("hold_short") = py::none(), py::arg("profit_share") = py::none(),
+             py::arg("spread") = py::none(), py::arg("max_spread") = py::none())
         .def_readonly("open_fee", &avbt::Costs::open_fee)
         .def_readonly("close_fee", &avbt::Costs::close_fee)
         .def_property_readonly("hold_long", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_long)); })
@@ -462,7 +497,20 @@ PYBIND11_MODULE(avbt_cpp, m) {
             std::vector<std::tuple<double, double>> out;
             for (const avbt::Tier& t : c.profit_share) out.emplace_back(t.max_roi, t.share);
             return out;
-        });
+        })
+        .def_property_readonly("spread", [](const avbt::Costs& c) -> py::object {
+            if (!c.spread) return py::none();
+            return to_numpy(std::vector(*c.spread));
+        })
+        .def_readonly("max_spread", &avbt::Costs::max_spread);
+
+    m.def("veranta_spreads", [] {
+        std::map<std::string, std::tuple<double, double, std::string>> out;
+        for (const avbt::SpreadRow& r : avbt::veranta_spreads()) {
+            out[std::string(r.market)] = {r.spread, r.max_spread, std::string(r.read_on)};
+        }
+        return out;
+    });
 
     py::class_<avbt::Trade>(m, "Trade")
         .def_readonly("instrument", &avbt::Trade::instrument)
@@ -477,6 +525,7 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def_readonly("leverage", &avbt::Trade::leverage)
         .def_readonly("fees", &avbt::Trade::fees)
         .def_readonly("holding_costs", &avbt::Trade::holding_costs)
+        .def_readonly("spread_cost", &avbt::Trade::spread_cost)
         .def_readonly("result", &avbt::Trade::result)
         .def_readonly("cause", &avbt::Trade::cause);
 

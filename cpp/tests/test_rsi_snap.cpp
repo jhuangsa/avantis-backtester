@@ -38,7 +38,7 @@ int main() {
                 .tp_atrs = 50.0};  // exits only by time
     std::vector<int> open_steps;
     bool bad = false, wrong_side = false;
-    Result r = backtest(s, m, {{"BTC", Costs{}}}, PortfolioSettings{},
+    Result r = backtest(s, m, {{"BTC", Costs{.spread = no_spread}}}, PortfolioSettings{},
                         [&](int t, const std::vector<Position>&, const std::vector<Order>& orders) {
         for (const Order& o : orders) {
             if (o.kind != Order::Kind::Open) continue;

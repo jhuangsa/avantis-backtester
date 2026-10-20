@@ -62,7 +62,7 @@ int main() {
     };
     Markets m = Markets::make({{"A", make(n, jumpy(0))}, {"B", make(n, jumpy(1))}, {"C", make(n, jumpy(2))}});
     MarketCosts costs;
-    for (const Market& x : m.all()) costs[x.instrument] = Costs{.open_fee = 0.0005, .close_fee = 0.0005};
+    for (const Market& x : m.all()) costs[x.instrument] = Costs{.open_fee = 0.0005, .close_fee = 0.0005, .spread = no_spread};
 
     bool undefined_open = false;
     Result r;

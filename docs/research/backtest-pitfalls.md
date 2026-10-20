@@ -80,6 +80,22 @@ Sources: Bailey, Borwein, Lopez de Prado, and Zhu, ["Pseudo-Mathematics and Fina
 
 Sources: [BitMEX, Perpetual Contracts Guide](https://www.bitmex.com/app/perpetualContractsGuide) (inverse versus quanto; XBT PnL of one XBTUSD contract); [BitMEX, Inverse Perpetual Contracts](https://www.bitmex.com/app/inversePerpetualsGuide) (formula and the 10,000 / 11,000 / 9,000 example).
 
+## 8. Fills at the oracle price
+
+**Failure.** Every order fills exactly at the price in the bars, so each trade looks better than it was. A strategy with many short trades looks best of all, because it pays the hidden cost most often.
+
+**Mechanism.** Veranta fills a long above the oracle price and a short below it, and a close the other way (docs.veranta.xyz/trading/execution-and-pricing). The gap is the spread. It is small on one trade, but it is paid twice per trade, so a strategy that aims for a few tenths of a percent can lose most of its edge to it.
+
+**Guard.** The C++ engine moves every fill against the trade by the market's half-spread, from the caller or from Veranta's table (ADR 0020). A market with no spread is an error, not zero. Zero spread must be written out.
+
+## 9. Trading a closed market
+
+**Failure.** A market that closes (stocks, forex, metals) gets flat bars over the weekend. Orders fill and stops trigger at Friday's close while nobody can trade, and a weekend counts as held time.
+
+**Mechanism.** Filling empty bars flat makes closed time look like quiet trading. The real Monday open can be far from Friday's close.
+
+**Guard.** Build such markets with `resample(..., keep_empty=False)`, so the bars skip the closed time (ADR 0021). The engine then does nothing to the market in the gap: an order waits for the next open, and a stop the reopen jumps past fills at the open. Time exits count bars, not clock time.
+
 ## Checklist
 
 On every run the engine enforces all six:

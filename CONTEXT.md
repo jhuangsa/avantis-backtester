@@ -25,6 +25,10 @@ _Avoid_: a maker and taker schedule, funding, fee rate on an order
 The fee a winning close pays on a venue such as Upside Perps: a share of its profit, set by the close's ROI (profit over the collateral of the part closed) and a list of tiers. A losing close pays nothing. See ADR 0019.
 _Avoid_: performance fee, profit fee, a marginal or sliced rate
 
+**Spread**:
+The distance from the oracle price to a fill, as a fraction of price: a long fills above the oracle price, a short below, and a close the other way. Every fill pays it except liquidation. It is part of a market's `Costs`; with none given, the market uses Veranta's row (looked up by exact, case-sensitive name, then name plus `/USD`), and a market with no row is an error. Levels still trigger on the oracle price. See ADR 0020.
+_Avoid_: slippage, a fee
+
 ### Getting in and out
 
 **Entry**:
@@ -39,10 +43,10 @@ The loss-side distance from the entry price, using the same kind of distance as 
 _Avoid_: a fixed price chosen before the entry
 
 **Open fill**:
-The next bar's open. This is the price of every order, because an order is known only after a bar closes. The last bar of a series has no entry, because that open does not exist.
+The next bar's open, moved against the trade by the spread. This is the price of every order, because an order is known only after a bar closes. The last bar of a series has no entry, because that open does not exist.
 
 **Level fill**:
-The price of a take profit or a stop loss. It is the level itself. If the bar opens already through the level, it is the open. The level is live from the entry onward, including on the bar of the entry. Once a level fill has closed the trade, that bar's close is read while flat, and an entry that is true fills at the next open.
+The price of a take profit or a stop loss. It is the level itself. If the bar opens already through the level, it is the open. The engine then moves it by the spread (ADR 0020). The level is live from the entry onward, including on the bar of the entry. Once a level fill has closed the trade, that bar's close is read while flat, and an entry that is true fills at the next open.
 
 **Cause**:
 Why a trade ended: take profit, stop, order, liquidation, or hard stop. An order means the strategy closed it.
@@ -130,7 +134,7 @@ The C++ form of a trading idea: a struct that computes its lines once and, at th
 _Avoid_: hypothesis, a rule tree
 
 **Order**:
-What a strategy returns at the close of a bar: open or close, the instrument, the side, the stop and take-profit distances, and the leverage. It fills at the next open. Distances are fractions of the fill price, because the strategy does not know that price yet.
+What a strategy returns at the close of a bar: open or close, the instrument, the side, the stop and take-profit distances, and the leverage. It fills at the next open. Distances are fractions of the next bar's oracle open, before the spread, because the strategy does not know that price yet.
 _Avoid_: signal, a fill
 
 **Market**:
@@ -150,7 +154,7 @@ How far back a strategy reads state labels. It matches how late labels arrive li
 _Avoid_: lag, label delay
 
 **Clock**:
-The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. The C++ engine refuses markets with different base timeframes.
+The sorted list of every base bar open of every market in a backtest, with no repeats. Step t is the same moment in each market. A market joins at its first bar and leaves after its last, so markets may start and end at different times. A market may skip steps in between (a weekend, a closed session): it has no bar there, and its orders wait for its next open. The C++ engine refuses markets with different base timeframes. See ADR 0021.
 _Avoid_: calendar, index
 
 **Hard stop**:

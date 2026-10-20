@@ -74,7 +74,7 @@ Markets trend() {
 
 MarketCosts costs_for(const Markets& m) {
     MarketCosts c;
-    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = 0.0001, .close_fee = 0.0001};
+    for (const Market& x : m.all()) c[x.instrument] = Costs{.open_fee = 0.0001, .close_fee = 0.0001, .spread = no_spread};
     return c;
 }
 
@@ -84,7 +84,7 @@ bool same(const Result& a, const Result& b) {
         const Trade &x = a.trades[i], &y = b.trades[i];
         if (x.instrument != y.instrument || x.entry_bar != y.entry_bar || x.exit_bar != y.exit_bar ||
             x.entry_price != y.entry_price || x.exit_price != y.exit_price || x.size != y.size ||
-            x.result != y.result || x.cause != y.cause)
+            x.spread_cost != y.spread_cost || x.result != y.result || x.cause != y.cause)
             return false;
     }
     return true;

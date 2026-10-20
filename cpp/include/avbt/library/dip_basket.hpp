@@ -32,16 +32,15 @@ struct DipBasket {
         Atr atr_of{1};
         Sma trend_of{1};
         size_t done = 0, trend_done = 0;
+        int seen_bar = -1;
     };
     std::vector<Lines> lines;
-    int64_t seen_ts = -1;
 
     bool trades(const std::string& instrument) const {
         return std::any_of(lines.begin(), lines.end(), [&](const Lines& l) { return l.instrument == instrument; });
     }
     void prepare(const Markets& m) {
         lines.clear();
-        seen_ts = -1;
         update(m);
     }
     void update(const Markets& m) {
@@ -67,10 +66,18 @@ struct DipBasket {
         }
     }
     std::vector<Order> decide(int64_t now, const Report&, const std::vector<Position>& positions) {
-        if (lines.empty()) return {};
-        int c = last_closed(*lines[0].bars, now);
-        if (c < 0 || lines[0].bars->ts[c] == seen_ts) return {};
-        seen_ts = lines[0].bars->ts[c];
+        // Each market acts on its own new bar, so a closed market does not
+        // hold back the others.
+        std::vector<std::string> fresh;
+        for (Lines& l : lines) {
+            int t = last_closed(*l.bars, now);
+            if (t >= 0 && t != l.seen_bar) fresh.push_back(l.instrument);
+            l.seen_bar = t;
+        }
+        if (fresh.empty()) return {};
+        auto is_fresh = [&](const std::string& ins) {
+            return std::find(fresh.begin(), fresh.end(), ins) != fresh.end();
+        };
         const auto& p = params;
         auto held = [&](const std::string& ins) {
             return std::find_if(positions.begin(), positions.end(), [&](const Position& x) { return x.instrument == ins; });
@@ -83,11 +90,12 @@ struct DipBasket {
         for (const Position& x : positions) {
             if (!trades(x.instrument)) continue;
             ++open;
+            if (!is_fresh(x.instrument)) continue;
             const Lines& l = *line(x.instrument);
             int t = last_closed(*l.bars, now);
             bool back = p.revert && t >= 0 && defined(l.ret[t]) &&
                         (x.side == Side::Long ? l.ret[t] > 0 : l.ret[t] < 0);
-            bool late = x.entry_time != unknown_time && now - x.entry_time >= p.hold * seconds(p.timeframe);
+            bool late = x.entry_time != unknown_time && bars_held(*l.bars, x.entry_time, now) >= p.hold;
             if (late || back)
                 orders.push_back(Order{.kind = Order::Kind::Close, .instrument = x.instrument}), --open;
         }
@@ -103,7 +111,7 @@ struct DipBasket {
         for (const Lines& l : lines) {
             if (open >= p.max_open) break;
             int t = last_closed(*l.bars, now), u = last_closed(*l.trend_bars, now);
-            if (t < 0 || u < 0 || held(l.instrument) != positions.end()) continue;
+            if (!is_fresh(l.instrument) || u < 0 || held(l.instrument) != positions.end()) continue;
             if (!defined(l.ret[t]) || !defined(l.atr[t]) || !defined(l.trend_avg[u])) continue;
             double c = l.bars->close[t], a = l.atr[t] / c;
             // The move in ATRs: ret is a share of the price lookback bars ago.

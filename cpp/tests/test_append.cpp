@@ -37,8 +37,6 @@ int main() {
     CHECK(ms.bar_at("BTC", 2) == 2);
 
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{120, 1, 1, 1, 1, 1}); }));
-    // A base bar one minute late would leave a missing bar.
-    CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{240, 1, 1, 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min5, Bar{300, 1, 1, 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("ETH", Timeframe::Min1, Bar{180, 1, 1, 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{180, 1, 1, 1, 1, 1, 5.0}); }));
@@ -77,6 +75,10 @@ int main() {
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{180, 1, std::nan(""), 1, 1, 1}); }));
     CHECK(throws([&] { ms.append("BTC", Timeframe::Min1, Bar{60, 1, 1, 1, 1, 1}); }));
     CHECK(base->ts.size() == 3);
+    // A base bar after a gap is fine: the market skips 180; ADR 0021.
+    ms.append("BTC", Timeframe::Min1, Bar{240, 1, 1, 1, 1, 1});
+    CHECK(base->ts.size() == 4 && ms.clock().size() == 4 && ms.clock().back() == 240);
+    CHECK(ms.bar_at("BTC", 3) == 3);
 
     // Volume: its column must match the bars; append gives one exactly when it exists.
     Bars v = b;

@@ -41,7 +41,7 @@ def market(name, seed, minutes=6000):
 def setup():
     names = ["AVNT", "DYM", "BTC", "ETH", "GOLD", "ZORA"]
     markets = avbt.Markets([market(n, i) for i, n in enumerate(names)])
-    costs = {n: avbt.Costs(0.0005, 0.0005, np.zeros(6000), np.zeros(6000)) for n in names}
+    costs = {n: avbt.Costs(0.0005, 0.0005, np.zeros(6000), np.zeros(6000), spread=0) for n in names}
     return markets, costs
 
 
@@ -311,7 +311,7 @@ def test_costs_default_to_no_fees(setup):
     markets, _ = setup
     c = avbt.Costs()
     assert (c.open_fee, c.close_fee) == (0.0, 0.0)
-    free = {n: c for n in markets.instruments}
+    free = {n: avbt.Costs(spread=0) for n in markets.instruments}
     r = avbt.run("spike_short", {"spike": 0.0}, markets, free)
     assert r.trades and all(t.fees == 0 for t in r.trades)
 
@@ -386,7 +386,7 @@ def ticks_during(call):
 
 def test_run_releases_gil():
     big = avbt.Markets([market("BTC", 1, 600_000)])
-    assert ticks_during(lambda: avbt.run("state_trend", {}, big, {"BTC": avbt.Costs()})) > 1000
+    assert ticks_during(lambda: avbt.run("state_trend", {}, big, {"BTC": avbt.Costs(spread=0)})) > 1000
 
 
 def test_walk_forward_releases_gil(setup):
@@ -459,3 +459,76 @@ def test_optimize_every_strategy(setup, strategy):
     assert set(knobs) <= set(s["best"]) and len(s["runs"]) == 4
     for k, values in knobs.items():
         assert s["best"][k] in values
+
+
+def test_costs_spread_arguments():
+    assert avbt.Costs().spread is None and math.isnan(avbt.Costs().max_spread)
+    assert list(avbt.Costs(spread=0).spread) == [0.0]
+    c = avbt.Costs(0.0, 0.0, None, None, None, np.array([0.001, 0.002]), 0.0015)
+    assert list(c.spread) == [0.001, 0.002] and c.max_spread == 0.0015
+    assert len(avbt.Costs(spread=np.array([])).spread) == 0
+    for bad in ({"spread": -0.1}, {"spread": math.nan}, {"spread": 1.0}, {"max_spread": -1.0}):
+        with pytest.raises(ValueError):
+            avbt.Costs(**bad)
+
+
+
+def test_costs_spread_numpy_scalars():
+    # numpy scalars and 0-d arrays are numbers: one constant spread.
+    for x in (np.float32(0.001), np.int64(0), np.float64(0.001), np.array(0.001)):
+        assert len(avbt.Costs(spread=x).spread) == 1
+    assert avbt.Costs(spread=np.float32(0.25)).spread[0] == pytest.approx(0.25)
+    assert avbt.Costs(max_spread=np.float32(0.5)).max_spread == pytest.approx(0.5)
+    assert avbt.Costs(max_spread=np.array(0.5)).max_spread == 0.5
+
+
+def test_costs_spread_rejects_bool():
+    for bad in ({"spread": True}, {"spread": False}, {"spread": np.bool_(False)},
+                {"spread": np.array([False])}, {"max_spread": True}):
+        with pytest.raises(TypeError):
+            avbt.Costs(**bad)
+
+
+
+def test_costs_max_spread_only_a_number():
+    for bad in ((0.001,), [0.001], np.array([0.001]), np.zeros((1, 1)), []):
+        with pytest.raises(TypeError, match="max_spread"):
+            avbt.Costs(spread=0.001, max_spread=bad)
+
+
+def test_costs_spread_error_texts():
+    with pytest.raises(ValueError, match="max_spread.*finite"):
+        avbt.Costs(max_spread=math.inf)
+    with pytest.raises(ValueError, match="spread.*got inf"):
+        avbt.Costs(spread=math.inf)
+    with pytest.raises(ValueError, match="spread must be a 1-d array"):
+        avbt.Costs(spread=np.zeros((2, 2)))
+
+def test_costs_max_spread_none_is_nan():
+    assert math.isnan(avbt.Costs(max_spread=None).max_spread)
+    assert math.isnan(avbt.Costs(0.0, 0.0, None, None, None, 0.001, None).max_spread)
+
+def test_veranta_spreads_table():
+    rows = avbt.veranta_spreads()
+    spread, cap, read_on = rows["BTC/USD"]
+    assert 0 < spread < 0.01 and (math.isnan(cap) or cap >= spread) and read_on
+
+
+def test_spread_moves_fills(setup):
+    # A constant 0.1% half-spread: every fill sits 0.1% off the oracle
+    # price, against the trade, and spread_cost counts both fills.
+    markets, _ = setup
+    free = {n: avbt.Costs(spread=0) for n in markets.instruments}
+    wide = {n: avbt.Costs(spread=0.001) for n in markets.instruments}
+    a = avbt.run("spike_short", {"spike": 0.0}, markets, free)
+    b = avbt.run("spike_short", {"spike": 0.0}, markets, wide)
+    assert a.trades and all(t.spread_cost == 0 for t in a.trades)
+    x, y = a.trades[0], b.trades[0]
+    sign = 1 if y.side == avbt.Side.Long else -1
+    assert y.entry_price == pytest.approx(x.entry_price * (1 + sign * 0.001))
+    for t in b.trades:
+        sign = 1 if t.side == avbt.Side.Long else -1
+        assert t.result + t.fees + t.holding_costs == pytest.approx(sign * (t.exit_price - t.entry_price) * t.size)
+        assert t.spread_cost > 0
+    with pytest.raises(ValueError, match="no spread"):
+        avbt.run("spike_short", {"spike": 0.0}, markets, {n: avbt.Costs() for n in markets.instruments})

@@ -3,9 +3,10 @@
 For an up month (2026-08), a down month (2026-06) and a month that went
 both ways (2025-04), at 1x, 10x and 50x, it runs the library strategy
 buy_hold on 1-minute bars: one long at the open of the second minute, held
-to the month's last close. The stop sits 0.8 / leverage from the fill and
-risk_per_trade is 0.08, so every run puts up 1,000 of collateral out of
-10,000. No holding costs (no funding data).
+to the month's last close. The stop sits 0.75 / leverage from the open
+(buy_hold's default) and risk_per_trade is 0.075, so every run puts up
+about 1,000 of collateral out of 10,000 (a little less: BTC's table spread
+adds to the stop's loss). No holding costs (no funding data).
 
 A one-bar market one minute after the month makes BTC's data end before the
 run does, so the backtest closes the long with cause end_of_data.
@@ -54,7 +55,7 @@ def expected_fee(gross: float, roi: float) -> float:
 def main() -> None:
     minutes = pd.read_csv(ROOT / "data" / "candles" / "btc_1m.csv")
     minutes = minutes.drop_duplicates("ts").sort_values("ts")
-    costs = {"BTC": UPSIDE, "PAD": avbt_cpp.Costs()}
+    costs = {"BTC": UPSIDE, "PAD": avbt_cpp.Costs(spread=0)}
     head = (f"{'month':>12} {'lev':>4} {'entry':>10} {'exit':>10} {'move%':>7} "
             f"{'collat':>8} {'gross':>9} {'roi%':>8} {'fee':>8} {'fee/gr%':>7} "
             f"{'result':>9} {'cause':>12} match")
@@ -63,8 +64,8 @@ def main() -> None:
         m = markets(month_bars(minutes, month))
         for lev in LEVERAGES:
             settings = avbt_cpp.PortfolioSettings(
-                starting_balance=10000, risk_per_trade=0.08, scale_risk_with_leverage=False)
-            params = {"leverage": float(lev), "stop_loss": 0.8}
+                starting_balance=10000, risk_per_trade=0.075, scale_risk_with_leverage=False)
+            params = {"leverage": float(lev)}
             r = avbt_cpp.run("buy_hold", params, m, costs, settings)
             t = r.trades[0]
             collateral = t.size * t.entry_price / lev

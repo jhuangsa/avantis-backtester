@@ -87,7 +87,7 @@ struct RangeBasket {
                                      [&](const Position& x) { return x.instrument == l.instrument; });
             if (mine != positions.end()) {
                 bool late = p.max_bars > 0 && mine->entry_time != unknown_time &&
-                            now - mine->entry_time >= p.max_bars * seconds(p.timeframe);
+                            bars_held(*l.bars, mine->entry_time, now) >= p.max_bars;
                 // leave: close once the label is no longer a ranging one.
                 if (p.leave && !ranging(state_at(*l.states, now, state_delay).market)) late = true;
                 if (late) orders.push_back(Order{.kind = Order::Kind::Close, .instrument = l.instrument});

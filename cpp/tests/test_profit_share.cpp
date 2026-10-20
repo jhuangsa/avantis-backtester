@@ -219,14 +219,14 @@ bool throws(const Costs& c) {
 
 void test_validation() {
     const double inf = std::numeric_limits<double>::infinity();
-    auto tiers = [](std::vector<Tier> t) { return Costs{.profit_share = t}; };
+    auto tiers = [](std::vector<Tier> t) { return Costs{.profit_share = t, .spread = no_spread}; };
     check_true("upside valid", !throws(tiers(upside())));
     check_true("share 0 and 1 valid", !throws(tiers({{1.0, 0.0}, {2.0, 1.0}})));
-    check_true("empty valid", !throws(Costs{.open_fee = 0.001, .close_fee = 0.001}));
+    check_true("empty valid", !throws(Costs{.open_fee = 0.001, .close_fee = 0.001, .spread = no_spread}));
     check_true("open fee with tiers",
-               throws(Costs{.open_fee = 0.001, .profit_share = upside()}));
+               throws(Costs{.open_fee = 0.001, .profit_share = upside(), .spread = no_spread}));
     check_true("close fee with tiers",
-               throws(Costs{.close_fee = 0.001, .profit_share = upside()}));
+               throws(Costs{.close_fee = 0.001, .profit_share = upside(), .spread = no_spread}));
     check_true("max_roi zero", throws(tiers({{0.0, 0.25}})));
     check_true("max_roi negative", throws(tiers({{-1.0, 0.25}})));
     check_true("max_roi equal", throws(tiers({{2.5, 0.25}, {2.5, 0.20}})));
@@ -237,6 +237,20 @@ void test_validation() {
     check_true("max_roi inf", throws(tiers({{inf, 0.25}})));
     check_true("share nan", throws(tiers({{2.5, kNan}})));
     check_true("share inf", throws(tiers({{2.5, inf}})));
+}
+
+// ROI counts the fill prices (ADR 0020). An oracle exit at 150.5 is ROI
+// 5.05, the 10% tier. With a 1% spread the fills are 101 and 148.995:
+// ROI 10 * 47.995 / 101 = 4.75, the 20% tier.
+void test_roi_after_spread() {
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, kNan, share_fees(), 0.0, 1.0, unknown_time, 0.01);
+    const Position& pos = p.positions().at(0);
+    double gross = pos.size * (148.995 - 101.0);
+    check_value("spread roi", gross / pos.collateral, 10.0 * 47.995 / 101.0);
+    auto c = p.close("BTC", 150.5, 1.0, Cause::Order, 0.01);
+    check_value("spread roi fee", c->fees, 0.20 * gross);
+    check_value("spread roi result", c->result, 0.80 * gross);
 }
 
 // Opens long at bar 1's decision, closes at bar 3's: fills at open[2]
@@ -262,7 +276,7 @@ static_assert(Strategy<OpenThenClose>);
 void test_backtest_trade_fees() {
     Bars b = flat_bars({100, 100, 100, 150, 200, 200});
     Markets m = Markets::make({{"X", {b}}});
-    Costs c{.hold_long = std::vector<double>(6, 0.0001), .profit_share = upside()};
+    Costs c{.hold_long = std::vector<double>(6, 0.0001), .profit_share = upside(), .spread = no_spread};
     OpenThenClose s;
     Result r = backtest(s, m, {{"X", c}}, PortfolioSettings{});
     check_true("bt one trade", r.trades.size() == 1);
@@ -291,6 +305,7 @@ int main() {
     test_hard_stop_charges_winner();
     test_validation();
     test_backtest_trade_fees();
+    test_roi_after_spread();
     if (failures == 0) std::printf("all profit share tests passed\n");
     return failures == 0 ? 0 : 1;
 }

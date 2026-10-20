@@ -28,7 +28,7 @@ The rules:
 - On each base bar, an open position adds holding cost × size × price to its running total, priced at the bar's close. Equity includes the total at every bar. The balance pays it at the close, as it pays fees. A partial close pays its share.
 - A NaN holding value counts as zero. A holding cost never blocks a trade.
 - `hold_long` and `hold_short` are either empty (no holding cost) or have exactly one value per base bar of the market. Any other length is an error naming the market.
-- A market with no `Costs` is an error, not zero cost. So is a `Costs` that names no market. Zero cost must be written out: `Costs()`.
+- A market with no `Costs` is an error, not zero cost. So is a `Costs` that names no market. Zero cost must be written out: `Costs(spread=0)` (ADR 0020).
 - `backtest`, `run`, and `optimize` all take the costs and run `check_costs` before the first step.
 
 Costs are not a strategy param, so the strategy table (`run.hpp`) has no fee entry, and `optimize` cannot search it.
@@ -41,3 +41,4 @@ Costs are not a strategy param, so the strategy table (`run.hpp`) has no fee ent
 - Holding costs add to the open position's loss, so they count toward the hard stop through equity. The liquidation price does not move.
 - The costs are the caller's data, like the bars: the library never reads them from a file or a network.
 - ADR 0019 adds a fifth field, `profit_share`, for venues that charge a share of profit instead of a fee on size.
+- ADR 0020 adds `spread` and `max_spread`, the half-spread every fill pays. With no spread given, the market uses Veranta's row; a market with no row is an error. Zero spread must be written out: `spread=0`.
