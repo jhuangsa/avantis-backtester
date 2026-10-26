@@ -22,6 +22,8 @@ Deposits, withdrawals and idle cash change nothing. Leverage raises the return, 
 
 **Avantis.** Each close carries its margin, price PnL, closing fee and funding. R adds up price PnL less fee and funding at each close. U prices the margin still open at the hour's 1-hour close: side × margin × leverage × (price / open price − 1). The history reports funding only at the close, so U spreads it evenly over the hold, and R takes it exactly at the close. The history has no opening fee, so none is charged.
 
+**Veranta.** Avantis is now Veranta. For a wallet saved by `examples/veranta_history.py`, the old closes are as above, and the v2 history rows rebuild each book (one market and side): an open or increase adds its coins and notional, a close takes out its coins at its own open price. U is each book at the hour's price. Fees on opens and increases, and margin used up in open positions, come from the wallet's USDC transfers on Base. Margin is each book's cost over its average leverage, an estimate. See `docs/mimic_frontier.md`.
+
 **Hyperliquid.** Each coin's position is rebuilt from its fills: its size and its average entry price. A fill that shrinks the position realizes its price PnL. R adds that, less each fill's fee, plus funding as it is paid. U = size × (price − entry). Fills carry no margin, so margin is estimated as |size| × entry / the coin's current leverage setting. When the setting is unknown, the wallet's median setting is used, else 1. A position open at the window start enters at the first price; the page lists such coins as "carried in". The window is the last 200 days, the reach of the 1-hour candles.
 
 The full specification is GitHub issue #15.

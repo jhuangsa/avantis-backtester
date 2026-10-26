@@ -711,3 +711,239 @@ def test_avantis_columns_are_float_when_no_trade_is_ever_live():
     assert len(df)
     for c in NUM:
         assert df[c].dtype == np.float64, c
+
+
+# ---------- Veranta v2 history ----------
+
+def v2(open_, t, market, side, size, coll, px, coins=None, oid=None,
+       of=None, net=None, fee=None, fund=None, borrow=None):
+    """One Veranta v2 history row at T0+t seconds; size is notional."""
+    return {"type": "open" if open_ else "close", "open": open_,
+            "timestamp": T0 + t, "market": market, "side": side,
+            "positionSize": size, "collateral": coll, "openPrice": px,
+            "coinExposureAdded": coins, "orderId": oid,
+            "orderIdOfOpenTrade": of, "netPnl": net, "closeFee": fee,
+            "funding": fund, "borrowFee": borrow}
+
+
+def eth_book(side="long", close=True):
+    # open 1 coin at 100 ($100, $10 collateral) at 0; add 3 coins at 120
+    # ($360, $72) at 1h: 4 coins, cost 460, average entry 115.
+    # Full close at 3h: $460 at 115 = 4 coins; net +50, fee 2, funding
+    # 1.5 + borrow 0.5.
+    rows = [v2(True, 0, "ETH", side, 100, 10, 100, coins=1, oid="o1"),
+            v2(True, H, "ETH", side, 360, 72, 120, coins=None, oid="o2")]
+    if close:
+        rows.append(v2(False, 3 * H, "ETH", side, 460, 82, 115, of="o1",
+                       net=50, fee=2, fund=1.5, borrow=0.5))
+    return rows
+
+
+ETH_V2 = {"ETH": series({0: 100, H // 2: 110, H: 120, 2 * H: 130,
+                         3 * H: 140})}
+V2_TIMES = [T0, T0 + H // 2, T0 + H, T0 + 2 * H, T0 + 3 * H]
+
+
+def test_veranta_open_increase_close_book():
+    times, books, Q, C, Mg, net, fee, fund, carried = W.veranta_replay(eth_book())
+    assert list(times) == [T0, T0 + H, T0 + 3 * H]
+    assert books == [("ETH", 1.0)]
+    # coins 1 -> 4 (3 = 360/120 from the price, coinExposureAdded None) -> 0
+    assert Q[:, 0] == pytest.approx([1, 4, 0], abs=1e-12)
+    assert C[:, 0] == pytest.approx([100, 460, 0], abs=1e-12)
+    assert Q[-1, 0] == 0.0 and C[-1, 0] == 0.0  # snapped to flat
+    assert list(net) == [0, 0, 50]
+    assert list(fee) == [0, 0, 2]
+    assert list(fund) == [0, 0, 2]
+    assert carried == []
+
+
+def test_veranta_ledger_realized_fees_funding_after_close():
+    df = W.ledger("veranta", eth_book(), ETH_V2, times=V2_TIMES)
+    last = row(df, 3 * H)
+    assert last["realized"] == approx(50)  # netPnl, not netPnl - fees
+    assert last["fees"] == approx(2)
+    assert last["funding"] == approx(2)
+    assert last["unrealized"] == approx(0)
+    assert last["margin_open"] == approx(0)
+    assert df["margin_estimated"].all()
+    assert list(df.columns) == COLS
+
+
+def test_veranta_coin_exposure_added_used_when_given():
+    rows = eth_book(close=False)
+    rows[1]["coinExposureAdded"] = 2.5  # not 360/120
+    Q = W.veranta_replay(rows)[2]
+    assert Q[-1, 0] == pytest.approx(3.5)
+
+
+def test_veranta_unrealized_counts_increase_from_its_time():
+    df = W.ledger("veranta", eth_book(), ETH_V2, times=V2_TIMES)
+    # 0.5h: 1 coin only: 1*110 - 100 = 10
+    assert row(df, H // 2)["unrealized_price"] == approx(10)
+    # 1h: 4*120 - 460 = 20
+    assert row(df, H)["unrealized_price"] == approx(20)
+    # 2h: 4*130 - 460 = 60
+    assert row(df, 2 * H)["unrealized_price"] == approx(60)
+    assert row(df, 2 * H)["unrealized_funding"] == approx(0)
+    assert row(df, 2 * H)["pnl"] == approx(60)
+
+
+def test_veranta_short_book_flips_sign():
+    df = W.ledger("veranta", eth_book("short"), ETH_V2, times=V2_TIMES)
+    assert W.veranta_replay(eth_book("short"))[1] == [("ETH", -1.0)]
+    assert row(df, H // 2)["unrealized_price"] == approx(-10)
+    assert row(df, H)["unrealized_price"] == approx(-20)
+    assert row(df, 2 * H)["unrealized_price"] == approx(-60)
+    assert row(df, 3 * H)["unrealized_price"] == approx(0)
+
+
+def test_veranta_margin_per_book():
+    rows = eth_book(close=False) + [
+        # partial close at 2h: $230 at 115 = 2 coins; cost 460 -> 230
+        v2(False, 2 * H, "ETH", "long", 230, 41, 115, of="o1", net=5),
+        # BTC short, $1000 notional on $250 collateral (4x) at 1h
+        v2(True, H, "BTC", "short", 1000, 250, 50, coins=20, oid="o3"),
+    ]
+    px = {**ETH_V2, "BTC": series({0: 50})}
+    df = W.ledger("veranta", rows, px, times=V2_TIMES[:4])
+    # margin = cost * collateral added / notional added, so far
+    # 0: ETH 100*10/100 = 10
+    assert row(df, 0)["margin_open"] == approx(10)
+    # 1h: ETH 460*(10+72)/(100+360) = 82; BTC 1000*250/1000 = 250
+    assert row(df, H)["margin_open"] == approx(82 + 250)
+    # 2h: ETH 230*82/460 = 41; BTC 250
+    assert row(df, 2 * H)["margin_open"] == approx(41 + 250)
+    # ETH coins 2 left: 2*130 - 230 = 30; BTC short 20 at 50, still 50: 0
+    assert row(df, 2 * H)["unrealized_price"] == approx(30)
+    assert row(df, 2 * H)["realized"] == approx(5)
+
+
+def test_veranta_close_without_open_is_carried():
+    rows = [
+        v2(True, 0, "BTC", "long", 500, 50, 50, coins=10, oid="b1"),
+        # ETH long opened before the history starts: 2 coins at 100
+        v2(False, 2 * H, "ETH", "long", 200, 20, 100, of="gone", net=30,
+           fee=1),
+    ]
+    px = {"BTC": series({0: 50}), "ETH": series({0: 100, H: 110})}
+    ev = W.veranta_replay(rows)
+    times, books, Q, C = ev[:4]
+    assert ev[8] == ["ETH"]
+    # a carried row at the first row's time, then the BTC open there too
+    assert list(times) == [T0, T0, T0 + 2 * H]
+    n = books.index(("ETH", 1.0))
+    assert Q[0, n] == approx(2) and C[0, n] == approx(200)
+    assert Q[-1, n] == 0.0 and C[-1, n] == 0.0
+    df = W.ledger("veranta", rows, px, times=[T0, T0 + H, T0 + 2 * H])
+    assert df.attrs["carried"] == ["ETH"]
+    # 0: ETH 20*200/200 + BTC 50*500/500 = 70
+    assert row(df, 0)["margin_open"] == approx(70)
+    # 1h: ETH 2*110 - 200 = 20
+    assert row(df, H)["unrealized_price"] == approx(20)
+    assert row(df, 2 * H)["realized"] == approx(30)
+    assert row(df, 2 * H)["fees"] == approx(1)
+    assert row(df, 2 * H)["margin_open"] == approx(50)
+
+
+def test_veranta_no_carry_when_every_close_has_its_open():
+    df = W.ledger("veranta", eth_book(), ETH_V2, times=V2_TIMES)
+    assert df.attrs["carried"] == []
+
+
+def test_veranta_ledger_is_old_closes_plus_v2_rows():
+    old = [av("ETH", True, 2, 100, 0, 2 * H, 100, 30, fee=1, fund=4),
+           av("BTC", False, 1, 50, H, 4 * H, 200, -10, fee=0.5)]
+    px = {**ETH_V2, "BTC": series({0: 50, 2 * H: 45, 4 * H: 55})}
+    ts = [T0 + k * H // 2 for k in range(10)]
+    both = W.ledger("veranta", old + eth_book(), px, times=ts)
+    a = W.ledger("avantis", old, px, times=ts)
+    b = W.ledger("veranta", eth_book(), px, times=ts)
+    for c in ["realized", "unrealized_price", "unrealized_funding",
+              "unrealized", "fees", "funding", "pnl", "margin_open"]:
+        np.testing.assert_allclose(both[c], a[c] + b[c], rtol=1e-12,
+                                   atol=1e-9, err_msg=c)
+    # spot check 1h: old ETH 2*100*(120/100-1) = 40, funding spread
+    # -4*1h/2h = -2; old BTC short just opened: 0; v2 ETH 20
+    r = row(both, H)
+    assert r["unrealized_price"] == approx(40 + 20)
+    assert r["unrealized_funding"] == approx(-2)
+
+
+def test_veranta_only_old_closes_matches_avantis():
+    old = [av("ETH", True, 2, 100, 0, 2 * H, 100, 30, fee=1)]
+    a = W.ledger("avantis", old, ETH_V2)
+    b = W.ledger("veranta", old, ETH_V2)
+    cols = [c for c in COLS if c != "margin_estimated"]
+    pd.testing.assert_frame_equal(a[cols], b[cols])
+
+
+def test_veranta_unrealized_zero_before_first_price():
+    px = {"ETH": series({2 * H: 130})}
+    df = W.ledger("veranta", eth_book(), px, times=V2_TIMES)
+    for t in (0, H // 2, H):
+        assert row(df, t)["unrealized_price"] == 0.0
+    # margin still counts before the price: 460*82/460 at 1h
+    assert row(df, H)["margin_open"] == approx(82)
+    assert row(df, 2 * H)["unrealized_price"] == approx(4 * 130 - 460)
+    assert df.attrs["no_prices"] == []
+    none = W.ledger("veranta", eth_book(), {}, times=V2_TIMES)
+    assert (none["unrealized_price"] == 0).all()
+    assert none.attrs["no_prices"] == ["ETH"]
+
+
+def test_veranta_paid_fee_is_realized_at_its_open():
+    rows = eth_book()
+    rows[0]["paidFee"], rows[1]["paidFee"] = 1.0, 0.5
+    net, fee = W.veranta_replay(rows)[5:7]
+    # open -1; increase -0.5; close +50 net, close fee 2
+    assert list(net) == approx([-1, -1.5, 48.5])
+    assert list(fee) == approx([1, 1.5, 3.5])
+    df = W.ledger("veranta", rows, ETH_V2, times=V2_TIMES)
+    assert row(df, H // 2)["realized"] == approx(-1)
+    assert row(df, 3 * H)["realized"] == approx(48.5)
+    assert row(df, 3 * H)["fees"] == approx(3.5)
+
+
+def test_veranta_carry_fee_is_realized_at_the_first_row():
+    rows = [
+        v2(True, 0, "BTC", "long", 500, 50, 50, coins=10, oid="b1"),
+        v2(False, 2 * H, "ETH", "long", 200, 20, 100, of="gone", net=30,
+           fee=1),
+    ]
+    rows[1]["carryFee"] = 4.0
+    net, fee = W.veranta_replay(rows)[5:7]
+    # carried row, BTC open, ETH close: -4, -4, -4 + 30
+    assert list(net) == approx([-4, -4, 26])
+    assert list(fee) == approx([4, 4, 5])
+
+
+DRAIN = {"amount": 12.0, "from": T0 + H, "to": T0 + 3 * H}
+
+
+def test_veranta_drain_is_unrealized_funding_spread_evenly():
+    ev = W.veranta_replay(eth_book(close=False))
+    t = [T0, T0 + H, T0 + 2 * H, T0 + 3 * H, T0 + 4 * H]
+    s = W.veranta_state(ev, ETH_V2, t, DRAIN)
+    # 0 before "from", -12 x elapsed / 2h, then held at -12
+    assert list(s["unrealized_funding"]) == approx([0, 0, -6, -12, -12])
+    assert list(s["realized"]) == approx([0] * 5)  # not realized
+    none = W.veranta_state(ev, ETH_V2, t)
+    assert (none["unrealized_funding"] == 0).all()
+
+
+@pytest.mark.parametrize("drain", [{"amount": 0.0, "from": T0, "to": T0 + H},
+                                   {"amount": 5.0, "from": None, "to": T0 + H}])
+def test_veranta_no_drain_when_zero_or_nothing_live(drain):
+    ev = W.veranta_replay(eth_book(close=False))
+    s = W.veranta_state(ev, ETH_V2, [T0, T0 + 2 * H], drain)
+    assert (s["unrealized_funding"] == 0).all()
+
+
+def test_veranta_ledger_takes_drain_record():
+    rows = eth_book(close=False)
+    df = W.ledger("veranta", rows + [{"drain": DRAIN}], ETH_V2,
+                  times=V2_TIMES + [T0 + 4 * H])
+    assert row(df, 2 * H)["unrealized_funding"] == approx(-6)
+    # 4h: 4*140 - 460 = 100 price, less the full drain 12
+    assert row(df, 4 * H)["pnl"] == approx(100 - 12)

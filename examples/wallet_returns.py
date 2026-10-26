@@ -222,6 +222,101 @@ def hl_state(ev, funding, prices, lever, t):
         margin_open=(np.abs(q) * e / lam).sum(1))
 
 
+def veranta_replay(rows):
+    """Event times and, after each, every book's coins, cost and margin, and the
+    running net PnL, close fees and funding, from Veranta v2 history rows.
+
+    A book is one market and side. An open or increase adds its coins
+    (coinExposureAdded, else size over price) and its notional at cost; a
+    close takes out its coins at its own open price, the position's
+    average entry. Margin is the book's cost over its leverage: notional
+    over collateral of all it added. The history leaves out margin added
+    to or taken from an open position, so margin is an estimate.
+
+    A close whose open is not in the history opened before it starts: its
+    coins and cost are carried into the book at the first row. An open's
+    "paidFee" and a carried close's "carryFee" (veranta_history.costs) are
+    fees paid on opening: realized at that time. Returns times, books,
+    coins, cost, margin, net, fees, funding and the markets carried in.
+    """
+    rows = sorted(rows, key=lambda r: (r["timestamp"], not r["open"]))
+    books = sorted({(r["market"], 1.0 if r["side"] == "long" else -1.0) for r in rows})
+    k = {b: i for i, b in enumerate(books)}
+    q, cost, added, coll = (np.zeros(len(books)) for _ in range(4))
+    opened = {r["orderId"] for r in rows if r["open"] and r["orderId"] is not None}
+    carried = [r for r in rows if not r["open"] and r["orderIdOfOpenTrade"] not in opened]
+    for r in carried:
+        i = k[r["market"], 1.0 if r["side"] == "long" else -1.0]
+        q[i] += r["positionSize"] / r["openPrice"]
+        cost[i] += r["positionSize"]
+        added[i] += r["positionSize"]
+        coll[i] += r["collateral"]
+    times, Q, C, Mg, net, fee, fund = [], [], [], [], [], [], []
+    paid = sum(r.get("carryFee") or 0.0 for r in carried)
+    done, owed = -paid, 0.0
+
+    def margin():
+        return np.where(added > 0, cost * coll / np.where(added > 0, added, 1.0), 0.0)
+
+    if carried:
+        times.append(float(rows[0]["timestamp"]))
+        Q.append(q.copy()), C.append(cost.copy()), Mg.append(margin())
+        net.append(done), fee.append(paid), fund.append(0.0)
+    for r in rows:
+        i = k[r["market"], 1.0 if r["side"] == "long" else -1.0]
+        if r["open"]:
+            c = r.get("coinExposureAdded") or r["positionSize"] / r["openPrice"]
+            q[i] += c
+            cost[i] += r["positionSize"]
+            added[i] += r["positionSize"]
+            coll[i] += r["collateral"]
+            done -= r.get("paidFee") or 0.0
+            paid += r.get("paidFee") or 0.0
+        else:
+            c = r["positionSize"] / r["openPrice"]
+            q[i] -= c
+            cost[i] -= c * r["openPrice"]
+            if abs(q[i]) <= 1e-9 * c:
+                q[i] = cost[i] = 0.0
+            done += r["netPnl"] or 0.0
+            paid += r["closeFee"] or 0.0
+            owed += (r["funding"] or 0.0) + (r["borrowFee"] or 0.0)
+        times.append(float(r["timestamp"]))
+        Q.append(q.copy()), C.append(cost.copy()), Mg.append(margin())
+        net.append(done), fee.append(paid), fund.append(owed)
+    return (np.array(times), books, np.array(Q).reshape(-1, len(books)), np.array(C).reshape(-1, len(books)),
+            np.array(Mg).reshape(-1, len(books)), np.array(net), np.array(fee), np.array(fund), sorted({r["market"] for r in carried}))
+
+
+def veranta_state(ev, prices, t, drain=None):
+    """Columns at times t (array) for a Veranta replay ev.
+
+    Unrealized is each book marked at the price: side x (coins x price - cost).
+    Before a market's first price it is 0. Funding counts at the close only.
+    drain: {"amount", "from", "to"}, margin used up inside the positions
+    open at the end: unrealized funding, charged evenly from "from" to "to".
+    """
+    times, books, Q, C, Mg, net, fee, fund = ev[:8]
+    t = np.asarray(t, float)
+    i = np.searchsorted(times, t, side="right") - 1
+    seen = i >= 0
+    j = np.maximum(i, 0)
+    u = np.zeros(len(t))
+    for n, (market, side) in enumerate(books):
+        p = price_at(prices.get(market), t, np.nan)
+        live = seen & np.isfinite(p)
+        u += np.where(live, side * (Q[j, n] * np.where(live, p, 0.0) - C[j, n]), 0.0)
+    pick = lambda x: np.where(seen, x[j], 0.0)
+    uf = np.zeros(len(t))
+    if drain and drain.get("amount") and drain.get("from") is not None:
+        a, b = float(drain["from"]), float(drain["to"])
+        uf = -drain["amount"] * np.clip((t - a) / max(b - a, 1.0), 0.0, 1.0)
+    return dict(
+        realized=pick(net), unrealized_price=u, unrealized_funding=uf,
+        fees=pick(fee), funding=pick(fund),
+        margin_open=np.where(seen, Mg[j].sum(1) if len(books) else 0.0, 0.0))
+
+
 def empty(**attrs):
     df = pd.DataFrame({c: pd.Series(dtype=float) for c in COLUMNS})
     df["time"] = df["time"].astype(np.int64)
@@ -236,17 +331,39 @@ def ledger(venue, records, prices, *, funding=(), leverage=None, start=None,
            times=None) -> pd.DataFrame:
     """One row per time of a wallet's PnL, capital and return.
 
-    venue: "avantis" (records = cached trade-history closes) or
+    venue: "avantis" (records = cached trade-history closes),
+    "veranta" (records = old-history closes, v2 history rows, which
+    carry "open", and at most one {"drain": ...}; see veranta_replay and
+    veranta_state) or
     "hyperliquid" (records = fills; funding = userFunding rows;
     leverage = {coin: current leverage}; start = window start, unix s).
     prices: {market: Series of prices indexed by the unix second at
     which each is known}. times: unix seconds to evaluate at; default
     the hourly grid from the first open to the last event.
     """
-    if venue not in ("avantis", "hyperliquid"):
+    if venue not in ("avantis", "veranta", "hyperliquid"):
         raise ValueError(f"unknown venue {venue!r}")
     records, funding = list(records), list(funding)
-    if venue == "avantis":
+    if venue == "veranta":
+        rows = [r for r in records if "open" in r]
+        drain = next((r["drain"] for r in records if "drain" in r), None)
+        d, skipped = avantis_rows([r for r in records if "open" not in r and "drain" not in r])
+        ev = veranta_replay(rows) if rows else None
+        if not len(d) and ev is None:
+            return empty(skipped=skipped)
+        markets = set(d["market"] if len(d) else []) | {r["market"] for r in rows}
+        parts = [d["a"], d["c"]] if len(d) else []
+        events = np.concatenate(parts + ([ev[0]] if ev is not None else []))
+        first = events.min()
+
+        def state(t):
+            out = veranta_state(ev, prices, t, drain) if ev is not None else None
+            if len(d):
+                old = avantis_state(d, prices, t)
+                out = old if out is None else {c: out[c] + old[c] for c in out}
+            return out
+        attrs = dict(skipped=skipped, carried=ev[8] if ev is not None else [], gap_share=0.0)
+    elif venue == "avantis":
         d, skipped = avantis_rows(records)
         if not len(d):
             return empty(skipped=skipped)
@@ -274,7 +391,7 @@ def ledger(venue, records, prices, *, funding=(), leverage=None, start=None,
     t = grid(first, events.max()) if times is None else np.asarray(times)
     t = t.astype(float)
     every = np.union1d(events, t)
-    step = len(every) if venue == "avantis" else max(1, 2_000_000 // max(len(records), 1))
+    step = len(every) if venue in ("avantis", "veranta") else max(1, 2_000_000 // max(len(records), 1))
     s = pd.concat([pd.DataFrame(state(every[i:i + step]))
                    for i in range(0, len(every), step)], ignore_index=True)
     s["own"] = s["margin_open"] - s["realized"]
@@ -284,7 +401,7 @@ def ledger(venue, records, prices, *, funding=(), leverage=None, start=None,
     s["unrealized"] = s["unrealized_price"] + s["unrealized_funding"]
     s["pnl"] = s["realized"] + s["unrealized"]
     s["return"] = s["pnl"] / s["capital"]
-    s["margin_estimated"] = venue == "hyperliquid"
+    s["margin_estimated"] = venue != "avantis"
     s = s[COLUMNS]
     s.attrs.update(
         breach=bool((s["return"] < -1 - 1e-9).any()),
@@ -500,21 +617,29 @@ def pnl_history(portfolio):
 def run_avantis(M, address, times=None):
     """A wallet's table and checks; times as in ledger().
 
-    attrs["leverage"] is the median leverage of its rows.
+    attrs["leverage"] is the median leverage of its rows. A file from
+    veranta_history.py carries "v2", the v2 history rows: the table is
+    then the "veranta" ledger of those rows and the old closes, the rows
+    without "type".
     """
-    rows = json.loads(M.download(address).read_text())["trades"]
+    saved = json.loads(M.download(address).read_text())
+    rows, v2 = saved["trades"], saved.get("v2")
+    drain = [{"drain": saved["drain"]}] if saved.get("drain") else []
+    venue, records = ("veranta", [r for r in rows if "type" not in r] + v2 + drain) if v2 else ("avantis", rows)
     good = [r for r in rows if kept(r)]
     if not good:
-        return ledger("avantis", rows, {}, times=times), []
+        return ledger(venue, records, {}, times=times), []
     first = int(min(r["openedAt"] for r in good))
     last = int(max(unix([r["time"] for r in good])))
+    if v2:
+        last = max(last, max(r["timestamp"] for r in v2))
     start, end = M.day_bounds(first, last)[:2]
     prices = {}
     for sym, pid in {r["symbol"]: r["pairIndex"] for r in good}.items():
         b = M.bars(pid, start, end)
         if b is not None and len(b[1].ts):
             prices[sym] = pd.Series(b[1].close, index=b[1].ts + HOUR)
-    df = ledger("avantis", rows, prices, times=times)
+    df = ledger(venue, records, prices, times=times)
     df.attrs["leverage"] = float(np.median([fnum(r["leverage"]) for r in good]))
     return df, checks(df, "avantis", rows, board=board_row(address))
 
