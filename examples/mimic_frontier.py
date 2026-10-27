@@ -193,11 +193,13 @@ def pnl_chart(path, title, panels):
                               for s in kept], row=1, col=col)
         fig.add_scatter(x=[s["risk"] for s in front], y=[s["final"] for s in front], mode="lines+markers",
                         name="frontier", legendgroup="frontier", showlegend=first, line={"color": "#2b6cb0"}, row=1, col=col)
+        # The PnL row has its own legend in each column: the picks' scales k differ.
+        pnl_legend = f"legend{col + 1}"
         w = p["wallet"]
-        fig.add_scatter(x=pd.to_datetime(w["time"], unit="s"), y=w["pnl"], name="wallet", legendgroup="wallet",
-                        showlegend=first, line={"color": "#1a202c", "dash": "dot"}, row=2, col=col)
+        fig.add_scatter(x=pd.to_datetime(w["time"], unit="s"), y=w["pnl"], name="wallet", legend=pnl_legend,
+                        line={"color": "#1a202c", "dash": "dot"}, row=2, col=col)
         fig.add_scatter(x=pd.to_datetime(w["time"], unit="s"), y=w["return"], name="wallet", legendgroup="wallet",
-                        showlegend=False, line={"color": "#1a202c", "dash": "dot"}, row=3, col=col)
+                        showlegend=first, line={"color": "#1a202c", "dash": "dot"}, row=3, col=col)
         for name, s in chosen.items():
             c = COLORS[name]
             fig.add_scatter(x=[s["risk"]], y=[s["final"]], mode="markers+text", text=[name], textposition="top center",
@@ -207,8 +209,8 @@ def pnl_chart(path, title, panels):
                             marker={"color": c, "size": 14, "symbol": "star"}, row=1, col=col)
             fig.add_vline(x=s["risk_level"], line={"color": c, "dash": "dot", "width": 1}, row=1, col=col)
             b = p["short"][name]
-            fig.add_scatter(x=pd.to_datetime(b["time"], unit="s"), y=b["pnl"] * s["k"], name=name, legendgroup=name,
-                            showlegend=False, line={"color": c}, row=2, col=col)
+            fig.add_scatter(x=pd.to_datetime(b["time"], unit="s"), y=b["pnl"] * s["k"], name=f"{name} × {s['k']:.3g}",
+                            legend=pnl_legend, line={"color": c}, row=2, col=col)
             b = p["long"][name]
             fig.add_scatter(x=pd.to_datetime(b["time"], unit="s"), y=b["return"], name=name, legendgroup=name,
                             showlegend=False, line={"color": c}, row=3, col=col)
@@ -216,6 +218,9 @@ def pnl_chart(path, title, panels):
         fig.update_yaxes(title_text="final return", tickformat=".0%", row=1, col=col)
         fig.update_yaxes(title_text="PnL", tickprefix="$", row=2, col=col)
         fig.update_yaxes(title_text="return", tickformat=".0%", row=3, col=col)
+        x, y = fig.get_subplot(2, col).xaxis.domain, fig.get_subplot(2, col).yaxis.domain
+        fig.update_layout({pnl_legend: {"x": x[0] + 0.01, "y": y[1] - 0.01, "xanchor": "left", "yanchor": "top",
+                                        "bgcolor": "rgba(255,255,255,0.8)"}})
     fig.update_layout(title=title, template="plotly_white", height=1300, hovermode="closest")
     fig.write_html(path, include_plotlyjs="cdn")
 
