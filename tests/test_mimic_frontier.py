@@ -99,3 +99,16 @@ def test_min_budget():
     assert M.min_budget(N(trades=trades), costs) == pytest.approx(M.vt.ACCOUNT * 1.0)
     assert M.min_budget(N(trades=trades[2:]), costs) == pytest.approx(M.vt.ACCOUNT * 0.5)
     assert M.min_budget(N(trades=[]), costs) == 0.0
+
+
+def test_score_trades_gap_for_long_trail_return():
+    a, b = {"gap": 0.10, "final": 0.5}, {"gap": 0.12, "final": 1.5}
+    assert F.score(a, 0) < F.score(b, 0)  # weight 0: the gap alone
+    assert F.score(b, 0.05) < F.score(a, 0.05)  # 0.05 per 100% of return outweighs 0.02 of gap
+    assert F.score(a, 0.01) == pytest.approx(0.095)
+
+
+def test_long_end_is_the_first_of_the_month():
+    assert F.long_end("2026-10-23") == "2026-10-01"
+    assert F.long_end("2026-10-01") == "2026-10-01"
+    assert F.long_end(pd.Timestamp("2027-01-15", tz="UTC")) == "2027-01-01"

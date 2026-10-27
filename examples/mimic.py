@@ -704,20 +704,20 @@ def load_markets(symbols, start, end):
     return avbt_cpp.Markets(markets)
 
 
-def settings(risk, scale=True):
+def settings(risk, scale=True, hard_stop=1.0):
     """The account: risk per trade is risk times leverage when `scale` is on."""
     s = avbt_cpp.PortfolioSettings()
-    s.starting_balance, s.risk_per_trade, s.hard_stop = vt.ACCOUNT, risk, 1.0
+    s.starting_balance, s.risk_per_trade, s.hard_stop = vt.ACCOUNT, risk, hard_stop
     s.scale_risk_with_leverage = scale
     return s
 
 
-def backtest(p, markets, costs, scale=True):
+def backtest(p, markets, costs, scale=True, hard_stop=1.0):
     """The mimic on `p`: the knobs, with LEVERAGE and RISK when p lacks leverage or risk."""
     params = {k: v for k, v in p.items() if k != "risk"}
     params["timeframe"] = TF_NAMES[params["timeframe"]]
     params.setdefault("leverage", LEVERAGE)
-    return avbt_cpp.run("mimic", params, markets, costs, settings(p.get("risk", RISK), scale))
+    return avbt_cpp.run("mimic", params, markets, costs, settings(p.get("risk", RISK), scale, hard_stop))
 
 
 def rerun(saved, markets):

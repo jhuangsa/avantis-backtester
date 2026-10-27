@@ -24,6 +24,8 @@ namespace avbt {
 // side: +1 longs only, -1 shorts only, 0 both. With side 0 a bar where both
 // pass is skipped, so with no directional filter on it never opens. Out at
 // stop_atrs ATRs, take profit tp_atrs ATRs (both > 0), or after hold bars.
+// open_from: no open is asked before this unix second; the lines still
+// warm up on the bars before it. 0 opens from the first bar.
 struct Mimic {
     struct Params {
         Timeframe timeframe = Timeframe::Hour1;
@@ -32,6 +34,7 @@ struct Mimic {
         int rsi_period = 14, trend_period = 50, trend_dir = 1, move_lag = 4, move_dir = -1;
         int break_period = 24, break_dir = 1, hour_from = 0, hour_to = 24, atr_period = 14, hold = 24;
         double rsi_level = 30.0, move_size = 0.03, stop_atrs = 3.0, tp_atrs = 3.0, leverage = 2.0;
+        double open_from = 0.0;
     } params;
 
     struct Lines {
@@ -119,7 +122,7 @@ struct Mimic {
                 }
                 continue;
             }
-            if (!ready(l, t)) continue;
+            if (now < p.open_from || !ready(l, t)) continue;
             bool buy = p.side >= 0 && passes(l, t, 1);
             bool sell = p.side <= 0 && passes(l, t, -1);
             if (buy == sell) continue;
@@ -148,7 +151,8 @@ inline StrategyInfo mimic_info() {
         field("break_dir", &P::break_dir, -1, 1), field("hour_from", &P::hour_from, 0, 23),
         field("hour_to", &P::hour_to, 1, 24), field("atr_period", &P::atr_period, 1, inf),
         field("hold", &P::hold, 1, inf), field("stop_atrs", &P::stop_atrs, tiny, inf),
-        field("tp_atrs", &P::tp_atrs, tiny, inf), field("leverage", &P::leverage, 0.0, 100.0)},
+        field("tp_atrs", &P::tp_atrs, tiny, inf), field("leverage", &P::leverage, 0.0, 100.0),
+        field("open_from", &P::open_from, 0.0, inf)},
         {Timeframe::Min15, Timeframe::Hour1, Timeframe::Hour4});
 }
 }  // namespace detail

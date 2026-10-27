@@ -201,7 +201,7 @@ Version 0.4.3:
 
 Version 0.4.2:
 
-- `mimic`: the hour window wraps past midnight when `hour_to` is at or below `hour_from`, so 22 to 4 means 22:00 to 04:00 UTC. `stop_atrs` and `tp_atrs` must be greater than 0; 0 raises `ValueError`.
+- `mimic`: the hour window wraps past midnight when `hour_to` is at or below `hour_from`, so 22 to 4 means 22:00 to 04:00 UTC. `stop_atrs` and `tp_atrs` must be greater than 0; 0 raises `ValueError`. `open_from`, a unix second, holds back every open before it while the lines warm up on the bars before it; 0, the default, opens from the first bar.
 - `Result.open_positions`: the positions still open after the last step. They are not trades; they count only in the last equity value.
 
 Version 0.4.1:

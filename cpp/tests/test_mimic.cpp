@@ -105,6 +105,14 @@ int main() {
     check("0 to 24 is the whole day", run("mimic", full, m, costs, PortfolioSettings{}).trades.size() ==
                                            run("mimic", off, m, costs, PortfolioSettings{}).trades.size());
 
+    // open_from: nothing opens before it, and the same lines open after it.
+    const double from = 400 * 3600;
+    Result late = run("mimic", {{"side", -1}, {"hold", 1}, {"open_from", from}}, m, costs, PortfolioSettings{});
+    bool after = !late.trades.empty();
+    for (const Trade& x : late.trades) after = after && x.entry_time >= from;
+    check("open_from: no open before it", after);
+    check("open_from: trades after it", late.trades.size() > 0 && late.trades.size() < all.trades.size());
+
     auto rejected = [&](const char* name) {
         try { run("mimic", {{name, 0.0}}, m, costs, PortfolioSettings{}); } catch (const std::invalid_argument&) { return true; }
         return false;
