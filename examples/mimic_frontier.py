@@ -193,7 +193,7 @@ def pnl_chart(path, title, panels):
                               for s in kept], row=1, col=col)
         fig.add_scatter(x=[s["risk"] for s in front], y=[s["final"] for s in front], mode="lines+markers",
                         name="frontier", legendgroup="frontier", showlegend=first, line={"color": "#2b6cb0"}, row=1, col=col)
-        # The PnL row has its own legend in each column: the picks' scales k differ.
+        # The PnL row has its own legend in each column.
         pnl_legend = f"legend{col + 1}"
         w = p["wallet"]
         fig.add_scatter(x=pd.to_datetime(w["time"], unit="s"), y=w["pnl"], name="wallet", legend=pnl_legend,
@@ -209,7 +209,7 @@ def pnl_chart(path, title, panels):
                             marker={"color": c, "size": 14, "symbol": "star"}, row=1, col=col)
             fig.add_vline(x=s["risk_level"], line={"color": c, "dash": "dot", "width": 1}, row=1, col=col)
             b = p["short"][name]
-            fig.add_scatter(x=pd.to_datetime(b["time"], unit="s"), y=b["pnl"] * s["k"], name=f"{name} × {s['k']:.3g}",
+            fig.add_scatter(x=pd.to_datetime(b["time"], unit="s"), y=b["pnl"] * s["k"], name=name,
                             legend=pnl_legend, line={"color": c}, row=2, col=col)
             b = p["long"][name]
             fig.add_scatter(x=pd.to_datetime(b["time"], unit="s"), y=b["return"], name=name, legendgroup=name,
