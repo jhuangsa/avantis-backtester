@@ -473,7 +473,7 @@ PYBIND11_MODULE(avbt_cpp, m) {
         .def(py::init([](double open_fee, double close_fee, const std::optional<InArray>& hold_long,
                          const std::optional<InArray>& hold_short,
                          const std::optional<std::vector<std::pair<double, double>>>& profit_share,
-                         const py::object& spread, const py::object& max_spread) {
+                         const py::object& spread, const py::object& max_spread, double min_position) {
                  avbt::Costs c{.open_fee = open_fee, .close_fee = close_fee,
                                .hold_long = hold_long ? to_vector(*hold_long) : std::vector<double>{},
                                .hold_short = hold_short ? to_vector(*hold_short) : std::vector<double>{}};
@@ -482,14 +482,18 @@ PYBIND11_MODULE(avbt_cpp, m) {
                  }
                  c.spread = spread_arg(spread);
                  c.max_spread = max_spread_arg(max_spread);
+                 c.min_position = min_position;
                  avbt::check_profit_share(c);
                  avbt::check_spread(c);
+                 avbt::check_min_position(c);
                  return c;
              }),
              py::arg("open_fee") = 0.0, py::arg("close_fee") = 0.0, py::arg("hold_long") = py::none(),
              py::arg("hold_short") = py::none(), py::arg("profit_share") = py::none(),
-             py::arg("spread") = py::none(), py::arg("max_spread") = py::none())
+             py::arg("spread") = py::none(), py::arg("max_spread") = py::none(),
+             py::arg("min_position") = 0.0)
         .def_readonly("open_fee", &avbt::Costs::open_fee)
+        .def_readonly("min_position", &avbt::Costs::min_position)
         .def_readonly("close_fee", &avbt::Costs::close_fee)
         .def_property_readonly("hold_long", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_long)); })
         .def_property_readonly("hold_short", [](const avbt::Costs& c) { return to_numpy(std::vector(c.hold_short)); })

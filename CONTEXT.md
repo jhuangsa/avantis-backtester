@@ -29,6 +29,10 @@ _Avoid_: performance fee, profit fee, a marginal or sliced rate
 The distance from the oracle price to a fill, as a fraction of price: a long fills above the oracle price, a short below, and a close the other way. Every fill pays it except liquidation. It is part of a market's `Costs`; with none given, the market uses Veranta's row (looked up by exact, case-sensitive name, then name plus `/USD`), and a market with no row is an error. Levels still trigger on the oracle price. See ADR 0020.
 _Avoid_: slippage, a fee
 
+**Min position**:
+The smallest notional (size × fill price) a market lets a position open with; Veranta's is $100 on most markets. An open below it is refused, not raised to it. It is part of a market's `Costs`. See ADR 0022.
+_Avoid_: min size, min order
+
 ### Getting in and out
 
 **Entry**:

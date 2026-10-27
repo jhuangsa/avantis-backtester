@@ -163,12 +163,14 @@ public:
     // the stop or take profit is on the wrong side of the entry, leverage is
     // not positive, the stop would lose more than max_stop_loss of the
     // collateral, or the collateral exceeds the free cash, the trail is
-    // negative, or take_profit_fraction is not in (0, 1].
+    // negative, take_profit_fraction is not in (0, 1], or the notional at
+    // the fill is below min_position (ADR 0022).
     bool open(const std::string& instrument, Side side, double entry_price,
               double stop_price, double leverage,
               double take_profit_price = std::nan(""), Fees fees = {},
               double trail = 0.0, double take_profit_fraction = 1.0,
-              int64_t entry_time = unknown_time, double spread = 0.0);
+              int64_t entry_time = unknown_time, double spread = 0.0,
+              double min_position = 0.0);
 
     // Adds rate * size * price to the position's holding costs. NaN adds
     // nothing; no position does nothing.

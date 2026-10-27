@@ -26,7 +26,7 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
                      double stop_price, double leverage,
                      double take_profit_price, Fees fees,
                      double trail, double take_profit_fraction, int64_t entry_time,
-                     double spread) {
+                     double spread, double min_position) {
     if (halted_ || leverage <= 0.0 || entry_price <= 0.0 || trail < 0.0) return false;
     if (!(take_profit_fraction > 0.0 && take_profit_fraction <= 1.0)) return false;
     for (const Position& p : positions_) {
@@ -43,6 +43,7 @@ bool Portfolio::open(const std::string& instrument, Side side, double entry_pric
     double risk = settings_.risk_per_trade * balance_;
     if (settings_.scale_risk_with_leverage) risk *= leverage;
     double size = risk / distance;
+    if (size * fill < min_position) return false;
     double collateral = size * fill / leverage;
     if (risk > max_stop_loss * collateral) return false;
     if (collateral > report().free_cash) return false;

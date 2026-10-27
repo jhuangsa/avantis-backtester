@@ -27,6 +27,8 @@ namespace avbt {
 // for the market (spreads.hpp). A value is the caller's: empty for none,
 // one value for every bar, or one value per base bar. max_spread caps it;
 // NaN is no cap, or the row's cap when spread is nullopt. ADR 0020.
+// min_position is the smallest notional, in account money, the market lets
+// a position open with; an open below it is refused. 0 is none. ADR 0022.
 struct Costs {
     double open_fee = 0.0;
     double close_fee = 0.0;
@@ -34,6 +36,7 @@ struct Costs {
     std::vector<Tier> profit_share;
     std::optional<std::vector<double>> spread;
     double max_spread = std::numeric_limits<double>::quiet_NaN();
+    double min_position = 0.0;
 };
 
 // No spread: write .spread = avbt::no_spread. Note .spread = {} is
@@ -77,6 +80,14 @@ inline void check_spread(const Costs& c) {
     }
 }
 
+// Throws std::invalid_argument unless min_position is finite and at least 0.
+inline void check_min_position(const Costs& c) {
+    if (!(std::isfinite(c.min_position) && c.min_position >= 0.0)) {
+        throw std::invalid_argument("min_position must be finite and at least 0, got " +
+                                    std::to_string(c.min_position));
+    }
+}
+
 // Throws std::invalid_argument when profit-share tiers sit beside a size
 // fee, or a tier's max_roi is not positive and strictly increasing, or its
 // share is outside [0, 1], or a value is not finite.
@@ -102,6 +113,7 @@ using MarketCosts = std::map<std::string, Costs>;
 // Throws std::invalid_argument when a market has no Costs, a Costs names
 // no market, a holding column is neither empty nor one value per base bar,
 // the profit share fails check_profit_share, the spread fails check_spread,
+// min_position fails check_min_position,
 // a spread column is not of size 0, 1 or one per base bar, or a market with
 // no spread has no row in the table.
 inline void check_costs(const Markets& markets, const MarketCosts& costs) {
@@ -110,6 +122,7 @@ inline void check_costs(const Markets& markets, const MarketCosts& costs) {
         if (it == costs.end()) throw std::invalid_argument("market " + m.instrument + " has no Costs");
         check_profit_share(it->second);
         check_spread(it->second);
+        check_min_position(it->second);
         spread_of(m.instrument, it->second);
         std::size_t n = m.timeframes.front().ts.size();
         const auto& spread = it->second.spread;

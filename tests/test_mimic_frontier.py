@@ -85,3 +85,17 @@ def test_pnl_gap_is_scale_free_and_floors_at_flat():
     assert (gap, k) == (pytest.approx(1.0), 0.0)
     assert F.pnl_gap(np.zeros(5), w) == (1.0, 0.0)
     assert 0 < F.pnl_gap(w + np.array([0, 5, -5, 5, -5]), w)[0] < 1
+
+
+def test_min_budget():
+    """Parts of one position add up; the budget is the account times the largest min over notional."""
+    from types import SimpleNamespace as N
+    M = F.M
+    costs = {"A": N(min_position=100.0), "B": N(min_position=300.0)}
+    trades = [N(instrument="A", entry_time=1, size=1.0, entry_price=50.0),
+              N(instrument="A", entry_time=1, size=1.0, entry_price=50.0),  # 100 in all
+              N(instrument="A", entry_time=2, size=4.0, entry_price=50.0),  # 200
+              N(instrument="B", entry_time=1, size=2.0, entry_price=750.0)]  # 1,500
+    assert M.min_budget(N(trades=trades), costs) == pytest.approx(M.vt.ACCOUNT * 1.0)
+    assert M.min_budget(N(trades=trades[2:]), costs) == pytest.approx(M.vt.ACCOUNT * 0.5)
+    assert M.min_budget(N(trades=[]), costs) == 0.0

@@ -733,13 +733,52 @@ def rerun(saved, markets):
     return backtest(params, markets, market_costs(saved["markets"], fees, share), scale)
 
 
+PAIRS = []  # Veranta Copy's markets, read once
+
+
+def pairs():
+    """Veranta Copy's markets: symbol, max_leverage and min_position_usdc, among others."""
+    if not PAIRS:
+        import urllib.request
+        with urllib.request.urlopen("https://verantacopy.com/api/pairs", timeout=60) as r:
+            PAIRS.extend(json.load(r))
+    return PAIRS
+
+
+def min_positions(names):
+    """Each market's smallest notional on Veranta; 0, and says so, when it is not listed. ADR 0022."""
+    rows = {p["symbol"]: p["min_position_usdc"] for p in pairs()}
+    out = {m: rows.get(m, rows.get(f"{m}/USD")) for m in names}
+    bare = [m for m, v in out.items() if v is None]
+    if bare:
+        print(f"no Veranta min position for {', '.join(bare)}: run with none")
+    return {m: float(v or 0.0) for m, v in out.items()}
+
+
 def market_costs(names, fees, share=None):
-    """Costs per market at the table spread; a market with no table row runs with none, and says so."""
+    """Costs per market at the table spread and Veranta's min position; a market with no
+    table row runs with no spread, and says so."""
     rows = avbt_cpp.veranta_spreads()
     bare = [m for m in names if m not in rows and f"{m}/USD" not in rows]
     if bare:
         print(f"no Veranta spread for {', '.join(bare)}: run with none")
-    return {m: avbt_cpp.Costs(*fees, profit_share=share, spread=0 if m in bare else None) for m in names}
+    least = min_positions(names)
+    return {m: avbt_cpp.Costs(*fees, profit_share=share, spread=0 if m in bare else None,
+                              min_position=least[m]) for m in names}
+
+
+def min_budget(r, costs):
+    """The smallest account at which every open in result `r` clears its market's min position.
+
+    Sizes scale with the account, so it is the account times the largest min over notional.
+    Parts of one position, closed apart, add up to its notional.
+    """
+    opened = {}
+    for t in r.trades:
+        key = (t.instrument, t.entry_time)
+        opened[key] = opened.get(key, 0.0) + t.size * t.entry_price
+    need = [costs[m].min_position / n for (m, _), n in opened.items() if n > 0]
+    return vt.ACCOUNT * max(need, default=0.0)
 
 
 def on_grid(series, grid):
@@ -1070,7 +1109,8 @@ def main():
            "fit": "own", "params": best,
            "markets": symbols, "covered_share": w["covered_share"], "start": start, "end": end,
            "costs": {"open_fee": used.open_fee, "close_fee": used.close_fee,
-                     "profit_share": used.profit_share},
+                     "profit_share": used.profit_share,
+                     "min_position": {m: costs[m].min_position for m in symbols}},
            "settings": {"starting_balance": vt.ACCOUNT, "risk_per_trade": RISK, "hard_stop": 1.0,
                         "scale_risk_with_leverage": True},
            "mse": best_mse, "wallet": w["wallet"], "mimic": mimic}

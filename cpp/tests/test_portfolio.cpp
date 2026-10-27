@@ -71,6 +71,17 @@ void test_open_skips() {
     check_value("two positions", p.report().open_positions, 2);
 }
 
+// The long above is 2,000 of notional. ADR 0022.
+void test_open_min_position() {
+    const double nan = std::nan("");
+    Portfolio p(PortfolioSettings{});
+    check_true("skip notional below min position",
+               !p.open("BTC", Side::Long, 100.0, 95.0, 10.0, nan, {}, 0.0, 1.0, avbt::unknown_time, 0.0, 2000.01));
+    check_value("nothing opened", p.report().open_positions, 0);
+    check_true("open at exactly min position",
+               p.open("BTC", Side::Long, 100.0, 95.0, 10.0, nan, {}, 0.0, 1.0, avbt::unknown_time, 0.0, 2000.0));
+}
+
 void test_partial_close() {
     Portfolio p = btc_long();
     check_value("half close result", p.close("BTC", 110.0, 0.5)->result, 100.0);
@@ -499,6 +510,7 @@ int main() {
     test_open_sizes_from_risk();
     test_open_short_liquidates_above();
     test_open_skips();
+    test_open_min_position();
     test_partial_close();
     test_stop_fills_at_stop();
     test_gap_past_stop_fills_at_open();

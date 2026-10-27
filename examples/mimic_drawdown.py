@@ -54,9 +54,7 @@ def floor_half(x):
 
 def leverage_bound(markets):
     """The lowest Veranta maximum leverage of the markets, and 100, floored to 0.5."""
-    import requests
-
-    top = {p["symbol"]: p["max_leverage"] for p in requests.get("https://verantacopy.com/api/pairs", timeout=60).json()}
+    top = {p["symbol"]: p["max_leverage"] for p in M.pairs()}
     return floor_half(min([100.0] + [top[m] for m in markets]))
 
 
@@ -81,15 +79,18 @@ def main():
     ap.add_argument("--step", type=float, help="with --lift: raise leverage by this, keeping the trade count")
     ap.add_argument("--bound", action="store_true", help="cap leverage at the markets' Veranta maximum")
     ap.add_argument("--min-trades", type=int, default=0, help="fewer trades scores as out of the limit")
+    ap.add_argument("--budget", type=float, help="the account; default the fit's (10,000). Opens below a "
+                    "market's min position are refused, so a small budget trades less. ADR 0022")
     args = ap.parse_args()
 
     path = Path(args.saved)
     saved = json.loads(path.read_text())
     M.use_venue(saved.get("venue", "avantis"))
+    M.vt.ACCOUNT = args.budget or saved.get("settings", {}).get("starting_balance", M.vt.ACCOUNT)
     start, end = args.start or saved["start"], args.end or saved["end"]
     markets = M.load_markets(list(saved["markets"]), start, end)
     grid = M.hour_grid(start, end)
-    costs = {s: M.avbt_cpp.Costs(M.FEE, M.FEE) for s in saved["markets"]}
+    costs = M.market_costs(saved["markets"], (M.FEE, M.FEE))
     target = M.load_target(path, grid) if args.goal != "return" else None
     first = dict(saved["params"])
     bound = 100.0
@@ -103,7 +104,7 @@ def main():
         key = M.effective(p)
         if key not in seen:
             r = M.backtest(p, markets, costs)
-            seen[key] = M.mimic_scores(r, markets, grid, target, p["leverage"])
+            seen[key] = {**M.mimic_scores(r, markets, grid, target, p["leverage"]), "budget": M.min_budget(r, costs)}
         return seen[key]
 
     def goal(p, limit):
@@ -168,9 +169,11 @@ def main():
             s = scores(best)
             sh = f"{s['sharpe']:8.2f}" if s["sharpe"] == s["sharpe"] else f"{'-':>8}"
             print(f"{limit:6.0%}{M.pct(s['final'])}{M.pct(s['peak'])}{M.pct(s['lowest'])}"
-                  f"{M.pct(s['max_drawdown'])}{sh}{M.pct(s['rmse'])}{s['trades']:8d}  lev {best['leverage']:g}", flush=True)
+                  f"{M.pct(s['max_drawdown'])}{sh}{M.pct(s['rmse'])}{s['trades']:8d}  lev {best['leverage']:g}"
+                  f"  needs ${s['budget']:,.0f}", flush=True)
             out = {**saved, "params": best, "mimic": s, "drawdown_limit": limit,
-                   "start": start, "end": end}
+                   "start": start, "end": end,
+                   "settings": {**saved.get("settings", {}), "starting_balance": M.vt.ACCOUNT}}
             M.save_json(path.with_name(f"{path.stem}_{args.goal}{'_lift' if args.lift else ''}{f'_step{args.step:g}' if args.step else ''}{'_bound' if args.bound else ''}{f'_t{args.min_trades}' if args.min_trades else ''}{'' if args.weight == 1 else f'_w{args.weight:g}'}_{start}_dd{round(limit * 100)}.json"), out, indent=1)
     print(f"{len(seen)} backtests")
 

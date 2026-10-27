@@ -193,11 +193,13 @@ Result backtest(S& strategy, const Markets& markets, const MarketCosts& costs,
             double sign = o.side == Side::Long ? 1.0 : -1.0;
             double stop = open * (1.0 - sign * o.stop_distance);
             double take = open * (1.0 + sign * o.take_profit_distance);
-            // A refused open (no free cash, halted, a position already) records nothing.
+            // A refused open (no free cash, halted, a position already, below the
+            // market's min position) records nothing.
             const Costs& cost = costs.at(o.instrument);
             if (portfolio.open(o.instrument, o.side, open, stop, o.leverage, take,
                                Fees{cost.open_fee, cost.close_fee, cost.profit_share},
-                               o.trail_distance * open, o.take_profit_fraction, clock[t], spread)) {
+                               o.trail_distance * open, o.take_profit_fraction, clock[t], spread,
+                               cost.min_position)) {
                 entry_bar[o.instrument] = t;
             }
         }

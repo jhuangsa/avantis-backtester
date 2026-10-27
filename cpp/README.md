@@ -361,6 +361,7 @@ Costs belong to the market, not the strategy. The caller gives one `Costs` for e
 | `profit_share` | Profit-share tiers, each a `Tier{max_roi, share}`. Empty (the default) means none. |
 | `spread` | The half-spread each fill pays, as a fraction of price. `nullopt` (the default): Veranta's row for the market. Otherwise the caller's: empty for none, one value for every bar, or one value per base bar. |
 | `max_spread` | A cap on the half-spread. NaN (the default): no cap, or the row's cap when `spread` is `nullopt`. |
+| `min_position` | The smallest notional, in account money, a position may open with; a smaller open is refused. 0 (the default): none. Must be finite and at least 0 (`check_min_position`). ADR 0022. |
 
 Holding costs are signed: positive means the position pays, negative means it receives. NaN means zero, so a holding cost never blocks a trade. Example: `hold_long` of 0.0001 on a bar charges a long 0.01% of its notional for that bar. A market that skips time is charged only on the bars it has. The caller folds the cost of a gap (a weekend's funding) into the bar before it.
 
@@ -514,9 +515,9 @@ Its state is private: `settings_`, `balance_`, `positions_`, and `halted_`. Only
 
 **`Portfolio(PortfolioSettings settings)`**: the constructor. The balance starts at `starting_balance`.
 
-**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1, entry_time = unknown_time, spread = 0)`**
+**`bool open(instrument, side, entry_price, stop_price, leverage, take_profit_price = NaN, fees = {}, trail = 0, take_profit_fraction = 1, entry_time = unknown_time, spread = 0, min_position = 0)`**
 
-Opens a position and returns true, or opens nothing and returns false.
+Opens a position and returns true, or opens nothing and returns false. It opens nothing when the notional at the fill, size × fill price, is below `min_position` (ADR 0022).
 
 It sizes the position so that a fill at the stop loses `risk_per_trade` of the balance, times `leverage` when `scale_risk_with_leverage` is on:
 
@@ -882,7 +883,7 @@ The bridge holds no rules of its own. It converts types and releases the Python 
 | `States(start, market, trend, volatility)` | Builds state labels from a start second and three `uint8` arrays. Throws when a code is past the last label of its enum. `len(states)` is the number of minutes; `states.start` reads the start back. |
 | `Market(instrument, timeframes, states=None)` | One market: its `Bars` on one or more timeframes, finest first, and optional `States`. |
 | `Markets([market, ...])` | Calls `Markets::make`, so the checks run once, when the object is created. Pass the same object to many runs. Reads `clock`, `timeframe`, and `instruments`. |
-| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None, spread=None, max_spread=None)` | One market's costs. `Costs()` has no fees and Veranta's spread from the table; `Costs(spread=0)` is zero cost. `spread` is `None` (the table), a number (every bar), or a numpy array (one per base bar); a numpy number or 0-d array counts as a number. `max_spread` is a number, or `None` for no cap (read back as NaN). Reading `spread` gives `None` or an array. A bool or a string raises `TypeError`; bad values raise `ValueError` (see `check_spread`). The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
+| `Costs(open_fee=0.0, close_fee=0.0, hold_long=None, hold_short=None, profit_share=None, spread=None, max_spread=None, min_position=0.0)` | One market's costs. `min_position` is the smallest notional an open may have; a negative or non-finite value raises `ValueError`. `Costs()` has no fees and Veranta's spread from the table; `Costs(spread=0)` is zero cost. `spread` is `None` (the table), a number (every bar), or a numpy array (one per base bar); a numpy number or 0-d array counts as a number. `max_spread` is a number, or `None` for no cap (read back as NaN). Reading `spread` gives `None` or an array. A bool or a string raises `TypeError`; bad values raise `ValueError` (see `check_spread`). The two holding lists are numpy arrays with one value per base bar, or empty. `profit_share` is a list of `(max_roi, share)` pairs; reading it gives a list of tuples, empty when none. Bad tiers raise `ValueError` (see `check_profit_share`). |
 | `strategies()` | The strategy table: each strategy's name, its params (name, default, range), and its timeframes. |
 | `run(name, params, markets, costs, settings)` | Runs one strategy by name. `params` is a dict of the params to change; numpy numbers and booleans work as values, and an integer too big for a C++ `int` is taken as a float; `costs` is a dict from instrument to `Costs`. Returns a `Result`. |
 | `veranta_spreads()` | The spread table as a dict `{market: (spread, max_spread, read_on)}`. |

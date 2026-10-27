@@ -39,14 +39,21 @@ The defaults are the search settings of AI Copy v5 (search configuration 5):
 | Random starts | 3, seed 0 | `--restarts` |
 | Fewest trades | 20 | `--min-trades` |
 | Leverage cap | the lowest maximum leverage of the fit's markets on Veranta, and 100, rounded down to 0.5× | `--bound` / `--no-bound` |
-| Account | $10,000; risk per trade 0.2% × leverage; hard stop 1.0 | as in `mimic.py` |
+| Account | $10,000; risk per trade 0.2% × leverage; hard stop 1.0 | `--budget` for the account |
 | Fees | 0.025% of notional at each open and close, plus the market's Veranta spread | as in `mimic.py` |
+| Min position | each market's Veranta minimum notional ($100 on most); smaller opens are refused | from Veranta Copy |
 
 With the leverage cap, leverage knob values above the cap are dropped before the random starts are drawn, and the fit's leverage starts at the cap when it is higher.
 
 AI Copy v5 picks its three styles by drawdown limits (10%, 15%, 20%) and leverage lifts. This method keeps the v5 search settings above and picks off the frontier instead. It does not take from v5: its fit window (at most 365 days, past outages plus 48 days), its per-market costs, the catalog backtest, the gates and the live-money checks.
 
 `--by rmse` is the older method: every setting whose RMSE to the wallet's return is at most `--rmse` (default twice the fit's), from climbs for return minus λ × risk (`--lambdas`), then the highest return in each of 100 risk bins.
+
+## Budget
+
+Veranta refuses a position below its market's minimum notional (ADR 0022). A trade's notional is account × 0.2% × leverage / stop distance, so a wide stop or low leverage needs a large account. The backtest refuses those opens, as Veranta would, so a strategy run at a small `--budget` makes fewer trades and can fall under the 20-trade rule.
+
+Each strategy also reports its **budget needed**: the smallest account at which every one of its opens clears the minimum. It is printed beside each pick, shown on the page and saved as `budget`.
 
 ## The wallet's PnL
 

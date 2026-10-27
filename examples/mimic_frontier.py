@@ -126,12 +126,12 @@ def chart(path, title, kept, front, chosen, books, target, wallet_pnl=None):
         else "realized PnL times k, beside the wallet's"))
     fig.add_scatter(x=[s["risk"] for s in kept], y=[s["final"] for s in kept], mode="markers",
                     name="kept", marker={"color": "#9aa5b1", "size": 6},
-                    text=[f"rmse {s['rmse']:.1%}, lev {s['params']['leverage']:g}" for s in kept], row=1, col=1)
+                    text=[f"rmse {s['rmse']:.1%}, lev {s['params']['leverage']:g}, needs ${s.get('budget', 0):,.0f}" for s in kept], row=1, col=1)
     fig.add_scatter(x=[s["risk"] for s in front], y=[s["final"] for s in front], mode="lines+markers",
                     name="frontier", line={"color": "#2b6cb0"}, row=1, col=1)
     for name, s in chosen.items():
         c = COLORS[name]
-        fig.add_scatter(x=[s["risk"]], y=[s["final"]], mode="markers+text", name=name, text=[name], legendgroup=name,
+        fig.add_scatter(x=[s["risk"]], y=[s["final"]], mode="markers+text", name=f"{name}, needs ${s.get('budget', 0):,.0f}", text=[name], legendgroup=name,
                         textposition="top center", marker={"color": c, "size": 14, "symbol": "star"}, row=1, col=1)
         fig.add_vline(x=s["risk_level"], line={"color": c, "dash": "dot", "width": 1}, row=1, col=1)
         t = pd.to_datetime(books[name]["time"], unit="s")
@@ -166,6 +166,8 @@ def main():
     ap.add_argument("--bound", action=argparse.BooleanOptionalAction, default=True,
                     help="--by pnl: cap leverage at the markets' Veranta maximum")
     ap.add_argument("--min-trades", type=int, default=20, help="--by pnl: fewer trades is never kept")
+    ap.add_argument("--budget", type=float, help="the account; default the fit's (10,000). Opens below a "
+                    "market's min position are refused, so a small budget trades less. ADR 0022")
     ap.add_argument("--replay", action="store_true", help="redraw the page from the saved <fit>_frontier.json; no search")
     args = ap.parse_args()
 
@@ -174,6 +176,7 @@ def main():
     if args.replay:
         saved = json.loads(path.with_name(f"{path.stem}_frontier{'_pnl' if args.by == 'pnl' else ''}.json").read_text())
     M.use_venue(saved.get("venue", "avantis"))
+    M.vt.ACCOUNT = args.budget or saved.get("settings", {}).get("starting_balance", M.vt.ACCOUNT)
     start, end = saved["start"], saved["end"]
     markets = M.load_markets(list(saved["markets"]), start, end)
     grid = M.hour_grid(start, end)
@@ -192,7 +195,8 @@ def main():
         if key not in seen:
             r = M.backtest(p, markets, costs)
             book = M.mimic_book(r, markets, grid, p["leverage"])
-            s = {**M.own_scores(book, target), "trades": M.avbt_cpp.summary(r)["trades"], "risk": daily_risk(book)}
+            s = {**M.own_scores(book, target), "trades": M.avbt_cpp.summary(r)["trades"], "risk": daily_risk(book),
+                 "budget": M.min_budget(r, costs)}
             if wallet_pnl is not None:
                 s["gap"], s["k"] = pnl_gap(np.zeros(len(grid)) if book is None else book["realized"], wallet_pnl)
             seen[key] = {**s, "params": p}
@@ -300,12 +304,14 @@ def by_pnl(args, saved, path, first, scores, draw):
     chosen = picks(kept, front)
     print(f"{len(pool)} distinct results; kept the {len(kept)} closest, gap {kept[0]['gap']:.3f} to {kept[-1]['gap']:.3f}; "
           f"{len(front)} on the frontier")
-    print(f"{'':>9}{'pctl':>6}{'risk lvl':>9}{'risk':>9}{'final':>9}{'max dd':>9}{'sharpe':>8}{'gap':>7}{'trades':>8}")
+    print(f"{'':>9}{'pctl':>6}{'risk lvl':>9}{'risk':>9}{'final':>9}{'max dd':>9}{'sharpe':>8}{'gap':>7}{'trades':>8}  leverage, budget needed")
     for name, s in chosen.items():
         sh = f"{s['sharpe']:8.2f}" if s["sharpe"] == s["sharpe"] else f"{'-':>8}"
         print(f"{name:>9}{s['percentile']:6d}{M.pct(s['risk_level'])}{M.pct(s['risk'])}{M.pct(s['final'])}"
-              f"{M.pct(s['max_drawdown'])}{sh}{s['gap']:7.3f}{s['trades']:8d}  lev {s['params']['leverage']:g}")
-    out = {**saved, "by": "pnl", "kept": kept, "frontier": front, "picks": chosen}
+              f"{M.pct(s['max_drawdown'])}{sh}{s['gap']:7.3f}{s['trades']:8d}  lev {s['params']['leverage']:g}"
+              f"  ${s['budget']:,.0f}")
+    out = {**saved, "settings": {**saved.get("settings", {}), "starting_balance": M.vt.ACCOUNT},
+           "by": "pnl", "kept": kept, "frontier": front, "picks": chosen}
     M.save_json(path.with_name(f"{path.stem}_frontier_pnl.json"), out, indent=1)
     draw(kept, front, chosen, None)
 
