@@ -94,7 +94,7 @@ def _record(item, symbols):
     pair_index = trade.get("pairIndex")
     if pair_index not in symbols:
         raise SystemExit(f"pair {pair_index}")
-    return {
+    record = {
         "time": item.get("timeStamp"),
         "gross": item.get("_grossPnl"),
         "pairIndex": pair_index,
@@ -113,6 +113,21 @@ def _record(item, symbols):
         "closingFee": fee.get("closingFee"),
         "funding": fee.get("r"),
     }
+    return cap_fee(record)
+
+
+def cap_fee(r):
+    """Lowers r's closingFee so the close loses no more than the payout shows.
+
+    On a liquidation the old API's closingFee is the liquidation fee, but
+    gross is already the whole margin: the fee would count twice. The PnL
+    is then usdcSent - positionSize. Returns r.
+    """
+    g, m, sent = r.get("gross"), r.get("positionSize"), r.get("usdcSent")
+    if r.get("closingFee") is not None and None not in (g, m, sent):
+        most = float(g) - float(r.get("funding") or 0.0) - (float(sent) - float(m))
+        r["closingFee"] = max(0.0, min(float(r["closingFee"]), most))
+    return r
 
 
 def download(directory=TRADES):

@@ -172,6 +172,11 @@ def download(address):
     """The wallet's closed trades, cached in data/candles/wallet_<address>.json."""
     path = CACHE / f"wallet_{address}.json"
     if path.exists():
+        saved = json.loads(path.read_text())
+        if saved.get("venue") != "veranta":  # an old-API download: cap its fees as _record now does
+            before = [r.get("closingFee") for r in saved["trades"]]
+            if [vt.cap_fee(r).get("closingFee") for r in saved["trades"]] != before:
+                save_json(path, saved)
         return path
     symbols = vt._symbols()
     first = vt._get(vt.HISTORY.format(address=address, page=1))

@@ -147,15 +147,23 @@ def test_paid_fee_is_paid_in_its_tx_less_collateral():
     assert drain["amount"] == 0  # all closed, nothing live
 
 
-def test_unpaid_open_gets_median_rate_of_paid_opens():
+def test_unpaid_increase_gets_median_rate_of_paid_opens():
     # positionSize = 10 x collateral; fees 1, 2, 9 on $1000: rates .001 .002 .009
-    rs = [opn(1, 0, 100), opn(2, 1, 100), opn(3, 2, 100), opn(4, 3, 50)]
+    rs = [opn(1, 0, 100), opn(2, 1, 100), opn(3, 2, 100), opn(4, 3, 50, type="POSITION_INCREASE")]
     fl = [flow(1, 0, "OUT", 101.0), flow(2, 1, "OUT", 102.0), flow(3, 2, "OUT", 109.0)]
     _, unmatched, _, _ = run_costs(rs, fl)
     assert [r["paidFee"] for r in rs[:3]] == pytest.approx([1, 2, 9])
     assert rs[3]["paidFee"] == pytest.approx(0.002 * 500)
     # paid by an earlier order: its collateral and fee count against unmatched
     assert unmatched == pytest.approx(-51.0)
+
+
+def test_open_paid_from_another_tx_has_the_history_open_fee():
+    # a smart wallet pays $100.5 in its own tx; the open's tx moves no USDC
+    rs = [opn(1, 0, 100, openFee=0.5)]
+    _, unmatched, _, _ = run_costs(rs, [flow(9, 0, "OUT", 100.5)])
+    assert rs[0]["paidFee"] == pytest.approx(0.5)
+    assert unmatched == pytest.approx(0)
 
 
 @pytest.mark.parametrize("got, bad", [(115.0, False), (115.009, False), (114.0, True), (None, True)])
@@ -258,3 +266,28 @@ def test_ledger_total_at_the_end_equals_onchain_total():
     chain = V.onchain_total(fl, pos, T0 + 7200, px)
     assert chain == pytest.approx(582.5)
     assert end["pnl"] == pytest.approx(chain)
+
+
+def test_old_liquidation_fee_is_not_counted_twice():
+    # gross is the whole $33.33 margin; closingFee 9.999 is the liquidation fee
+    liq = {"gross": -33.33, "positionSize": 33.33, "usdcSent": 0, "closingFee": 9.999, "funding": 0}
+    assert V.M.vt.cap_fee(liq)["closingFee"] == pytest.approx(0)
+    # a close that adds up is left alone
+    ok = {"gross": -18.145, "positionSize": 21.379, "usdcSent": 0, "closingFee": 3.207, "funding": 0.027}
+    assert V.M.vt.cap_fee(ok)["closingFee"] == pytest.approx(3.207)
+
+
+def test_record_caps_an_old_liquidation():
+    item = {"timeStamp": "2026-05-23T18:33:49.000Z", "_grossPnl": -33.33, "event": {"args": {
+        "t": {"pairIndex": 1, "buy": True, "leverage": 10, "initialPosToken": 33.33, "timestamp": 1},
+        "positionSizeUSDC": 33.33, "usdcSentToTrader": 0,
+        "feeInfo": {"closingFee": 9.999, "r": 0}}}}
+    r = V.M.vt._record(item, {1: "SOL/USD"})
+    assert r["gross"] - r["closingFee"] - r["funding"] == pytest.approx(r["usdcSent"] - r["positionSize"])
+
+
+def test_old_closes_caps_a_cached_liquidation(monkeypatch, tmp_path):
+    monkeypatch.setattr(V.M, "CACHE", tmp_path)
+    row = {"gross": -33.33, "positionSize": 33.33, "usdcSent": 0, "closingFee": 9.999, "funding": 0}
+    V.M.save_json(tmp_path / "wallet_0xA_v1.json", {"trades": [row]})
+    assert V.old_closes("0xA")[0]["closingFee"] == pytest.approx(0)

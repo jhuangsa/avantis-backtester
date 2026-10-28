@@ -37,7 +37,9 @@ Costs the history leaves out come from the wallet's USDC transfers on
 Base, read from saved BaseScan token-transfer pages (--pages DIR):
 - each open and increase pays its collateral plus a fee; the fee is the
   USDC paid in its transaction less its collateral ("paidFee" on the v2
-  row). The history has no fee for an increase at all.
+  row). An open paid from another transaction (a smart wallet's) has the
+  history's openFee. The history has no fee for an increase at all: it
+  gets the median rate of the opens.
 - before the v2 history, the USDC paid in less the old closes' margin
   (and the margin of positions carried into v2) is the old opening fees:
   spread over those closes by margin.
@@ -159,7 +161,7 @@ def old_closes(address):
             rows += M.vt._get(M.vt.HISTORY.format(address=address, page=page)).get("portfolio") or []
         symbols = M.vt._symbols() if rows else {}
         M.save_json(path, {"address": address, "count": len(rows), "trades": [M.vt._record(r, symbols) for r in rows]})
-    return json.loads(path.read_text())["trades"]
+    return [M.vt.cap_fee(r) for r in json.loads(path.read_text())["trades"]]
 
 
 def check(address, rows, recs, orphans=(), old=()):
@@ -232,18 +234,20 @@ def costs(rows, old, orphans, flows, live):
             if tx in paid:
                 r["paidFee"] = max(0.0, paid[tx] - r["collateral"])
             else:
-                unpaid.append(r)
+                unpaid.append(r)  # paid from another tx, such as a smart wallet's
+                if r["type"] != "POSITION_INCREASE" and r.get("openFee") is not None:
+                    r["paidFee"] = r["openFee"]
         elif r["usdcSentToTrader"]:
             ours.add(tx)
             if abs(got.get(tx, 0.0) - r["usdcSentToTrader"]) > 0.01:
                 problems.append(f"close {tx} sent {r['usdcSentToTrader']:.2f}, the chain {got.get(tx, 0.0):.2f}")
-    # An open paid from an order placed earlier has no payment of its own: its fee
-    # is the median rate of the paid ones. The rest of what was paid in and not
+    # An open paid from another tx has the history's openFee. An increase, which has
+    # none, gets the median rate of the opens with a fee. The rest of what was paid in and not
     # matched, less refunds ("unmatched"), has no trade in the history: the
     # check reports it, and the rebuilt PnL leaves it out.
     rate = np.median([r["paidFee"] / r["positionSize"] for r in rows if "paidFee" in r] or [0.0])
     for r in unpaid:
-        r["paidFee"] = rate * r["positionSize"]
+        r.setdefault("paidFee", rate * r["positionSize"])
     # Margin taken out of an open position ("Update Margin") is the trader's money back, not PnL.
     margin_back = lambda f: f["dir"] == "IN" and f.get("method", "").startswith("Update Margin")
     late = [f for f in flows if f["who"] in (STORAGE, VAULT) and f["t"] >= start and f["tx"] not in ours
@@ -251,7 +255,7 @@ def costs(rows, old, orphans, flows, live):
     sign = lambda f: 1.0 if f["dir"] == "OUT" else -1.0
     unmatched = sum(sign(f) * f["amt"] for f in late) - sum(r["collateral"] + r["paidFee"] for r in unpaid)
     if late or unpaid:
-        print(f"{len(unpaid)} opens paid by earlier orders (fee at {rate:.4%}); {len(late)} transfers "
+        print(f"{len(unpaid)} opens paid from another tx (increases at {rate:.4%}); {len(late)} transfers "
               f"match no row (${unmatched:,.2f} net paid in)")
     # Before v2: the USDC paid in, less the margin of what it opened, is the old opening fees.
     # Margin taken back before v2 left the old closes' payouts short of their PnL: it is credited

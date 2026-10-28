@@ -68,9 +68,11 @@ The gap compares against the wallet's realized PnL, and the page shows its total
 
 Avantis is now Veranta. Trades since its v2 contracts (mid-August 2026) are only in the v2 trade history. `examples/veranta_history.py` downloads both histories into the cache `mimic.py` reads, and keeps the v2 rows. The ledger then rebuilds each book (one market and side) from every open, increase and close: its size in coins and its cost. Unrealized PnL is each book at the hour's price. This puts each increase at its own time and price.
 
+On an old-API liquidation, the close fee is the liquidation fee, and the gross PnL already takes the whole margin. So no old close is booked as losing more than its margin less its payout (`veranta_top5.cap_fee`). Cached old-API files are capped when they are read.
+
 Veranta's history leaves out some costs. With `--pages`, `veranta_history.py` reads the wallet's USDC transfers from saved BaseScan pages and charges them:
 
-- **Fees on opens and increases**: the USDC paid in each trade's transaction, less its margin. The history has no fee for an increase.
+- **Fees on opens and increases**: the USDC paid in each trade's transaction, less its margin. An open paid from another transaction (a smart wallet's) has the history's open fee. The history has no fee for an increase: it gets the median rate of the opens.
 - **Fees before v2**: the USDC paid in before the v2 history, less the margin of the old closes, spread over them by margin. Payouts beyond the old closes' (margin taken back) are credited.
 - **Margin used up**: margin the history leaves open, less the margin open now, charged evenly from the oldest open position to now.
 

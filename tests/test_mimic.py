@@ -1531,3 +1531,14 @@ def test_hl_all_takes_addresses_and_an_output_name():
     saves = [{"address": "0xab"}, {"address": "0xCD"}, {"address": "0xef"}]
     assert A.pick(saves, ["0xAB", "0xcd"]) == saves[:2]
     assert A.pick(saves, []) == saves
+
+
+def test_download_caps_old_liquidation_fees_in_a_cached_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(M, "CACHE", tmp_path)
+    liq = {"gross": -33.33, "positionSize": 33.33, "usdcSent": 0, "closingFee": 9.999, "funding": 0}
+    M.save_json(tmp_path / "wallet_0xA.json", {"address": "0xA", "trades": [liq]})
+    rows = json.loads(M.download("0xA").read_text())["trades"]
+    assert rows[0]["closingFee"] == 0
+    # a veranta_history file is left alone: its old fees include the spread opening fees
+    M.save_json(tmp_path / "wallet_0xB.json", {"venue": "veranta", "trades": [liq]})
+    assert json.loads(M.download("0xB").read_text())["trades"][0]["closingFee"] == 9.999
