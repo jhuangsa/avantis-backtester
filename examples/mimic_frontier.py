@@ -13,7 +13,7 @@ The gap is, after the best scale k >= 0, the RMS of k * mimic - wallet
 realized PnL over the hourly grid, over the RMS of the wallet's: 0 is the
 same shape, 1 no closer than flat. The score is gap - --weight * return;
 lower is better. It climbs two knobs at a time for the lowest score, from
-the fit mimic.py saved and from --restarts (3) random starts (seed 0), up
+the fit mimic.py saved and from --restarts (12) random starts (seed 0), up
 to --passes (4) passes each, and keeps the --count (100) with the lowest
 score. Settings that trade alike are kept once. Leverage is capped at the
 lowest Veranta maximum leverage of the fit's markets (and 100), floored to
@@ -234,7 +234,7 @@ def main():
     ap.add_argument("--passes", type=int, default=4)
     ap.add_argument("--by", choices=["rmse", "pnl"], default="pnl",
                     help="rmse: all under --rmse, spread by risk; pnl: the lowest gap - weight * return")
-    ap.add_argument("--restarts", type=int, default=3, help="random starts for --by pnl")
+    ap.add_argument("--restarts", type=int, default=12, help="random starts for --by pnl")
     ap.add_argument("--weight", type=float, default=WEIGHT, help="--by pnl: the score is gap - weight * return")
     ap.add_argument("--bound", action=argparse.BooleanOptionalAction, default=True,
                     help="--by pnl: cap leverage at the markets' Veranta maximum")

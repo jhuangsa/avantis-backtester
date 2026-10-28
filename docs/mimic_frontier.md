@@ -20,7 +20,7 @@ Drawdown limits pick nothing here. `examples/mimic_drawdown.py` picks by drawdow
 
 ## The method
 
-1. **Search.** Start from the fit. Change two knobs at a time, every pair, and keep any setting with a lower score. Do up to 4 passes, and stop early when a pass gains 1e-6 or less. Do the same from 3 random starts, drawn with seed 0. Every backtest goes into one pool.
+1. **Search.** Start from the fit. Change two knobs at a time, every pair, and keep any setting with a lower score. Do up to 4 passes, and stop early when a pass gains 1e-6 or less. Do the same from 12 random starts, drawn with seed 0. Every backtest goes into one pool.
 2. **Rules on the pool.** A strategy with fewer than 20 trades on the short trail, or fewer than 30 on the long trail, is never kept. Strategies that make the same trades (same return, risk and trade count) are kept once.
 3. **Keep 100.** The 100 strategies with the lowest score.
 4. **Frontier.** On the long trail: sort the 100 by risk; a strategy is on the frontier when its return is higher than every strategy with lower or equal risk.
@@ -33,13 +33,13 @@ When few strategies are on the frontier, two picks can be the same strategy.
 
 ## Default settings
 
-The defaults are the search settings of AI Copy v5 (search configuration 5):
+The defaults are the search settings of AI Copy v5 (search configuration 5), except for 12 random starts where v5 has 3:
 
 | Setting | Default | Option |
 |---|---|---|
 | Strategies kept | 100 | `--count` |
 | Passes per start | 4 | `--passes` |
-| Random starts | 3, seed 0 | `--restarts` |
+| Random starts | 12, seed 0 | `--restarts` |
 | Fewest trades | 20 on the short trail, 30 on the long | `--min-trades`, `--min-long-trades` |
 | Weight on return | 0.0005 | `--weight` |
 | Long trail | 1 January 2025 to the first day of the current month; hard stop 0.85 | |
@@ -52,7 +52,7 @@ The defaults are the search settings of AI Copy v5 (search configuration 5):
 
 With the leverage cap, leverage knob values above the cap are dropped before the random starts are drawn, and the fit's leverage starts at the cap when it is higher.
 
-AI Copy v5 picks its three styles by drawdown limits (10%, 15%, 20%) and leverage lifts. This method keeps the v5 search settings above and picks off the frontier instead. Like v5, the long trail is the catalog window with the −15% stop-out. It does not take from v5: its fit window (at most 365 days, past outages plus 48 days), its per-market costs, its inputs, its goal (ρ − 50 × RMSE), the gates and the live-money checks.
+AI Copy v5 picks its three styles by drawdown limits (10%, 15%, 20%) and leverage lifts. This method keeps the v5 search settings above (with more random starts) and picks off the frontier instead. Like v5, the long trail is the catalog window with the −15% stop-out. It does not take from v5: its fit window (at most 365 days, past outages plus 48 days), its per-market costs, its inputs, its goal (ρ − 50 × RMSE), the gates and the live-money checks.
 
 `--by rmse` is the older method: every setting whose RMSE to the wallet's return is at most `--rmse` (default twice the fit's), from climbs for return minus λ × risk (`--lambdas`), then the highest return in each of 100 risk bins.
 
