@@ -291,3 +291,8 @@ def test_old_closes_caps_a_cached_liquidation(monkeypatch, tmp_path):
     row = {"gross": -33.33, "positionSize": 33.33, "usdcSent": 0, "closingFee": 9.999, "funding": 0}
     V.M.save_json(tmp_path / "wallet_0xA_v1.json", {"trades": [row]})
     assert V.old_closes("0xA")[0]["closingFee"] == pytest.approx(0)
+
+
+@pytest.mark.parametrize("text, want", [("1,234.5", 1234.5), ("0.0₅1", 0.000001), ("0.0₁₂3", 3e-13)])
+def test_basescan_amount_reads_subscript_zeros(text, want):
+    assert V.amount(text) == pytest.approx(want)

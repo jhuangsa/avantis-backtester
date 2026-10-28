@@ -208,8 +208,14 @@ def transfers(directory):
             out.append({"tx": td[1].get_text(strip=True).lower(), "t": int(td[7].get_text(strip=True)), "dir": way,
                         "method": td[2].get_text(strip=True),
                         "who": (who or [""])[0].lower(),
-                        "amt": float(td[11].get_text(" ", strip=True).split()[0].replace(",", ""))})
+                        "amt": amount(td[11].get_text(" ", strip=True).split()[0])})
     return out
+
+
+def amount(text):
+    """A BaseScan amount: "1,234.5", or "0.0₅1", 5 zeros after the point, then 1."""
+    sub = lambda m: "0" * int(m[1].translate(str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")))
+    return float(re.sub(r"0([₀-₉]+)", sub, text.replace(",", "")))
 
 
 def costs(rows, old, orphans, flows, live):
