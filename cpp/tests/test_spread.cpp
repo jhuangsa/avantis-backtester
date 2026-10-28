@@ -293,7 +293,8 @@ void test_liquidation() {
     // collateral = size*100.1/10 = 10.01*size.
     // liquidation = 100.1 - 0.85*10.01 = 100.1 - 8.5085 = 91.5915.
     // Bar 2 opens at 80, past the stop and the liquidation price: fills at 91.5915, no spread.
-    // result = -8.5085*size = -0.85*collateral; spread_cost = size*100*0.001 only.
+    // result = -collateral = -10.01*size: the liquidation fee takes the rest (ADR 0023);
+    // spread_cost = size*100*0.001 only.
     Bars b = bars({flat(100), flat(100), {80, 81, 79, 80}, flat(80)});
     Result r = go(b, {{0, {open_order(Side::Long, 0.05, kNan, 10.0)}}}, spread_costs({0.001}));
     if (!one_trade("liq", r)) return;
@@ -303,7 +304,7 @@ void test_liquidation() {
     check_value("liq entry", t.entry_price, 100.1);
     check_value("liq exit", t.exit_price, 91.5915);
     check_value("liq exit by formula", t.exit_price, 100.1 - 0.85 * (size * 100.1 / 10.0) / size);
-    check_value("liq result", t.result, -8.5085 * size);
+    check_value("liq result", t.result, -10.01 * size);
     check_value("liq spread_cost", t.spread_cost, 0.1 * size);
     check_identity("liq", t);
 }

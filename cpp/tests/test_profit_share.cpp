@@ -127,8 +127,9 @@ void test_liquidation_pays_nothing() {
     auto c = p.check({Quote{"BTC", 90.0, 90.0, 80.0, 85.0}});
     check_true("liquidated", c.size() == 1 && c[0].cause == Cause::Liquidation);
     if (c.size() != 1) return;
-    check_value("liquidation fee", c[0].fees, 0.0);
-    check_value("liquidation balance", p.report().balance, 9830.0);
+    // No profit share; the liquidation fee is the 30 the 170 loss leaves of 200. ADR 0023.
+    check_value("liquidation fee", c[0].fees, 30.0);
+    check_value("liquidation balance", p.report().balance, 9800.0);
 }
 
 // Holding is left out of the ROI. Receiving 20 at a 250% close would

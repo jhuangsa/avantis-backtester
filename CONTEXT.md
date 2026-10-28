@@ -131,7 +131,7 @@ One open trade in a portfolio: its instrument, side, size, collateral, stop, and
 The balance a position locks: its notional over its leverage. A trade whose collateral exceeds the free cash is skipped.
 
 **Liquidation**:
-The forced close once a position's loss reaches 85% of its collateral, the Veranta rule.
+The forced close once a position's loss reaches 85% of its collateral, the Veranta rule. A liquidation fee takes the rest, so it loses the whole collateral. See ADR 0023.
 
 **Strategy**:
 The C++ form of a trading idea: a struct that computes its lines once and, at the close of each bar, returns orders. It never opens or closes a position itself. See ADR 0009.

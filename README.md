@@ -195,6 +195,10 @@ The version has three numbers, such as 0.4.2. The engine and every result carry 
 - Adding something new raises the last number: 0.2.0 to 0.2.1.
 - Names stay stable within a version.
 
+Version 0.5.0:
+
+- A liquidation loses the whole collateral: a liquidation fee, the rest of the collateral, takes the place of the close fee (ADR 0023). `Trade.result` of a liquidation is minus the collateral and the open fee; `Trade.fees` includes the liquidation fee. Results with no liquidation are the same as in 0.4.3.
+
 Version 0.4.3:
 
 - `Costs` has a `profit_share` argument: a list of `(max_roi, share)` tiers, for venues such as Upside Perps that take a share of each winning close instead of a fee on size (ADR 0019). It defaults to none, and then results are the same as in 0.4.2. `Trade.fees` includes the profit share, and equity subtracts the share an open position would owe at its mark. `ValueError` is raised for tiers beside a non-zero `open_fee` or `close_fee`, a `max_roi` of 0 or less or not strictly increasing, a `share` outside [0, 1], or a value that is not finite.

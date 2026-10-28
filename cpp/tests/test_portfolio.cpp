@@ -110,8 +110,22 @@ void test_gap_past_liquidation() {
     Portfolio p = btc_long();
     auto closed = p.check({Quote{"BTC", 90.0, 90.0, 80.0, 85.0}});
     check_true("liquidation cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
-    // Loss capped at 0.85 of 200 collateral.
-    check_value("liquidation balance", p.report().balance, 9830.0);
+    // The loss is 0.85 of 200 collateral; the liquidation fee takes the rest. ADR 0023.
+    check_value("liquidation balance", p.report().balance, 9800.0);
+}
+
+void test_liquidation_fee_takes_the_rest() {
+    // 20 BTC at 100, collateral 200, open fee 2. The gap liquidates at a
+    // 170 loss; the liquidation fee is the other 30, in place of the close
+    // fee. The trade loses its collateral plus the open fee. ADR 0023.
+    Portfolio p(PortfolioSettings{});
+    p.open("BTC", Side::Long, 100.0, 95.0, 10.0, std::nan(""), Fees{.open = 0.001, .close = 0.001});
+    auto closed = p.check({Quote{"BTC", 90.0, 90.0, 80.0, 85.0}});
+    check_true("liq fee cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
+    if (closed.size() != 1) return;
+    check_value("liq fee fees", closed[0].fees, 32.0);
+    check_value("liq fee result", closed[0].result, -202.0);
+    check_value("liq fee balance", p.report().balance, 9798.0);
 }
 
 void test_mark_moves_equity() {
@@ -344,7 +358,7 @@ void test_spread_liquidation_has_none() {
     auto closed = p.check({Quote{"BTC", 50.0, 50.0, 50.0, 50.0, 0.04}});
     check_true("spread liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("spread liq exit", closed.at(0).exit_price, 59.8);
-    check_value("spread liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("spread liq loss", closed.at(0).result, -162.5);
     check_value("spread liq cost", closed.at(0).spread_cost, 12.5);
 }
 
@@ -425,7 +439,7 @@ void test_spread_stop_past_liquidation() {
     auto closed = p.check({Quote{"BTC", 80.0, 80.0, 70.0, 72.0, 0.25}});
     check_true("spread stop liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("spread stop liq exit", closed.at(0).exit_price, 59.8);
-    check_value("spread stop liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("spread stop liq loss", closed.at(0).result, -162.5);
     check_value("spread stop liq cost", closed.at(0).spread_cost, 12.5);
 }
 
@@ -436,7 +450,7 @@ void test_spread_gap_fill_past_liquidation() {
     auto closed = p.check({Quote{"BTC", 62.0, 62.0, 61.0, 61.5, 0.04}});
     check_true("spread gap liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("spread gap liq exit", closed.at(0).exit_price, 59.8);
-    check_value("spread gap liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("spread gap liq loss", closed.at(0).result, -162.5);
 }
 
 // Short from 100 at 2x, stop 125, spread 4%: fill 96, stop fill 130, so
@@ -451,7 +465,7 @@ void test_spread_short_stop_past_liquidation() {
     auto closed = p.check({Quote{"BTC", 120.0, 126.0, 120.0, 124.0, 0.1}});
     check_true("short stop liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("short stop liq exit", closed.at(0).exit_price, 136.8);
-    check_value("short stop liq loss", closed.at(0).result, -0.85 * collateral);
+    check_value("short stop liq loss", closed.at(0).result, -collateral);
 }
 
 // 100 units from 100 at 1x: liquidation 15. A bar to 70 with an 80% spread
@@ -462,7 +476,7 @@ void test_spread_hard_stop_past_liquidation() {
     auto closed = p.check({Quote{"BTC", 70.0, 70.0, 70.0, 70.0, 0.8}});
     check_true("hard stop liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("hard stop liq exit", closed.at(0).exit_price, 15.0);
-    check_value("hard stop liq loss", closed.at(0).result, -8500.0);
+    check_value("hard stop liq loss", closed.at(0).result, -10000.0);
     check_value("hard stop liq cost", closed.at(0).spread_cost, 0.0);
 }
 
@@ -473,7 +487,7 @@ void test_spread_close_order_past_liquidation() {
     auto closed = p.close("BTC", 62.0, 1.0, Cause::Order, 0.04);
     check_true("close liq cause", closed && closed->cause == Cause::Liquidation);
     check_value("close liq exit", closed->exit_price, 59.8);
-    check_value("close liq loss", closed->result, -0.85 * 162.5);
+    check_value("close liq loss", closed->result, -162.5);
     check_value("close liq cost", closed->spread_cost, 12.5);
 }
 
@@ -485,7 +499,7 @@ void test_spread_partial_past_liquidation() {
     check_true("partial liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("partial liq exit", closed.at(0).exit_price, 59.8);
     check_value("partial liq size", closed.at(0).size, 3.125);
-    check_value("partial liq loss", closed.at(0).result, -0.85 * 162.5);
+    check_value("partial liq loss", closed.at(0).result, -162.5);
     check_value("partial liq cost", closed.at(0).spread_cost, 12.5);
     check_true("partial liq: none left", p.positions().empty());
 }
@@ -499,7 +513,7 @@ void test_spread_short_partial_past_liquidation() {
     auto closed = p.check({Quote{"BTC", 95.0, 96.0, 85.0, 88.0, 0.6}});
     check_true("short partial liq cause", closed.size() == 1 && closed[0].cause == Cause::Liquidation);
     check_value("short partial liq exit", closed.at(0).exit_price, 136.8);
-    check_value("short partial liq loss", closed.at(0).result, -0.85 * collateral);
+    check_value("short partial liq loss", closed.at(0).result, -collateral);
     check_true("short partial liq: none left", p.positions().empty());
 }
 
@@ -515,6 +529,7 @@ int main() {
     test_stop_fills_at_stop();
     test_gap_past_stop_fills_at_open();
     test_gap_past_liquidation();
+    test_liquidation_fee_takes_the_rest();
     test_mark_moves_equity();
     test_hard_stop_counts_unrealized();
     test_hard_stop_holds_above_floor();

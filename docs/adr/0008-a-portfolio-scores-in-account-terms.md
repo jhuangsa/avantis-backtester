@@ -9,3 +9,5 @@ Sizing risks a fixed percent of the current balance at the stop. A trade is skip
 The strategy chooses the fee rate and the leverage; both are on its order. Leverage caps and partial exits also belong to the strategy. The portfolio stores the fee rate on the position and charges it at every fill, because a stop, a take profit, a liquidation, or the hard stop closes a position inside `Portfolio::check`, where no order exists.
 
 Note (ADR 0020): fills now pay a spread. The collateral, the 80% stop cap and the liquidation price use the fill price, and sizing counts the spread at both fills. Liquidation still fills at its level, with no spread.
+
+Note (ADR 0023): a liquidation also pays a liquidation fee, the rest of the collateral, in place of the close fee. It loses the whole collateral.

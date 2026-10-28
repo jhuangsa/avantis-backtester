@@ -98,6 +98,11 @@ std::optional<Closed> Portfolio::close(const std::string& instrument, double pri
     double open_fee = it->fees.open * size * it->entry_price;
     double holding = it->holding * fraction;
     double gross = direction(it->side) * (price - it->entry_price) * size;
+    // A liquidation's fee is what the loss leaves of the collateral: the
+    // trader gets nothing back. ADR 0023.
+    if (cause == Cause::Liquidation) {
+        close_fee = std::max(0.0, it->collateral + gross - holding);
+    }
     // Priced on this part's own ROI, before holding costs; 0 with no tiers. ADR 0019.
     double share = profit_share(it->fees.profit_share, gross, it->collateral * fraction);
     // The open fee left the balance at the open; the close fee and holding costs leave now.

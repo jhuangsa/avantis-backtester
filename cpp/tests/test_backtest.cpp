@@ -617,7 +617,7 @@ void check_liquidated(const std::string& label, const Result& r, double price, i
     check_true(label + ": cause", r.trades[0].cause == Cause::Liquidation);
     check_value(label + ": exit", r.trades[0].exit_price, price);
     check_value(label + ": exit bar", r.trades[0].exit_bar, bar);
-    check_value(label + ": loss", r.trades[0].result, -170.0);
+    check_value(label + ": loss", r.trades[0].result, -200.0);  // the whole collateral, ADR 0023
 }
 
 void test_close_order_past_liquidation() {

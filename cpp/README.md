@@ -61,7 +61,7 @@ Python loads and cleans the price data. C++ does every calculation. The Python e
 | Free cash | Balance minus all collateral: what a new trade can use. |
 | Fee | A charge at each fill, as a fraction of notional. 0.0001 is 1 basis point (one hundredth of one percent). |
 | Holding cost | A charge for keeping a position open through a bar, as a fraction of notional. It may be negative: the position then receives money. Funding and rollover are holding costs. |
-| Liquidation | The forced close of a position once its loss reaches 85% of its collateral. |
+| Liquidation | The forced close of a position once its loss reaches 85% of its collateral. A liquidation fee takes the rest of the collateral ([ADR 0023](../docs/adr/0023-a-liquidation-loses-the-whole-collateral.md)). |
 | Balance | Realized money: it changes only when a fill happens. |
 | Unrealized result | The profit or loss of an open position, valued at the last close. |
 | Mark | Valuing an open position at the latest close. A mark is not a fill and has no fee. |
@@ -470,7 +470,7 @@ Why a position closed.
 |---|---|
 | `Stop` | The price reached the stop (stop loss), and it had not moved. |
 | `TakeProfit` | The price reached the take profit. |
-| `Liquidation` | The loss reached 85% of the collateral. |
+| `Liquidation` | The loss reached 85% of the collateral. The trade loses the whole collateral: its fees hold the liquidation fee in place of the close fee. |
 | `HardStop` | Equity fell to the hard-stop floor. |
 | `EndOfData` | The market's data ended while the position was open. The backtest closes it at the last close. |
 | `TrailingStop` | The stop had trailed, and the price reached it. |
