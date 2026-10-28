@@ -32,8 +32,8 @@ sqrt(365): the same daily returns as mimic.daily_sharpe.
 
 The frontier is the kept strategies that no other kept one beats: none
 has lower or equal risk and a higher return. The risk levels are the
-10th, 50th and 90th percentiles of the kept strategies' risk. At each
-level the pick is the frontier strategy with the highest return at or
+40th, 50th and 70th percentiles of the kept strategies' risk
+(--percentiles). At each level the pick is the frontier strategy with the highest return at or
 under that risk: careful, balanced and bold. Drawdown limits pick
 nothing here (mimic_drawdown.py does that). See docs/mimic_frontier.md.
 
@@ -69,7 +69,7 @@ import pandas as pd
 import mimic as M
 
 HERE = Path(__file__).resolve().parent
-NAMES = {"careful": 10, "balanced": 50, "bold": 90}
+NAMES = {"careful": 40, "balanced": 50, "bold": 70}
 LONG_START = "2025-01-01"  # the long trail's first day: AI Copy v5's catalog window
 LONG_STOP = 0.85  # the long trail stops out at -15% of the start, as v5's catalog run does
 WEIGHT = 0.0005  # --weight: return breaks close calls on the gap; docs/mimic_frontier.md
@@ -243,9 +243,11 @@ def main():
     ap.add_argument("--budget", type=float, help="the account; default the fit's (10,000). Opens below a "
                     "market's min position are refused, so a small budget trades less. ADR 0022")
     ap.add_argument("--replay", action="store_true", help="redraw the page from the saved <fit>_frontier.json; no search")
+    ap.add_argument("--percentiles", default="40,50,70", help="careful, balanced and bold risk percentiles")
     ap.add_argument("--page", help="--by pnl: also write one page with a column per fit")
     ap.add_argument("--names", help="--page: the wallets' names, comma separated; default the addresses")
     args = ap.parse_args()
+    NAMES.update(zip(NAMES, map(int, args.percentiles.split(","))))
     if args.by == "rmse":
         return [by_rmse(args, Path(p)) for p in args.saved]
     panels = [by_pnl(args, Path(p)) for p in args.saved]

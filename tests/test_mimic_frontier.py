@@ -75,7 +75,7 @@ def test_picks_are_best_frontier_point_under_each_percentile():
         under = [x for x in front if x["risk"] <= level]
         assert p["risk"] <= level
         assert p["final"] == max(x["final"] for x in under)
-    assert [out[n]["final"] for n in ("careful", "balanced", "bold")] == [1, 6, 9]
+    assert [out[n]["final"] for n in ("careful", "balanced", "bold")] == [4, 6, 7]
 
 
 def test_pnl_gap_is_scale_free_and_floors_at_flat():

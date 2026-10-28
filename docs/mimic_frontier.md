@@ -24,10 +24,12 @@ Drawdown limits pick nothing here. `examples/mimic_drawdown.py` picks by drawdow
 2. **Rules on the pool.** A strategy with fewer than 20 trades on the short trail, or fewer than 30 on the long trail, is never kept. Strategies that make the same trades (same return, risk and trade count) are kept once.
 3. **Keep 100.** The 100 strategies with the lowest score.
 4. **Frontier.** On the long trail: sort the 100 by risk; a strategy is on the frontier when its return is higher than every strategy with lower or equal risk.
-5. **Pick.** Take the 10th, 50th and 90th percentiles of the 100 strategies' risk. At each, the pick is the frontier strategy with the highest return at or under that risk:
-   - **careful**: the 10th percentile,
+5. **Pick.** Take the 40th, 50th and 70th percentiles of the 100 strategies' risk. At each, the pick is the frontier strategy with the highest return at or under that risk:
+   - **careful**: the 40th percentile,
    - **balanced**: the 50th,
-   - **bold**: the 90th.
+   - **bold**: the 70th.
+
+   `--percentiles` sets other levels, for example `--percentiles 10,50,90`.
 
 When few strategies are on the frontier, two picks can be the same strategy.
 
